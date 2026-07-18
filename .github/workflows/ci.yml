@@ -8,10 +8,10 @@ on:
   pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -27,13 +27,30 @@ jobs:
         run: npm install --ignore-scripts --no-audit --no-fund
         env:
           NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
-      - name: Upload regenerated public lockfile
+      - name: Commit regenerated public lockfile on feature branch
+        if: github.event_name == 'push' && github.ref_name == 'work/onedrive-write-images'
+        run: |
+          git add package-lock.json
+          if ! git diff --cached --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "Regenerate package lock from public npm registry"
+            git push origin HEAD:${{ github.ref_name }}
+          fi
+      - name: Type check
+        id: typecheck
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run type-check 2>&1 | tee typecheck.log
+      - name: Upload type-check diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: public-package-lock
-          path: package-lock.json
+          name: typecheck-diagnostics-${{ github.event_name }}
+          path: typecheck.log
+          if-no-files-found: ignore
           retention-days: 1
-      - run: npm run type-check
       - run: npm test
       - run: npm audit --audit-level=high
       - name: Dry-run Worker bundle with non-secret test placeholders
