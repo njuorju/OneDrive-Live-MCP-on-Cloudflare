@@ -69,7 +69,7 @@ describe("OAuth authorization hardening", () => {
     try {
       await assert.rejects(getGraphAccessToken(env, "owner"), (error: unknown) => {
         assert.ok(error instanceof Error);
-        assert.match(error.message, /Reconnect the ChatGPT app/);
+        assert.match(error.message, /reconnect the ChatGPT app/i);
         assert.doesNotMatch(error.message, /UPSTREAM SECRET DETAIL|refresh-token|raw-upstream/);
         return true;
       });
