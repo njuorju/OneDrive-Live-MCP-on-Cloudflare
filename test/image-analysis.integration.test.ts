@@ -39,9 +39,9 @@ async function makeEnv(
     transform() {
       return this;
     },
-    output() {
+    async output() {
       return {
-        response: async () => new Response(PNG, { headers: { "Content-Type": "image/png" } }),
+        response: () => new Response(PNG, { headers: { "Content-Type": "image/png" } }),
       };
     },
   };
