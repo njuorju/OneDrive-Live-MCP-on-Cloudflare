@@ -60,6 +60,8 @@ export const CONVERTIBLE_IMAGE_EXTENSIONS = new Set([
 export const VISUAL_EXTENSIONS = new Set([...DIRECT_IMAGE_EXTENSIONS, ...CONVERTIBLE_IMAGE_EXTENSIONS]);
 export const ORIGINAL_FILE_EXTENSIONS = new Set(Object.keys(MIME_BY_EXTENSION));
 
+const OFFICE_EXTENSIONS = new Set([".pptx", ".potx", ".docx", ".xlsx"]);
+
 export function extensionOf(name: string): string {
   const index = name.lastIndexOf(".");
   return index >= 0 ? name.slice(index).toLocaleLowerCase("en") : "";
@@ -82,6 +84,18 @@ function ascii(bytes: Uint8Array, start: number, length: number): string {
   return new TextDecoder("ascii", { fatal: false }).decode(bytes.slice(start, start + length));
 }
 
+function containsAscii(bytes: Uint8Array, value: string): boolean {
+  const needle = new TextEncoder().encode(value);
+  if (needle.length === 0 || bytes.length < needle.length) return false;
+  outer: for (let index = 0; index <= bytes.length - needle.length; index += 1) {
+    for (let offset = 0; offset < needle.length; offset += 1) {
+      if (bytes[index + offset] !== needle[offset]) continue outer;
+    }
+    return true;
+  }
+  return false;
+}
+
 function looksLikeUtf8Text(bytes: Uint8Array): boolean {
   const sample = bytes.slice(0, Math.min(bytes.length, 4096));
   if (sample.some((value) => value === 0)) return false;
@@ -91,6 +105,60 @@ function looksLikeUtf8Text(bytes: Uint8Array): boolean {
   } catch {
     return false;
   }
+}
+
+function officePackageMatches(extension: string, bytes: Uint8Array): boolean {
+  if (!containsAscii(bytes, "[Content_Types].xml")) return false;
+  if (extension === ".pptx" || extension === ".potx") {
+    return containsAscii(bytes, "ppt/presentation.xml");
+  }
+  if (extension === ".docx") return containsAscii(bytes, "word/document.xml");
+  if (extension === ".xlsx") return containsAscii(bytes, "xl/workbook.xml");
+  return false;
+}
+
+function canonicalUpstreamMime(value: string): string {
+  const mime = value.split(";", 1)[0].trim().toLocaleLowerCase("en");
+  if (mime === "image/jpg" || mime === "image/pjpeg") return "image/jpeg";
+  if (mime === "image/x-png") return "image/png";
+  if (mime === "image/x-tiff") return "image/tiff";
+  if (mime === "application/x-pdf") return "application/pdf";
+  return mime;
+}
+
+function upstreamMimeCompatible(
+  extension: string,
+  expected: string,
+  graphMime?: string | null,
+): boolean {
+  const upstream = canonicalUpstreamMime(String(graphMime ?? ""));
+  if (!upstream || upstream === "application/octet-stream" || upstream === "binary/octet-stream") {
+    return true;
+  }
+  if (upstream === expected) return true;
+  if ((extension === ".heic" || extension === ".heif") && (upstream === "image/heic" || upstream === "image/heif")) {
+    return true;
+  }
+  if (OFFICE_EXTENSIONS.has(extension) && (upstream === "application/zip" || upstream === "application/x-zip-compressed")) {
+    return true;
+  }
+  if (TEXT_EXTENSIONS.has(extension)) {
+    if (upstream.startsWith("text/")) return true;
+    if ([
+      "application/json",
+      "application/xml",
+      "application/yaml",
+      "application/x-yaml",
+      "application/toml",
+      "application/sql",
+      "application/javascript",
+      "application/typescript",
+      "application/x-sh",
+    ].includes(upstream)) return true;
+    if (extension === ".csv" && upstream === "application/vnd.ms-excel") return true;
+  }
+  if (extension === ".svg" && upstream === "text/plain") return true;
+  return false;
 }
 
 export type SignatureResult = {
@@ -107,8 +175,15 @@ export function validateFileSignature(
   const extension = extensionOf(filename);
   const bytes = new Uint8Array(buffer);
   const mime = normalizedMimeType(filename, graphMime);
-  let detected = "unknown";
+  if (!upstreamMimeCompatible(extension, mime, graphMime)) {
+    return {
+      detected: "upstream-mime-conflict",
+      compatible: false,
+      reason: `File extension indicates ${mime}, but Microsoft metadata indicates ${canonicalUpstreamMime(String(graphMime))}.`,
+    };
+  }
 
+  let detected = "unknown";
   if (startsWith(bytes, [0xff, 0xd8, 0xff])) detected = "image/jpeg";
   else if (startsWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) detected = "image/png";
   else if (ascii(bytes, 0, 6) === "GIF87a" || ascii(bytes, 0, 6) === "GIF89a") detected = "image/gif";
@@ -116,22 +191,30 @@ export function validateFileSignature(
   else if (startsWith(bytes, [0x42, 0x4d])) detected = "image/bmp";
   else if (startsWith(bytes, [0x49, 0x49, 0x2a, 0x00]) || startsWith(bytes, [0x4d, 0x4d, 0x00, 0x2a])) detected = "image/tiff";
   else if (startsWith(bytes, [0x49, 0x49, 0x2b, 0x00]) || startsWith(bytes, [0x4d, 0x4d, 0x00, 0x2b])) detected = "image/tiff";
-  else if (ascii(bytes, 4, 4) === "ftyp" && /hei[cfx]|mif1|msf1/i.test(ascii(bytes, 8, 16))) detected = "image/heif";
+  else if (
+    ascii(bytes, 4, 4) === "ftyp" &&
+    /(heic|heix|hevc|hevx|heim|heis|hevm|hevs|mif1|msf1)/i.test(ascii(bytes, 8, 24))
+  ) detected = "image/heif";
   else if (startsWith(bytes, [0x25, 0x50, 0x44, 0x46, 0x2d])) detected = "application/pdf";
   else if (startsWith(bytes, [0x50, 0x4b, 0x03, 0x04])) detected = "application/zip";
-  else if (startsWith(bytes, [0xd7, 0xcd, 0xc6, 0x9a])) detected = "image/wmf";
+  else if (
+    startsWith(bytes, [0xd7, 0xcd, 0xc6, 0x9a]) ||
+    startsWith(bytes, [0x01, 0x00, 0x09, 0x00]) ||
+    startsWith(bytes, [0x02, 0x00, 0x09, 0x00])
+  ) detected = "image/wmf";
   else if (bytes.length >= 44 && startsWith(bytes, [0x01, 0x00, 0x00, 0x00]) && ascii(bytes, 40, 4) === " EMF") detected = "image/emf";
   else if (looksLikeUtf8Text(bytes)) {
-    const prefix = new TextDecoder("utf-8", { fatal: false }).decode(bytes.slice(0, Math.min(bytes.length, 4096))).trimStart();
+    const prefix = new TextDecoder("utf-8", { fatal: false })
+      .decode(bytes.slice(0, Math.min(bytes.length, 4096)))
+      .trimStart();
     detected = /^(?:<\?xml[^>]*>\s*)?<svg\b/i.test(prefix) ? "image/svg+xml" : "text/plain";
   }
 
-  const zipOffice = new Set([".pptx", ".potx", ".docx", ".xlsx"]);
   const compatible =
-    (mime === detected) ||
+    mime === detected ||
     (mime === "image/heic" && detected === "image/heif") ||
     (mime === "image/heif" && detected === "image/heif") ||
-    (zipOffice.has(extension) && detected === "application/zip") ||
+    (OFFICE_EXTENSIONS.has(extension) && detected === "application/zip" && officePackageMatches(extension, bytes)) ||
     (TEXT_EXTENSIONS.has(extension) && detected === "text/plain");
 
   return compatible
