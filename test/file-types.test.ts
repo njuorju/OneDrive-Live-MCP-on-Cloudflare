@@ -12,6 +12,15 @@ function bytes(values: number[]): ArrayBuffer {
   return Uint8Array.from(values).buffer;
 }
 
+function zipPackage(...names: string[]): ArrayBuffer {
+  const prefix = Uint8Array.from([0x50, 0x4b, 0x03, 0x04]);
+  const labels = new TextEncoder().encode(names.join("\0"));
+  const result = new Uint8Array(prefix.length + labels.length);
+  result.set(prefix);
+  result.set(labels, prefix.length);
+  return result.buffer;
+}
+
 describe("file type policy", () => {
   it("allowlists required originals", () => {
     for (const name of ["photo.jpg", "map.png", "deck.pptx", "template.potx", "doc.docx", "sheet.xlsx", "data.csv", "code.ts"]) {
@@ -42,9 +51,37 @@ describe("file type policy", () => {
     assert.match(result.reason ?? "", /signature indicates image\/jpeg/);
   });
 
-  it("accepts Office Open XML ZIP signatures", () => {
-    assert.equal(validateFileSignature("slides.pptx", bytes([0x50, 0x4b, 0x03, 0x04])).compatible, true);
-    assert.equal(validateFileSignature("template.potx", bytes([0x50, 0x4b, 0x03, 0x04])).compatible, true);
+  it("rejects a material Microsoft MIME mismatch", () => {
+    const result = validateFileSignature(
+      "fake.png",
+      bytes([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      "application/pdf",
+    );
+    assert.equal(result.compatible, false);
+    assert.match(result.reason ?? "", /Microsoft metadata indicates application\/pdf/);
+  });
+
+  it("accepts Office Open XML packages only when expected package entries exist", () => {
+    const presentation = zipPackage("[Content_Types].xml", "ppt/presentation.xml");
+    assert.equal(validateFileSignature("slides.pptx", presentation).compatible, true);
+    assert.equal(validateFileSignature("template.potx", presentation).compatible, true);
+    assert.equal(validateFileSignature("slides.pptx", zipPackage("random.bin")).compatible, false);
+    assert.equal(
+      validateFileSignature("document.docx", zipPackage("[Content_Types].xml", "word/document.xml")).compatible,
+      true,
+    );
+    assert.equal(
+      validateFileSignature("sheet.xlsx", zipPackage("[Content_Types].xml", "xl/workbook.xml")).compatible,
+      true,
+    );
+  });
+
+  it("recognizes common HEIF and WMF signatures", () => {
+    const hevc = new Uint8Array(32);
+    hevc.set(new TextEncoder().encode("ftyp"), 4);
+    hevc.set(new TextEncoder().encode("hevc"), 8);
+    assert.equal(validateFileSignature("photo.heif", hevc.buffer).compatible, true);
+    assert.equal(validateFileSignature("drawing.wmf", bytes([0x01, 0x00, 0x09, 0x00, 0x00, 0x03])).compatible, true);
   });
 
   it("normalizes MIME from the allowlisted extension rather than an untrusted upstream value", () => {
