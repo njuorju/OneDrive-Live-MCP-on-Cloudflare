@@ -23,18 +23,13 @@ export {
 } from "./graph-core";
 
 export {
-  createFolder,
-  createTextFile,
   fetchImageForAnalysis,
   getConnectionStatus,
   getImageMetadata,
   listAllowedFolder,
   listVisualAssets,
-  moveItem,
   readAllowedFile,
   readiness,
-  renameItem,
-  replaceTextFile,
   searchAllowedRoot,
 } from "./onedrive-files";
 
@@ -42,3 +37,11 @@ export {
   fetchOriginalFileResource as fetchOriginalFile,
   readOriginalFileResource as readOriginalResource,
 } from "./original-resource";
+
+export {
+  createFolderStrict as createFolder,
+  createTextFileStrict as createTextFile,
+  moveItemStrict as moveItem,
+  renameItemStrict as renameItem,
+  replaceTextFileStrict as replaceTextFile,
+} from "./write-operations";
