@@ -1,0 +1,96 @@
+name: Apply Images binding fix
+
+on:
+  push:
+    branches:
+      - work/onedrive-write-images
+    paths:
+      - .github/workflows/apply-image-binding-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: work/onedrive-write-images
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
+          cache: npm
+      - name: Apply production Images binding contract fix
+        shell: python
+        run: |
+          from pathlib import Path
+
+          source = Path("src/onedrive-files.ts")
+          text = source.read_text(encoding="utf-8")
+          old = '''  const response = await withTimeout(
+              Promise.resolve(transformed.output({ format: "image/png", anim: false }).response()),
+              config.imageProcessingTimeoutMs,
+            ) as Response;
+            const preview = await response.arrayBuffer();
+          '''
+          new = '''  const output = await withTimeout(
+              Promise.resolve(transformed.output({ format: "image/png", anim: false })),
+              config.imageProcessingTimeoutMs,
+            );
+            const response = output.response();
+            const preview = await withTimeout(
+              response.arrayBuffer(),
+              config.imageProcessingTimeoutMs,
+            );
+          '''
+          if old not in text:
+              raise SystemExit("Expected Images output block was not found")
+          source.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          test = Path("test/image-analysis.integration.test.ts")
+          text = test.read_text(encoding="utf-8")
+          old = '''    output() {
+                return {
+                  response: async () => new Response(PNG, { headers: { "Content-Type": "image/png" } }),
+                };
+              },
+          '''
+          new = '''    async output() {
+                return {
+                  response: () => new Response(PNG, { headers: { "Content-Type": "image/png" } }),
+                };
+              },
+          '''
+          if old not in text:
+              raise SystemExit("Expected synchronous Images mock was not found")
+          test.write_text(text.replace(old, new, 1), encoding="utf-8")
+      - name: Install pinned dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+      - name: Type check
+        run: npm run type-check
+      - name: Test
+        run: npm test
+      - name: Audit
+        run: npm audit --audit-level=high
+      - name: Dry-run Worker bundle
+        shell: bash
+        run: |
+          cp wrangler.jsonc wrangler.fix.jsonc
+          sed -i 's/REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER/FIX_TEST_ROOT/g' wrangler.fix.jsonc
+          sed -i 's/REPLACE_WITH_KV_NAMESPACE_ID/00000000000000000000000000000000/g' wrangler.fix.jsonc
+          npx wrangler deploy --dry-run --config wrangler.fix.jsonc --outdir dist-fix
+      - name: Commit validated correction and remove one-use workflow
+        shell: bash
+        run: |
+          rm .github/workflows/apply-image-binding-fix.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/onedrive-files.ts test/image-analysis.integration.test.ts .github/workflows/apply-image-binding-fix.yml
+          git commit -m "fix: await Cloudflare Images output before response"
+          git push origin HEAD:work/onedrive-write-images
