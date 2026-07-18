@@ -302,7 +302,7 @@ app.get("/ready", async (c: any) => {
     if (!bindingsPresent) throw new ConnectorError("binding_missing", "A required Worker binding is missing.");
     if (!(await authStateReady(c.env))) throw new ConnectorError("auth_state_unavailable", "OAuth state storage is unavailable.", { retryable: true });
     const graph = await readiness(c.env, c.env.OWNER_MICROSOFT_ID);
-    return c.json({ ready: true, bindings: true, authState: true, ...graph });
+    return c.json({ bindings: true, authState: true, ...graph });
   } catch (error) {
     const safe = asConnectorError(error);
     logSafeError("readiness_failed", safe);
