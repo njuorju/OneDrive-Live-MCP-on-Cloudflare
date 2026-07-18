@@ -2,6 +2,7 @@ export {
   GRAPH_ROOT,
   MICROSOFT_SCOPES,
   REQUIRED_GRAPH_SCOPE,
+  TOKEN_ENDPOINT,
   compactVerifiedItem,
   downloadVerifiedItem,
   getGraphAccessToken,
