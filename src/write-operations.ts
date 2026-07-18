@@ -107,7 +107,7 @@ export async function createTextFileStrict(
   const created = await graphFetch<GraphDriveItem>(
     env,
     userId,
-    `/me/drive/items/${encodeURIComponent(currentDestination.item.id)}:/${encodeURIComponent(safeName)}:/content`,
+    `/me/drive/items/${encodeURIComponent(currentDestination.item.id)}:/${encodeURIComponent(safeName)}:/content?%40microsoft.graph.conflictBehavior=fail`,
     {
       method: "PUT",
       headers: {
