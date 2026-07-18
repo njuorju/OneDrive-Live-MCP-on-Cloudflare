@@ -7,6 +7,9 @@ on:
       - work/onedrive-write-images
     paths:
       - .github/workflows/apply-image-binding-fix.yml
+  pull_request:
+    types:
+      - edited
 
 permissions:
   contents: write
