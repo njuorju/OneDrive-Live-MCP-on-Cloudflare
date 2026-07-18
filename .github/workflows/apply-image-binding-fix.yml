@@ -1,6 +1,7 @@
 name: Apply Images binding fix
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - work/onedrive-write-images
