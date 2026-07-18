@@ -340,11 +340,15 @@ export async function fetchImageForAnalysis(
   const transformed = Math.max(inspected.width, inspected.height) > target
     ? input.transform({ width: target, height: target, fit: "scale-down" })
     : input;
-  const response = await withTimeout(
-    Promise.resolve(transformed.output({ format: "image/png", anim: false }).response()),
+  const output = await withTimeout(
+    Promise.resolve(transformed.output({ format: "image/png", anim: false })),
     config.imageProcessingTimeoutMs,
-  ) as Response;
-  const preview = await response.arrayBuffer();
+  );
+  const response = output.response();
+  const preview = await withTimeout(
+    response.arrayBuffer(),
+    config.imageProcessingTimeoutMs,
+  );
   const previewSignature = validateFileSignature("preview.png", preview, "image/png");
   if (!previewSignature.compatible) throw new ConnectorError("preview_invalid", "The generated analysis preview is invalid.");
   return {
