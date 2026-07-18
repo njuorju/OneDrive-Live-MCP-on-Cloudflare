@@ -95,3 +95,5 @@ jobs:
           git add src/onedrive-files.ts test/image-analysis.integration.test.ts .github/workflows/apply-image-binding-fix.yml
           git commit -m "fix: await Cloudflare Images output before response"
           git push origin HEAD:work/onedrive-write-images
+
+# Triggered intentionally for the production preview repair.
