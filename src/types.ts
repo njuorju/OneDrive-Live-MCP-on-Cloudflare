@@ -15,24 +15,24 @@ export type GraphDriveItem = {
   id: string;
   name: string;
   size?: number;
-  webUrl?: string;
   eTag?: string;
   cTag?: string;
   lastModifiedDateTime?: string;
-  file?: { mimeType?: string };
+  file?: {
+    mimeType?: string;
+    hashes?: { quickXorHash?: string; sha1Hash?: string; sha256Hash?: string };
+  };
   folder?: { childCount?: number };
+  package?: Record<string, unknown>;
+  image?: { width?: number; height?: number };
+  photo?: { orientation?: number };
   parentReference?: {
     path?: string;
     driveId?: string;
     id?: string;
   };
-  remoteItem?: GraphDriveItem & {
-    parentReference?: {
-      path?: string;
-      driveId?: string;
-      id?: string;
-    };
-  };
+  remoteItem?: GraphDriveItem;
+  deleted?: Record<string, unknown>;
 };
 
 export type GraphCollection<T> = {
@@ -45,4 +45,32 @@ export type MicrosoftProfile = {
   displayName?: string;
   mail?: string | null;
   userPrincipalName?: string | null;
+};
+
+export type CompactItem = {
+  itemId: string;
+  filename: string;
+  relativePath: string;
+  type: "file" | "folder";
+  mimeType: string | null;
+  extension: string;
+  byteSize: number | null;
+  modifiedDate: string | null;
+  eTag: string | null;
+};
+
+export type VisualAsset = CompactItem & {
+  width: number | null;
+  height: number | null;
+  orientation: "landscape" | "portrait" | "square" | "unknown";
+  directlyAnalysable: boolean;
+  conversionRequired: boolean;
+  originalFetchAvailable: boolean;
+};
+
+export type ImageMetadata = VisualAsset & {
+  animated: boolean | null;
+  pageCount: number | null;
+  exifOrientationCorrectionNeeded: boolean;
+  convertedPreviewAvailable: boolean;
 };
