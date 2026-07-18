@@ -1,0 +1,266 @@
+name: Deploy OneDrive image fix once
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: deploy-onedrive-image-fix-once
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || secrets.CF_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      WORKER_NAME: nikolay-onedrive-mcp
+      EXPECTED_SOURCE_SHA: b6a35bba20688e26fe053d99a7d7d6b13958e853
+      CURRENT_VERSION_ID: 908cc41f-9203-4aba-9fc8-ed0d95c1b5ac
+      FIX_TAG: image-output-fix-b6a35bba
+      WORKER_URL: https://nikolay-onedrive-mcp.fdas201290.workers.dev
+    steps:
+      - name: Check out exact fix commit
+        uses: actions/checkout@v4
+        with:
+          ref: b6a35bba20688e26fe053d99a7d7d6b13958e853
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
+          cache: npm
+
+      - name: Validate, upload, deploy, and health-check
+        id: deployment
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          : > /tmp/deploy.log
+          exec > >(tee -a /tmp/deploy.log) 2>&1
+
+          if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+            echo "CLOUDFLARE_API_TOKEN/CF_API_TOKEN is not configured in repository secrets."
+            exit 20
+          fi
+
+          actual_sha="$(git rev-parse HEAD)"
+          [[ "$actual_sha" == "$EXPECTED_SOURCE_SHA" ]] || {
+            echo "Exact source SHA mismatch."
+            exit 21
+          }
+
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run type-check
+          npm test
+          npm audit --audit-level=high
+
+          cp wrangler.jsonc wrangler.ci.jsonc
+          sed -i 's/REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER/CI_TEST_ROOT/g' wrangler.ci.jsonc
+          sed -i 's/REPLACE_WITH_KV_NAMESPACE_ID/00000000000000000000000000000000/g' wrangler.ci.jsonc
+          npx wrangler deploy --dry-run --config wrangler.ci.jsonc --outdir dist-check
+
+          mkdir -p .deploy
+          printf '{"name":"%s"}\n' "$WORKER_NAME" > .deploy/lookup.json
+
+          npx wrangler deployments status \
+            --name "$WORKER_NAME" \
+            --config .deploy/lookup.json \
+            --json > .deploy/status.json
+
+          node <<'NODE'
+          import fs from 'node:fs';
+          const status = JSON.parse(fs.readFileSync('.deploy/status.json', 'utf8'));
+          const expected = process.env.CURRENT_VERSION_ID;
+          const text = JSON.stringify(status);
+          if (!text.includes(expected)) {
+            throw new Error('Production no longer points at the expected pre-fix version; refusing a racing deployment.');
+          }
+          NODE
+
+          npx wrangler versions view "$CURRENT_VERSION_ID" \
+            --name "$WORKER_NAME" \
+            --config .deploy/lookup.json \
+            --json > .deploy/current-version.json
+
+          node <<'NODE'
+          import fs from 'node:fs';
+          const version = JSON.parse(fs.readFileSync('.deploy/current-version.json', 'utf8'));
+          const bindings = version?.resources?.bindings;
+          if (!Array.isArray(bindings)) throw new Error('Current version bindings were not returned.');
+
+          const find = (type, name) => bindings.find((b) => b?.type === type && b?.name === name);
+          const kv = find('kv_namespace', 'OAUTH_KV');
+          if (!kv?.namespace_id) throw new Error('OAUTH_KV namespace ID is unavailable.');
+
+          const required = [
+            ['ai', 'AI'],
+            ['images', 'IMAGES'],
+            ['durable_object_namespace', 'MCP_OBJECT'],
+            ['durable_object_namespace', 'AUTH_STATE'],
+            ['secret_text', 'MICROSOFT_CLIENT_ID'],
+            ['secret_text', 'MICROSOFT_CLIENT_SECRET'],
+            ['secret_text', 'COOKIE_ENCRYPTION_KEY'],
+            ['plain_text', 'ONEDRIVE_ROOT'],
+            ['plain_text', 'OWNER_MICROSOFT_ID'],
+          ];
+          for (const [type, name] of required) {
+            if (!find(type, name)) throw new Error(`Required live binding missing: ${type}:${name}`);
+          }
+
+          const config = {
+            $schema: '../node_modules/wrangler/config-schema.json',
+            name: process.env.WORKER_NAME,
+            main: '../src/index.ts',
+            compatibility_date: '2026-07-13',
+            compatibility_flags: ['nodejs_compat'],
+            keep_vars: true,
+            migrations: [
+              { new_sqlite_classes: ['OneDriveMCP'], tag: 'v1' },
+              { new_sqlite_classes: ['AuthState'], tag: 'v2' },
+            ],
+            durable_objects: {
+              bindings: [
+                { class_name: 'OneDriveMCP', name: 'MCP_OBJECT' },
+                { class_name: 'AuthState', name: 'AUTH_STATE' },
+              ],
+            },
+            kv_namespaces: [{ binding: 'OAUTH_KV', id: kv.namespace_id }],
+            ai: { binding: 'AI' },
+            images: { binding: 'IMAGES' },
+            observability: { enabled: true },
+          };
+          fs.writeFileSync('.deploy/wrangler.deploy.json', JSON.stringify(config, null, 2));
+          NODE
+
+          npx wrangler versions upload \
+            --config .deploy/wrangler.deploy.json \
+            --keep-vars \
+            --strict \
+            --tag "$FIX_TAG" \
+            --message "Await Cloudflare Images output before response ($EXPECTED_SOURCE_SHA)"
+
+          npx wrangler versions list \
+            --name "$WORKER_NAME" \
+            --config .deploy/lookup.json \
+            --json > .deploy/versions.json
+
+          new_version_id="$(node <<'NODE'
+          import fs from 'node:fs';
+          const versions = JSON.parse(fs.readFileSync('.deploy/versions.json', 'utf8'));
+          const tag = process.env.FIX_TAG;
+          const found = versions.find((v) => v?.annotations?.['workers/tag'] === tag);
+          if (!found?.id) process.exit(2);
+          process.stdout.write(found.id);
+          NODE
+          )"
+          [[ "$new_version_id" =~ ^[0-9a-f-]{36}$ ]] || {
+            echo "Could not resolve the newly uploaded Worker version."
+            exit 22
+          }
+
+          npx wrangler versions deploy "$new_version_id@100%" \
+            --name "$WORKER_NAME" \
+            --config .deploy/lookup.json \
+            --message "Deploy Images output-await fix from $EXPECTED_SOURCE_SHA" \
+            -y
+
+          rollback() {
+            echo "Health check failed; rolling back to $CURRENT_VERSION_ID."
+            npx wrangler versions deploy "$CURRENT_VERSION_ID@100%" \
+              --name "$WORKER_NAME" \
+              --config .deploy/lookup.json \
+              --message "Automatic rollback after failed image-fix health check" \
+              -y || true
+          }
+
+          health_ok=false
+          for attempt in 1 2 3 4 5; do
+            if curl --fail --silent --show-error --max-time 20 "$WORKER_URL/health" > .deploy/health.json; then
+              if node -e "const x=require('./.deploy/health.json'); process.exit(x.ok===true?0:1)"; then
+                health_ok=true
+                break
+              fi
+            fi
+            sleep 6
+          done
+
+          if [[ "$health_ok" != true ]]; then
+            rollback
+            exit 23
+          fi
+
+          npx wrangler deployments status \
+            --name "$WORKER_NAME" \
+            --config .deploy/lookup.json \
+            --json > .deploy/final-status.json
+
+          NEW_VERSION_ID="$new_version_id" node <<'NODE'
+          import fs from 'node:fs';
+          const status = JSON.parse(fs.readFileSync('.deploy/final-status.json', 'utf8'));
+          const id = process.env.NEW_VERSION_ID;
+          if (!JSON.stringify(status).includes(id)) {
+            throw new Error('The final deployment status does not include the uploaded version.');
+          }
+          const body = [
+            '## Image preview fix deployed',
+            '',
+            `- Source commit: \`${process.env.EXPECTED_SOURCE_SHA}\``,
+            `- Worker version: \`${id}\``,
+            '- Traffic: 100%',
+            `- Previous production version: \`${process.env.CURRENT_VERSION_ID}\``,
+            '- `/health`: PASS',
+            '- Durable Object migrations: unchanged (`v1` / `v2`)',
+            '- PR remains draft and unmerged.',
+          ].join('\n');
+          fs.writeFileSync('/tmp/deployment-summary.md', body);
+          NODE
+
+      - name: Report result to PR
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STEP_OUTCOME: ${{ steps.deployment.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f /tmp/deployment-summary.md ]]; then
+            cp /tmp/deployment-summary.md /tmp/pr-comment.md
+          else
+            {
+              echo "## Image preview fix deployment did not complete"
+              echo
+              echo "- Source commit: \`$EXPECTED_SOURCE_SHA\`"
+              echo "- Workflow outcome: \`$STEP_OUTCOME\`"
+              echo "- Production was either unchanged or automatically rolled back to \`$CURRENT_VERSION_ID\`."
+              echo "- Inspect the one-shot workflow log for the bounded failure reason."
+            } > /tmp/pr-comment.md
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/issues/1/comments" --input <(node -e "const fs=require('fs'); console.log(JSON.stringify({body:fs.readFileSync('/tmp/pr-comment.md','utf8')}))")
+
+      - name: Remove one-shot workflow
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git switch -C main origin/main
+          rm -f .github/workflows/deploy-image-fix-once.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/deploy-image-fix-once.yml
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: remove one-shot image-fix deploy workflow"
+            git push origin main
+          fi
+
+      - name: Fail workflow when deployment failed
+        if: steps.deployment.outcome != 'success'
+        run: exit 1
