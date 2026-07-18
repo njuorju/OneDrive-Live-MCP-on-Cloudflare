@@ -97,3 +97,4 @@ jobs:
           git push origin HEAD:work/onedrive-write-images
 
 # Triggered intentionally for the production preview repair.
+# Triggered through an explicit Git ref update.
