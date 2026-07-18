@@ -1,6 +1,6 @@
 {
   "name": "cloudflare-onedrive-live-mcp",
-  "version": "0.3.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Root-scoped remote MCP server for live OneDrive reading, visual analysis, exact-file retrieval, and bounded text/folder writes through Cloudflare Workers.",
   "type": "module",
