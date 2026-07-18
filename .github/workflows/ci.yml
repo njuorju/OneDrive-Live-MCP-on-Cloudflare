@@ -8,7 +8,7 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
@@ -23,35 +23,31 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22.18.0"
-      - name: Install from the public npm registry and regenerate lockfile
-        run: npm install --ignore-scripts --no-audit --no-fund
+          cache: npm
+      - name: Install pinned dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
         env:
           NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
-      - name: Commit regenerated public lockfile on feature branch
-        if: github.event_name == 'push' && github.ref_name == 'work/onedrive-write-images'
-        run: |
-          git add package-lock.json
-          if ! git diff --cached --quiet; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "Regenerate package lock from public npm registry"
-            git push origin HEAD:${{ github.ref_name }}
-          fi
       - name: Type check
-        id: typecheck
         shell: bash
         run: |
           set -o pipefail
           npm run type-check 2>&1 | tee typecheck.log
-      - name: Upload type-check diagnostics
+      - name: Test
+        shell: bash
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test.log
+      - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: typecheck-diagnostics-${{ github.event_name }}
-          path: typecheck.log
+          name: ci-diagnostics-${{ github.event_name }}
+          path: |
+            typecheck.log
+            test.log
           if-no-files-found: ignore
           retention-days: 1
-      - run: npm test
       - run: npm audit --audit-level=high
       - name: Dry-run Worker bundle with non-secret test placeholders
         run: |
