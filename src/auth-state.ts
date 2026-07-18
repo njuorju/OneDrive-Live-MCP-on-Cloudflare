@@ -23,6 +23,15 @@ export class AuthState extends DurableObject {
     }
 
     const url = new URL(request.url);
+    if (url.pathname === "/ready") {
+      try {
+        await this.ctx.storage.get("__readiness_probe__");
+        return Response.json({ ok: true, stage: "ready" });
+      } catch {
+        return Response.json({ ok: false, stage: "storage_unavailable" }, { status: 503 });
+      }
+    }
+
     let body: Record<string, unknown>;
     try {
       body = (await request.json()) as Record<string, unknown>;
@@ -58,7 +67,7 @@ export class AuthState extends DurableObject {
       body.expiresAt === null || body.expiresAt === undefined
         ? null
         : Number(body.expiresAt);
-    if (!kind || !id || !value) {
+    if (!kind || !id || !value || (expiresAt !== null && !Number.isFinite(expiresAt))) {
       return { ok: false, found: false, expired: false, stage: "put_invalid" };
     }
     const envelope: StoredEnvelope = { kind, value, expiresAt };
