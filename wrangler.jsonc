@@ -8,8 +8,15 @@
     "CONNECTOR_NAME": "OneDrive Live MCP",
     "ONEDRIVE_ROOT": "REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER",
     "MAX_FILE_MB": "20",
+    "MAX_ORIGINAL_FILE_MB": "25",
+    "MAX_TEXT_WRITE_KB": "512",
     "MAX_READ_CHARS": "50000",
-    "CACHE_TTL_SECONDS": "604800"
+    "CACHE_TTL_SECONDS": "604800",
+    "MAX_IMAGE_INPUT_MB": "15",
+    "MAX_IMAGE_PIXELS": "40000000",
+    "MAX_IMAGE_DIMENSION": "8192",
+    "MAX_IMAGE_PAGES": "8",
+    "IMAGE_PROCESSING_TIMEOUT_MS": "15000"
   },
   "migrations": [
     {
@@ -41,6 +48,9 @@
   ],
   "ai": {
     "binding": "AI"
+  },
+  "images": {
+    "binding": "IMAGES"
   },
   "observability": {
     "enabled": true
