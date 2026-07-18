@@ -24,7 +24,7 @@ jobs:
         with:
           node-version: "22.18.0"
           cache: npm
-      - run: npm ci --no-audit --no-fund
+      - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run type-check
       - run: npm test
       - run: npm audit --audit-level=high
