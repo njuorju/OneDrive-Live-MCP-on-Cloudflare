@@ -345,7 +345,7 @@ export async function fetchImageForAnalysis(
     config.imageProcessingTimeoutMs,
   );
   const response = output.response();
-  const preview = await withTimeout(
+  const preview = await withTimeout<ArrayBuffer>(
     response.arrayBuffer(),
     config.imageProcessingTimeoutMs,
   );
