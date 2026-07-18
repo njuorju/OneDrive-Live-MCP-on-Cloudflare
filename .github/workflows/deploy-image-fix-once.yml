@@ -3,7 +3,7 @@ name: Deploy OneDrive image fix once
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "13,18,23,28,33,38,43,48,53,58 17 * * *"
 
 permissions:
   contents: write
