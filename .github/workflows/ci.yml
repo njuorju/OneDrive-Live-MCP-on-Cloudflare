@@ -17,14 +17,22 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22.18.0"
-          cache: npm
-      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Install from the public npm registry and regenerate lockfile
+        run: npm install --ignore-scripts --no-audit --no-fund
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+      - name: Upload regenerated public lockfile
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-package-lock
+          path: package-lock.json
+          retention-days: 1
       - run: npm run type-check
       - run: npm test
       - run: npm audit --audit-level=high
