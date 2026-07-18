@@ -26,16 +26,19 @@ export {
   createFolder,
   createTextFile,
   fetchImageForAnalysis,
-  fetchOriginalFile,
   getConnectionStatus,
   getImageMetadata,
   listAllowedFolder,
   listVisualAssets,
   moveItem,
   readAllowedFile,
-  readOriginalResource,
   readiness,
   renameItem,
   replaceTextFile,
   searchAllowedRoot,
 } from "./onedrive-files";
+
+export {
+  fetchOriginalFileResource as fetchOriginalFile,
+  readOriginalFileResource as readOriginalResource,
+} from "./original-resource";
