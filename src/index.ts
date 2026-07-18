@@ -1,9 +1,10 @@
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { McpAgent } from "agents/mcp";
 import { z } from "zod";
 import { AuthState } from "./auth-state";
-import { safeErrorResult } from "./errors";
+import { ConnectorError, safeErrorResult } from "./errors";
 import {
   createFolder,
   createTextFile,
@@ -21,17 +22,11 @@ import {
   searchAllowedRoot,
 } from "./graph";
 import { MicrosoftAuthHandler } from "./microsoft-auth";
-import type { Props } from "./types";
+import type { CompactItem, Props } from "./types";
 
 export { AuthState } from "./auth-state";
 
-type ToolResult = {
-  content: Array<Record<string, unknown>>;
-  structuredContent?: Record<string, unknown>;
-  isError?: boolean;
-};
-
-function textResult(data: unknown): ToolResult {
+function textResult(data: unknown): CallToolResult {
   const structuredContent = data && typeof data === "object"
     ? data as Record<string, unknown>
     : { value: data };
@@ -39,6 +34,10 @@ function textResult(data: unknown): ToolResult {
     structuredContent,
     content: [{ type: "text", text: JSON.stringify(structuredContent, null, 2) }],
   };
+}
+
+function errorResult(error: unknown): CallToolResult {
+  return safeErrorResult(error) as CallToolResult;
 }
 
 const READ_ONLY = {
@@ -55,6 +54,15 @@ const MUTATING = {
   openWorldHint: true,
 } as const;
 
+function searchResult(item: CompactItem) {
+  return {
+    id: item.itemId,
+    title: item.filename,
+    text: `${item.type}; ${item.relativePath}; ${item.mimeType ?? "folder"}; modified ${item.modifiedDate ?? "unknown"}`,
+    metadata: item,
+  };
+}
+
 export class OneDriveMCP extends McpAgent<Env, unknown, Props> {
   server = new McpServer({
     name: "Nikolay OneDrive Live",
@@ -62,22 +70,20 @@ export class OneDriveMCP extends McpAgent<Env, unknown, Props> {
   });
 
   private userId(): string {
-    if (!this.props?.userId) throw new Error("No authorized Microsoft user is attached.");
+    if (!this.props?.userId) {
+      throw new ConnectorError("authentication_required", "No authorized Microsoft user is attached.");
+    }
     return this.props.userId;
   }
 
-  private registerReadAliases(
-    names: string[],
-    config: Parameters<McpServer["registerTool"]>[1],
-    callback: Parameters<McpServer["registerTool"]>[2],
-  ): void {
+  private registerAliases(names: string[], config: any, callback: any): void {
     for (const name of names) this.server.registerTool(name, config, callback);
   }
 
   async init() {
     this.server.registerResource(
       "onedrive-original-file",
-      new ResourceTemplate("onedrive-original://{itemId}{?etag}", { list: undefined }),
+      new ResourceTemplate("onedrive-original:///items/{itemId}{?etag}", { list: undefined }),
       {
         title: "Original OneDrive file",
         description:
@@ -102,7 +108,7 @@ export class OneDriveMCP extends McpAgent<Env, unknown, Props> {
         try {
           return textResult(await getConnectionStatus(this.env, this.userId()));
         } catch (error) {
-          return safeErrorResult(error);
+          return errorResult(error);
         }
       },
     );
@@ -117,14 +123,36 @@ export class OneDriveMCP extends McpAgent<Env, unknown, Props> {
       },
       annotations: READ_ONLY,
     };
-    this.registerReadAliases(
-      ["search_onedrive", "search_onedrive_work", "search"],
+    this.registerAliases(
+      ["search_onedrive", "search_onedrive_work"],
       searchConfig,
       async ({ query, limit }: { query: string; limit: number }) => {
         try {
           return textResult({ query, results: await searchAllowedRoot(this.env, this.userId(), query, limit) });
         } catch (error) {
-          return safeErrorResult(error);
+          return errorResult(error);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "search",
+      {
+        title: "Search OneDrive",
+        description:
+          "Canonical connector search alias. Returns stable OneDrive item IDs and concise metadata for items proven to be inside the configured root.",
+        inputSchema: {
+          query: z.string().min(1).max(300),
+          limit: z.number().int().min(1).max(50).default(20),
+        },
+        annotations: READ_ONLY,
+      },
+      async ({ query, limit }: { query: string; limit: number }) => {
+        try {
+          const items = await searchAllowedRoot(this.env, this.userId(), query, limit);
+          return textResult({ results: items.map(searchResult) });
+        } catch (error) {
+          return errorResult(error);
         }
       },
     );
@@ -139,14 +167,14 @@ export class OneDriveMCP extends McpAgent<Env, unknown, Props> {
       },
       annotations: READ_ONLY,
     };
-    this.registerReadAliases(
+    this.registerAliases(
       ["list_onedrive_folder", "list_onedrive_work_folder"],
       listConfig,
       async ({ path, limit }: { path: string; limit: number }) => {
         try {
           return textResult({ path, results: await listAllowedFolder(this.env, this.userId(), path, limit) });
         } catch (error) {
-          return safeErrorResult(error);
+          return errorResult(error);
         }
       },
     );
@@ -162,14 +190,52 @@ export class OneDriveMCP extends McpAgent<Env, unknown, Props> {
       },
       annotations: READ_ONLY,
     };
-    this.registerReadAliases(
-      ["read_onedrive_file", "read_onedrive_work_file", "fetch"],
+    this.registerAliases(
+      ["read_onedrive_file", "read_onedrive_work_file"],
       readConfig,
       async ({ itemId, startChar, maxChars }: { itemId: string; startChar: number; maxChars: number }) => {
         try {
           return textResult(await readAllowedFile(this.env, this.userId(), itemId, startChar, maxChars));
         } catch (error) {
-          return safeErrorResult(error);
+          return errorResult(error);
+        }
+      },
+    );
+
+    this.server.registerTool(
+      "fetch",
+      {
+        title: "Fetch OneDrive document text",
+        description:
+          "Canonical connector fetch alias. Fetch a search result by stable item ID and return bounded extracted text. This does not return original bytes; use fetch_original_file for exact-file reuse.",
+        inputSchema: {
+          id: z.string().min(1).max(500),
+          startChar: z.number().int().min(0).default(0),
+          maxChars: z.number().int().min(1000).max(50000).default(30000),
+        },
+        annotations: READ_ONLY,
+      },
+      async ({ id, startChar, maxChars }: { id: string; startChar: number; maxChars: number }) => {
+        try {
+          const file = await readAllowedFile(this.env, this.userId(), id, startChar, maxChars);
+          return textResult({
+            id: file.itemId,
+            title: file.filename,
+            text: file.content,
+            metadata: {
+              relativePath: file.relativePath,
+              mimeType: file.mimeType,
+              byteSize: file.byteSize,
+              modifiedDate: file.modifiedDate,
+              eTag: file.eTag,
+              startChar: file.startChar,
+              returnedChars: file.returnedChars,
+              totalChars: file.totalChars,
+              hasMore: file.hasMore,
+            },
+          });
+        } catch (error) {
+          return errorResult(error);
         }
       },
     );
@@ -194,11 +260,11 @@ export class OneDriveMCP extends McpAgent<Env, unknown, Props> {
         },
         annotations: READ_ONLY,
       },
-      async (input: any) => {
+      async (input) => {
         try {
           return textResult(await listVisualAssets(this.env, this.userId(), input));
         } catch (error) {
-          return safeErrorResult(error);
+          return errorResult(error);
         }
       },
     );
@@ -212,11 +278,11 @@ export class OneDriveMCP extends McpAgent<Env, unknown, Props> {
         inputSchema: { itemId: z.string().min(1).max(500) },
         annotations: READ_ONLY,
       },
-      async ({ itemId }: { itemId: string }) => {
+      async ({ itemId }) => {
         try {
           return textResult(await getImageMetadata(this.env, this.userId(), itemId));
         } catch (error) {
-          return safeErrorResult(error);
+          return errorResult(error);
         }
       },
     );
@@ -230,14 +296,16 @@ export class OneDriveMCP extends McpAgent<Env, unknown, Props> {
         inputSchema: {
           itemId: z.string().min(1).max(500),
           detail: z.enum(["auto", "low", "high"]).default("auto"),
-          page: z.number().int().min(1).max(32).optional().describe("Reserved for supported multi-page visual formats; currently only page 1 is accepted."),
+          page: z.number().int().min(1).max(32).optional().describe("Reserved for multi-page visual formats; this release accepts page 1 only."),
           maxDimension: z.number().int().min(256).max(8192).optional(),
         },
         annotations: READ_ONLY,
       },
-      async ({ itemId, detail, page, maxDimension }: { itemId: string; detail: "auto" | "low" | "high"; page?: number; maxDimension?: number }) => {
+      async ({ itemId, detail, page, maxDimension }) => {
         try {
-          if (page && page !== 1) throw new Error("Only page 1 is currently supported for visual previews.");
+          if (page !== undefined && page !== 1) {
+            throw new ConnectorError("page_not_supported", "Only page 1 is currently supported for visual previews.");
+          }
           const result = await fetchImageForAnalysis(this.env, this.userId(), itemId, detail, maxDimension);
           return {
             structuredContent: result.metadata,
@@ -245,9 +313,9 @@ export class OneDriveMCP extends McpAgent<Env, unknown, Props> {
               { type: "text", text: JSON.stringify(result.metadata, null, 2) },
               result.image,
             ],
-          } as ToolResult;
+          } as CallToolResult;
         } catch (error) {
-          return safeErrorResult(error);
+          return errorResult(error);
         }
       },
     );
@@ -261,7 +329,7 @@ export class OneDriveMCP extends McpAgent<Env, unknown, Props> {
         inputSchema: { itemId: z.string().min(1).max(500) },
         annotations: READ_ONLY,
       },
-      async ({ itemId }: { itemId: string }) => {
+      async ({ itemId }) => {
         try {
           const result = await fetchOriginalFile(this.env, this.userId(), itemId);
           return {
@@ -270,9 +338,9 @@ export class OneDriveMCP extends McpAgent<Env, unknown, Props> {
               { type: "text", text: JSON.stringify(result.metadata, null, 2) },
               result.resource,
             ],
-          } as ToolResult;
+          } as CallToolResult;
         } catch (error) {
-          return safeErrorResult(error);
+          return errorResult(error);
         }
       },
     );
@@ -281,18 +349,19 @@ export class OneDriveMCP extends McpAgent<Env, unknown, Props> {
       "create_folder",
       {
         title: "Create OneDrive folder",
-        description: "Create one folder inside a verified destination under the configured OneDrive root. Conflicts fail; nothing is overwritten.",
+        description:
+          "Create one folder inside a verified destination under the configured OneDrive root. Conflicts fail; nothing is overwritten.",
         inputSchema: {
           destinationPath: z.string().max(1000).default(""),
           name: z.string().min(1).max(255),
         },
         annotations: MUTATING,
       },
-      async ({ destinationPath, name }: { destinationPath: string; name: string }) => {
+      async ({ destinationPath, name }) => {
         try {
           return textResult(await createFolder(this.env, this.userId(), destinationPath, name));
         } catch (error) {
-          return safeErrorResult(error);
+          return errorResult(error);
         }
       },
     );
@@ -310,11 +379,11 @@ export class OneDriveMCP extends McpAgent<Env, unknown, Props> {
         },
         annotations: MUTATING,
       },
-      async ({ destinationPath, filename, content }: { destinationPath: string; filename: string; content: string }) => {
+      async ({ destinationPath, filename, content }) => {
         try {
           return textResult(await createTextFile(this.env, this.userId(), destinationPath, filename, content));
         } catch (error) {
-          return safeErrorResult(error);
+          return errorResult(error);
         }
       },
     );
@@ -332,11 +401,11 @@ export class OneDriveMCP extends McpAgent<Env, unknown, Props> {
         },
         annotations: MUTATING,
       },
-      async ({ itemId, expectedETag, content }: { itemId: string; expectedETag: string; content: string }) => {
+      async ({ itemId, expectedETag, content }) => {
         try {
           return textResult(await replaceTextFile(this.env, this.userId(), itemId, expectedETag, content));
         } catch (error) {
-          return safeErrorResult(error);
+          return errorResult(error);
         }
       },
     );
@@ -353,11 +422,11 @@ export class OneDriveMCP extends McpAgent<Env, unknown, Props> {
         },
         annotations: MUTATING,
       },
-      async ({ itemId, newName }: { itemId: string; newName: string }) => {
+      async ({ itemId, newName }) => {
         try {
           return textResult(await renameItem(this.env, this.userId(), itemId, newName));
         } catch (error) {
-          return safeErrorResult(error);
+          return errorResult(error);
         }
       },
     );
@@ -374,11 +443,11 @@ export class OneDriveMCP extends McpAgent<Env, unknown, Props> {
         },
         annotations: MUTATING,
       },
-      async ({ itemId, destinationPath }: { itemId: string; destinationPath: string }) => {
+      async ({ itemId, destinationPath }) => {
         try {
           return textResult(await moveItem(this.env, this.userId(), itemId, destinationPath));
         } catch (error) {
-          return safeErrorResult(error);
+          return errorResult(error);
         }
       },
     );
