@@ -35,9 +35,10 @@ export type VisualAssetInput = {
 };
 
 type VisualCursor = {
-  version: 1;
+  version: 2;
   fingerprint: string;
   queue: string[];
+  pendingItemIds: string[];
   currentFolderId?: string;
   nextUrl?: string;
 };
@@ -81,6 +82,12 @@ async function cursorFingerprint(input: VisualAssetInput): Promise<string> {
   return sha256Hex(JSON.stringify(normalizedFilter(input)));
 }
 
+function validOpaqueIds(values: unknown, maximum: number): values is string[] {
+  return Array.isArray(values) &&
+    values.length <= maximum &&
+    values.every((value) => typeof value === "string" && value.length > 0 && value.length <= 500);
+}
+
 async function decodeCursor(env: Env, input: VisualAssetInput): Promise<VisualCursor | undefined> {
   if (!input.cursor) return undefined;
   let state: VisualCursor;
@@ -90,17 +97,21 @@ async function decodeCursor(env: Env, input: VisualAssetInput): Promise<VisualCu
     throw new ConnectorError("invalid_cursor", "The pagination cursor is invalid or expired.");
   }
   if (
-    state.version !== 1 ||
-    !Array.isArray(state.queue) ||
-    state.queue.some((value) => typeof value !== "string" || value.length > 500) ||
-    state.queue.length > 512 ||
-    (state.currentFolderId !== undefined && (typeof state.currentFolderId !== "string" || state.currentFolderId.length > 500)) ||
-    (state.nextUrl !== undefined && (typeof state.nextUrl !== "string" || state.nextUrl.length > 4000))
+    state.version !== 2 ||
+    !validOpaqueIds(state.queue, 512) ||
+    !validOpaqueIds(state.pendingItemIds, 200) ||
+    (state.currentFolderId !== undefined &&
+      (typeof state.currentFolderId !== "string" || state.currentFolderId.length > 500)) ||
+    (state.nextUrl !== undefined &&
+      (typeof state.nextUrl !== "string" || state.nextUrl.length > 4000))
   ) {
     throw new ConnectorError("invalid_cursor", "The pagination cursor is invalid.");
   }
   if (state.fingerprint !== await cursorFingerprint(input)) {
-    throw new ConnectorError("cursor_filter_mismatch", "The pagination cursor belongs to different visual-asset filters.");
+    throw new ConnectorError(
+      "cursor_filter_mismatch",
+      "The pagination cursor belongs to different visual-asset filters.",
+    );
   }
   return state;
 }
@@ -116,6 +127,29 @@ async function encodeCursor(env: Env, state: VisualCursor): Promise<string> {
   return sealed;
 }
 
+function matchesAsset(
+  asset: VisualAsset,
+  input: VisualAssetInput,
+  allowedTypes: Set<string> | null,
+  query: string,
+  modifiedAfter: number | null,
+): boolean {
+  if (allowedTypes && !allowedTypes.has(asset.extension)) return false;
+  if (
+    query &&
+    !`${asset.filename} ${asset.relativePath}`.toLocaleLowerCase("en").includes(query)
+  ) return false;
+  if (
+    input.orientation &&
+    input.orientation !== "any" &&
+    asset.orientation !== input.orientation
+  ) return false;
+  if (input.minWidth && (asset.width ?? 0) < input.minWidth) return false;
+  if (input.minHeight && (asset.height ?? 0) < input.minHeight) return false;
+  if (modifiedAfter !== null && Date.parse(asset.modifiedDate ?? "") <= modifiedAfter) return false;
+  return true;
+}
+
 export async function listVisualAssetsSecure(
   env: Env,
   userId: string,
@@ -124,9 +158,10 @@ export async function listVisualAssetsSecure(
   const start = await resolveRelativeFolder(env, userId, input.path ?? "");
   const fingerprint = await cursorFingerprint(input);
   const state: VisualCursor = await decodeCursor(env, input) ?? {
-    version: 1,
+    version: 2,
     fingerprint,
     queue: [start.item.id],
+    pendingItemIds: [],
   };
   const results: VisualAsset[] = [];
   const allowedTypes = input.fileTypes?.length
@@ -144,7 +179,20 @@ export async function listVisualAssetsSecure(
     throw new ConnectorError("invalid_date", "modifiedAfter must be an ISO date.");
   }
 
-  while (results.length < input.limit && (state.currentFolderId || state.queue.length > 0)) {
+  while (
+    results.length < input.limit &&
+    (state.pendingItemIds.length > 0 || state.currentFolderId || state.queue.length > 0)
+  ) {
+    if (state.pendingItemIds.length > 0) {
+      const itemId = state.pendingItemIds.shift();
+      if (!itemId) continue;
+      const child = await verifyItemInsideRoot(env, userId, itemId);
+      if (child.item.folder || !isVisualAsset(child.item.name)) continue;
+      const asset = assetFromVerified(child);
+      if (matchesAsset(asset, input, allowedTypes, query, modifiedAfter)) results.push(asset);
+      continue;
+    }
+
     if (!state.currentFolderId) state.currentFolderId = state.queue.shift();
     if (!state.currentFolderId) break;
     const folder = await verifyItemInsideRoot(env, userId, state.currentFolderId);
@@ -164,30 +212,18 @@ export async function listVisualAssetsSecure(
           }
           state.queue.push(child.item.id);
         }
-        continue;
+      } else if (isVisualAsset(child.item.name)) {
+        state.pendingItemIds.push(child.item.id);
       }
-      if (!isVisualAsset(child.item.name)) continue;
-      const asset = assetFromVerified(child);
-      if (allowedTypes && !allowedTypes.has(asset.extension)) continue;
-      if (
-        query &&
-        !`${asset.filename} ${asset.relativePath}`.toLocaleLowerCase("en").includes(query)
-      ) continue;
-      if (
-        input.orientation &&
-        input.orientation !== "any" &&
-        asset.orientation !== input.orientation
-      ) continue;
-      if (input.minWidth && (asset.width ?? 0) < input.minWidth) continue;
-      if (input.minHeight && (asset.height ?? 0) < input.minHeight) continue;
-      if (modifiedAfter !== null && Date.parse(asset.modifiedDate ?? "") <= modifiedAfter) continue;
-      results.push(asset);
-      if (results.length >= input.limit) break;
     }
     if (!state.nextUrl) state.currentFolderId = undefined;
   }
 
-  const hasMore = Boolean(state.currentFolderId || state.queue.length > 0);
+  const hasMore = Boolean(
+    state.pendingItemIds.length > 0 ||
+    state.currentFolderId ||
+    state.queue.length > 0,
+  );
   return {
     results,
     cursor: hasMore ? await encodeCursor(env, state) : null,
