@@ -123,8 +123,8 @@ export async function listVisualAssetsSecure(
 ) {
   const start = await resolveRelativeFolder(env, userId, input.path ?? "");
   const fingerprint = await cursorFingerprint(input);
-  const state = await decodeCursor(env, input) ?? {
-    version: 1 as const,
+  const state: VisualCursor = await decodeCursor(env, input) ?? {
+    version: 1,
     fingerprint,
     queue: [start.item.id],
   };
