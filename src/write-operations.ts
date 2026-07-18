@@ -45,12 +45,12 @@ async function assertNameAvailable(
   }
 }
 
-function utf8Bytes(content: string, maxBytes: number): Uint8Array {
-  const bytes = new TextEncoder().encode(content);
-  if (bytes.byteLength > maxBytes) {
+function boundedUtf8Content(content: string, maxBytes: number): string {
+  const byteLength = new TextEncoder().encode(content).byteLength;
+  if (byteLength > maxBytes) {
     throw new ConnectorError("text_too_large", "The text content exceeds the configured write limit.");
   }
-  return bytes;
+  return content;
 }
 
 export async function createFolderStrict(
@@ -98,7 +98,7 @@ export async function createTextFileStrict(
       "The filename extension is not allowlisted for text creation.",
     );
   }
-  const bytes = utf8Bytes(content, config.maxTextWriteBytes);
+  const body = boundedUtf8Content(content, config.maxTextWriteBytes);
   const destination = await resolveRelativeFolder(env, userId, destinationPath);
   await assertNameAvailable(env, userId, destination, safeName);
 
@@ -114,7 +114,7 @@ export async function createTextFileStrict(
         "Content-Type": "text/plain; charset=utf-8",
         "If-None-Match": "*",
       },
-      body: bytes,
+      body,
     },
   );
   return compactVerifiedItem(await verifyItemInsideRoot(env, userId, created.id));
@@ -135,7 +135,7 @@ export async function replaceTextFileStrict(
   if (verified.item.folder || !isAllowedTextFile(verified.item.name)) {
     throw new ConnectorError("not_text_file", "Only allowlisted text files can be replaced.");
   }
-  const bytes = utf8Bytes(content, config.maxTextWriteBytes);
+  const body = boundedUtf8Content(content, config.maxTextWriteBytes);
 
   const current = await verifyItemInsideRoot(env, userId, itemId);
   if (current.item.eTag !== expectedETag) {
@@ -154,7 +154,7 @@ export async function replaceTextFileStrict(
         "Content-Type": "text/plain; charset=utf-8",
         "If-Match": expectedETag,
       },
-      body: bytes,
+      body,
     },
   );
   return compactVerifiedItem(await verifyItemInsideRoot(env, userId, replaced.id));
