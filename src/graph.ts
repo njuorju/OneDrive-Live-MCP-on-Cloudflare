@@ -23,15 +23,18 @@ export {
 } from "./graph-core";
 
 export {
-  fetchImageForAnalysis,
   getConnectionStatus,
-  getImageMetadata,
   listAllowedFolder,
-  listVisualAssets,
   readAllowedFile,
   readiness,
   searchAllowedRoot,
 } from "./onedrive-files";
+
+export {
+  fetchImageForAnalysisSecure as fetchImageForAnalysis,
+  getImageMetadata,
+  listVisualAssetsSecure as listVisualAssets,
+} from "./visual-assets";
 
 export {
   fetchOriginalFileResource as fetchOriginalFile,
