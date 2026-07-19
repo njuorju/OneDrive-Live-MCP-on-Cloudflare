@@ -1,0 +1,11 @@
+# Copy to .dev.vars for local development only. Never commit .dev.vars.
+
+# Microsoft Entra application (delegated Files.ReadWrite + User.Read; offline_access is requested at runtime)
+MICROSOFT_CLIENT_ID="replace-with-application-client-id"
+MICROSOFT_CLIENT_SECRET="replace-with-client-secret-value"
+
+# Immutable Microsoft Graph /me ID for the single allowed owner account
+OWNER_MICROSOFT_ID="replace-with-owner-graph-id"
+
+# 32-byte random key, preferably a 64-character hexadecimal value
+COOKIE_ENCRYPTION_KEY="replace-with-random-encryption-key"
