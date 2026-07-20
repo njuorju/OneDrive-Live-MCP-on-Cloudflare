@@ -75,7 +75,7 @@ test("large files are SHA-256 hashed incrementally without the extraction buffer
   }
 });
 
-test("large files use streaming hash while bounded extraction remains size-limited", () => {
-  assert.equal(snapshotEnrichTestHooks.oversizedForDeterministicExtraction(20 * 1024 * 1024), false);
-  assert.equal(snapshotEnrichTestHooks.oversizedForDeterministicExtraction(20 * 1024 * 1024 + 1), true);
+test("files above the 100 MB deterministic extraction ceiling use streaming hashes", () => {
+  assert.equal(snapshotEnrichTestHooks.oversizedForDeterministicExtraction(100 * 1024 * 1024), false);
+  assert.equal(snapshotEnrichTestHooks.oversizedForDeterministicExtraction(100 * 1024 * 1024 + 1), true);
 });
