@@ -54,7 +54,6 @@ async function documentRenderResponse(url: URL, env: Env): Promise<Response> {
       {
         env,
         userId: payload.userId,
-        storage: createIntegratedStateStorage(env, payload.userId),
       },
       payload.itemId,
     );
