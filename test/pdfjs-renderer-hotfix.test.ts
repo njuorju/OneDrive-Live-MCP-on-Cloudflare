@@ -44,7 +44,7 @@ test("PDF.js renderer forces same-thread fallback and fails closed on uniform ou
   );
 });
 
-test("render tokens are escaped before insertion into inline JavaScript", () => {
+test("render tokens are URL-encoded before insertion into inline JavaScript", () => {
   const html = buildPdfJsRenderHtml({
     token: "token<unsafe",
     page: 1,
@@ -53,5 +53,5 @@ test("render tokens are escaped before insertion into inline JavaScript", () => 
   });
 
   assert.doesNotMatch(html, /token<unsafe/);
-  assert.match(html, /token\\u003cunsafe/);
+  assert.match(html, /token%3Cunsafe/);
 });
