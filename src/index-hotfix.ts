@@ -1,9 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import originalDefault, { AuthState, OneDriveMCP } from "./index";
-import {
-  createIntegratedStateStorage,
-  registerIntegratedToolsWithVersion20Hotfix,
-} from "./version20-hotfix";
+import { registerIntegratedToolsWithPdfJsHotfix } from "./pdfjs-renderer-hotfix";
+import { createIntegratedStateStorage } from "./version20-hotfix";
 
 const prototype = OneDriveMCP.prototype as any;
 if (!prototype.__version20HotfixApplied) {
@@ -16,9 +14,9 @@ if (!prototype.__version20HotfixApplied) {
 
     const replacementServer = new McpServer({
       name: "Nikolay OneDrive Live integrated hotfix",
-      version: "0.4.1",
+      version: "0.4.2",
     });
-    registerIntegratedToolsWithVersion20Hotfix(replacementServer, () => ({
+    registerIntegratedToolsWithPdfJsHotfix(replacementServer, () => ({
       env: this.env,
       userId,
       storage: createIntegratedStateStorage(this.env, userId),
