@@ -9,9 +9,8 @@ import {
   createSourceSnapshot,
   getJobStatus,
   snapshotRunnerTestHooks,
-  type ScheduleSnapshot,
-  type SnapshotInput,
 } from "./snapshot-runner";
+import type { ScheduleSnapshot, SnapshotInput } from "./snapshot-model";
 import { reliableGraphResponse, snapshotGraphTestHooks } from "./snapshot-graph";
 
 function textResult(data: unknown): CallToolResult {
