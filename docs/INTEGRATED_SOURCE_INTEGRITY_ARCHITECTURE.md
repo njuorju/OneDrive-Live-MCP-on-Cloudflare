@@ -28,6 +28,10 @@ Existing Durable Object storage is used for snapshot metadata, sharded snapshot 
 
 The implementation adds a Browser Run binding but does not create a paid subscription or pay-as-you-go resource. Workers Free includes a capped Browser Run allowance; operations fail with a structured quota error rather than enabling billable overage.
 
+## Validation sequence
+
+The implementation branch must pass repository CI, type checking, deterministic fixtures, dependency audit, and Wrangler dry-run before staged deployment. Staged live acceptance uses only a timestamped synthetic folder inside the configured root; production deployment and merge follow only after the synthetic fixture set is cleaned up successfully.
+
 ## Cleanup
 
 Synthetic acceptance fixtures are created only inside a timestamped folder under the configured root. The folder is recycled through its own validated cleanup plan after results are recorded. No placeholder files, temporary routes, public buckets, or orphan objects are retained.
