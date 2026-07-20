@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import test from "node:test";
 import { sealJson } from "../src/security";
 import { snapshotEnrichTestHooks } from "../src/snapshot-enrich";
@@ -37,8 +36,7 @@ test("large files are SHA-256 hashed incrementally without the extraction buffer
   const chunk = new Uint8Array(1024 * 1024).fill(0x5a);
   const chunks = 21;
   const totalBytes = chunk.byteLength * chunks;
-  const expected = createHash("sha256");
-  for (let index = 0; index < chunks; index += 1) expected.update(chunk);
+  const expectedSha256 = "47a5d940efdf31a3102c5cda9c3389fc35640800974d7f9faf7a52503ea455ce";
 
   try {
     globalThis.fetch = (async (input: RequestInfo | URL) => {
@@ -70,7 +68,7 @@ test("large files are SHA-256 hashed incrementally without the extraction buffer
       timeoutMs: 500,
     });
     assert.equal(result.byteLength, totalBytes);
-    assert.equal(result.sha256, expected.digest("hex"));
+    assert.equal(result.sha256, expectedSha256);
     assert.match(result.sha256, /^[0-9a-f]{64}$/);
   } finally {
     globalThis.fetch = originalFetch;
