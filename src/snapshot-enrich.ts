@@ -10,7 +10,7 @@ import {
   sha256Bytes,
 } from "./integrated-core";
 import type { HotfixContext } from "./version20-hotfix";
-import { reliableGraphBytes, type GraphDiagnostics } from "./snapshot-graph";
+import { reliableGraphBytes, reliableGraphSha256, type GraphDiagnostics } from "./snapshot-graph";
 import type { ListedItem, SnapshotInput, SnapshotRecord } from "./snapshot-model";
 
 const READABLE_TEXT = new Set([".txt", ".md", ".markdown", ".csv", ".json", ".html", ".htm"]);
@@ -45,10 +45,47 @@ function baseRecord(item: ListedItem, relativePath: string, index: number): Snap
 export async function enrichRecord(context: HotfixContext, item: ListedItem, relativePath: string, index: number, input: SnapshotInput, diagnostics: GraphDiagnostics): Promise<SnapshotRecord> {
   const record = baseRecord(item, relativePath, index);
   if (record.type === "folder") return record;
-  const needsBytes = input.calculateSha256 || input.calculateNormalizedTextHash || input.includeDocumentMetadata;
-  if (!needsBytes) return record;
-  const bytes = await reliableGraphBytes(context.env, context.userId, item.id, item.eTag ?? null, diagnostics);
-  if (input.calculateSha256) record.sha256 = await sha256Bytes(bytes);
+  const needsExtractionBytes = input.calculateNormalizedTextHash || input.includeDocumentMetadata;
+  const needsAnyContent = input.calculateSha256 || needsExtractionBytes;
+  if (!needsAnyContent) return record;
+
+  const oversizedForDeterministicExtraction = Number(record.byteSize ?? 0) > INTEGRATED_LIMITS.fileBytesMax;
+  let bytes: ArrayBuffer | null = null;
+
+  if (input.calculateSha256) {
+    if (oversizedForDeterministicExtraction) {
+      record.sha256 = (await reliableGraphSha256(context.env, context.userId, item.id, item.eTag ?? null, diagnostics)).sha256;
+    } else {
+      bytes = await reliableGraphBytes(context.env, context.userId, item.id, item.eTag ?? null, diagnostics);
+      record.sha256 = await sha256Bytes(bytes);
+    }
+  }
+
+  if (needsExtractionBytes && oversizedForDeterministicExtraction) {
+    record.extractionStatus = "skipped_size_limit";
+    if (input.calculateNormalizedTextHash) {
+      record.extractedCharacterCount = 0;
+      record.representationStatus = "size_limited";
+    }
+    if (input.includeDocumentMetadata) {
+      record.documentMetadata = {
+        extractionSkipped: "file_too_large_for_bounded_deterministic_extraction",
+        byteSize: record.byteSize,
+        sha256CapturedByStreaming: Boolean(record.sha256),
+      };
+    }
+    record.error = {
+      code: "extraction_size_limit",
+      message: "SHA-256 was captured by streaming, but bounded deterministic extraction was skipped for this large file.",
+    };
+    return record;
+  }
+
+  if (needsExtractionBytes && !bytes) {
+    bytes = await reliableGraphBytes(context.env, context.userId, item.id, item.eTag ?? null, diagnostics);
+  }
+  if (!bytes) return record;
+
   try {
     let text = "";
     let metadata: Record<string, unknown> = {};
@@ -89,3 +126,7 @@ export async function enrichRecord(context: HotfixContext, item: ListedItem, rel
   }
   return record;
 }
+
+export const snapshotEnrichTestHooks = {
+  oversizedForDeterministicExtraction: (byteSize: number) => byteSize > INTEGRATED_LIMITS.fileBytesMax,
+};
