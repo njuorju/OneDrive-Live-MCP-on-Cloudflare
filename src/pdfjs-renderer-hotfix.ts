@@ -2,34 +2,20 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { ConnectorError, safeErrorResult } from "./errors";
 import { extensionOf, validateFileSignature } from "./file-types";
+import pdfJsMainSource from "./generated/pdfjs-main";
+import pdfJsWorkerSource from "./generated/pdfjs-worker";
 import { compactVerifiedItem } from "./graph-core";
 import {
   INTEGRATED_LIMITS,
   bytesToBase64,
   inspectPdfBytes,
 } from "./integrated-core";
-import { IntegratedMicrosoftAuthHandler } from "./microsoft-auth-integrated";
-import { openJson, sealJson } from "./security";
 import {
   pdfBytesForRenderHotfix,
   pdfPageDimensions,
   registerIntegratedToolsWithVersion20Hotfix,
   type HotfixContext,
 } from "./version20-hotfix";
-
-const PDFJS_VERSION = "3.2.146";
-const PDFJS_SCRIPT = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}/pdf.min.js`;
-const PDFJS_WORKER_SCRIPT = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDFJS_VERSION}/pdf.worker.min.js`;
-const RENDER_ROUTE_PREFIX = "/__pdfjs-render/";
-const PDF_ROUTE_PREFIX = "/__document-render/";
-const RENDER_ORIGIN = "https://nikolay-onedrive-mcp.fdas201290.workers.dev";
-
-type RenderToken = {
-  kind?: string;
-  userId?: string;
-  itemId?: string;
-  expiresAt?: number;
-};
 
 type Crop = { x: number; y: number; width: number; height: number };
 
@@ -46,15 +32,25 @@ function escapeForInlineScript(value: string): string {
   return JSON.stringify(value).replace(/</g, "\\u003c");
 }
 
+function safeInlineLibrary(source: string): string {
+  return source
+    .replace(/<\/script/gi, "<\\/script")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
 export function buildPdfJsRenderHtml(input: {
-  token: string;
+  pdfBase64: string;
   page: number;
   width: number;
   height: number;
   crop?: Crop;
+  mainSource?: string;
+  workerSource?: string;
 }): string {
-  const pdfUrl = `${RENDER_ORIGIN}${PDF_ROUTE_PREFIX}${encodeURIComponent(input.token)}`;
   const crop = input.crop ?? null;
+  const mainSource = safeInlineLibrary(input.mainSource ?? pdfJsMainSource);
+  const workerSource = safeInlineLibrary(input.workerSource ?? pdfJsWorkerSource);
   return `<!doctype html>
 <html>
 <head>
@@ -65,19 +61,26 @@ html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#
 #page-canvas{display:block;margin:0;padding:0;background:#fff}
 </style>
 <script>try{Object.defineProperty(window,"Worker",{value:undefined,configurable:true});}catch{window.Worker=undefined;}</script>
-<script src="${PDFJS_SCRIPT}"></script>
-<script src="${PDFJS_WORKER_SCRIPT}"></script>
+<script>${mainSource}</script>
+<script>${workerSource}</script>
 </head>
 <body>
 <canvas id="page-canvas" aria-label="Rendered PDF page"></canvas>
 <script>
 (() => {
-  const PDF_URL = ${escapeForInlineScript(pdfUrl)};
+  const PDF_BASE64 = ${escapeForInlineScript(input.pdfBase64)};
   const PAGE = ${input.page};
   const TARGET_WIDTH = ${input.width};
   const TARGET_HEIGHT = ${input.height};
   const CROP = ${JSON.stringify(crop)};
   const output = document.getElementById("page-canvas");
+
+  function decodePdf() {
+    const binary = atob(PDF_BASE64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
 
   function validateCanvas(canvas) {
     const context = canvas.getContext("2d", { willReadFrequently: true });
@@ -96,9 +99,8 @@ html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#
 
   async function render() {
     if (!window.pdfjsLib || !window.pdfjsWorker) throw new Error("pdfjs_not_loaded");
-    window.pdfjsLib.GlobalWorkerOptions.workerSrc = ${escapeForInlineScript(PDFJS_WORKER_SCRIPT)};
     const loadingTask = window.pdfjsLib.getDocument({
-      url: PDF_URL,
+      data: decodePdf(),
       disableRange: true,
       disableStream: true,
       disableAutoFetch: true,
@@ -152,72 +154,9 @@ html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#
 </html>`;
 }
 
-async function validateRenderToken(url: URL, env: Env): Promise<{ token: string; payload: RenderToken }> {
-  const encoded = url.pathname.slice(RENDER_ROUTE_PREFIX.length);
-  const token = decodeURIComponent(encoded);
-  const payload = await openJson<RenderToken>(env.COOKIE_ENCRYPTION_KEY, token);
-  if (
-    payload.kind !== "document-render" ||
-    !payload.userId ||
-    !payload.itemId ||
-    Number(payload.expiresAt) <= Date.now()
-  ) {
-    throw new Error("expired");
-  }
-  return { token, payload };
-}
-
-function installPdfJsRenderRoute(): void {
-  const handler = IntegratedMicrosoftAuthHandler as typeof IntegratedMicrosoftAuthHandler & {
-    __pdfJsRenderRouteInstalled?: boolean;
-  };
-  if (handler.__pdfJsRenderRouteInstalled) return;
-  const originalFetch = handler.fetch.bind(handler);
-  handler.fetch = async (request: Request, env: Env, ctx: ExecutionContext): Promise<Response> => {
-    const url = new URL(request.url);
-    if (request.method === "GET" && url.pathname.startsWith(RENDER_ROUTE_PREFIX)) {
-      try {
-        const { token } = await validateRenderToken(url, env);
-        const page = positiveInteger(url.searchParams.get("page"), 1);
-        const width = clampDimension(positiveInteger(url.searchParams.get("width"), 1600));
-        const height = clampDimension(positiveInteger(url.searchParams.get("height"), 900));
-        const crop = url.searchParams.has("cropX")
-          ? {
-              x: Math.max(0, Number(url.searchParams.get("cropX"))),
-              y: Math.max(0, Number(url.searchParams.get("cropY"))),
-              width: Math.max(1, Number(url.searchParams.get("cropWidth"))),
-              height: Math.max(1, Number(url.searchParams.get("cropHeight"))),
-            }
-          : undefined;
-        return new Response(buildPdfJsRenderHtml({ token, page, width, height, crop }), {
-          status: 200,
-          headers: {
-            "Content-Type": "text/html; charset=utf-8",
-            "Cache-Control": "private, no-store, max-age=0",
-            "Content-Security-Policy": `default-src 'none'; script-src 'unsafe-inline' https://cdnjs.cloudflare.com; connect-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; worker-src 'none'; frame-ancestors 'none'; base-uri 'none'`,
-            "X-Content-Type-Options": "nosniff",
-            "X-Frame-Options": "DENY",
-            "X-Robots-Tag": "noindex, nofollow",
-          },
-        });
-      } catch {
-        return new Response("Render link expired or invalid.", {
-          status: 410,
-          headers: { "Cache-Control": "no-store" },
-        });
-      }
-    }
-    return originalFetch(request, env, ctx);
-  };
-  Object.defineProperty(handler, "__pdfJsRenderRouteInstalled", {
-    value: true,
-    enumerable: false,
-  });
-}
-
 async function screenshotCompletedCanvas(
   context: Pick<HotfixContext, "env">,
-  url: string,
+  html: string,
   width: number,
   height: number,
 ): Promise<ArrayBuffer> {
@@ -228,14 +167,13 @@ async function screenshotCompletedCanvas(
   let response: Response;
   try {
     response = await browser.quickAction("screenshot", {
-      url,
-      gotoOptions: { waitUntil: "domcontentloaded", timeout: 60_000 },
+      html,
       waitForSelector: {
         selector: '#page-canvas[data-render-complete="true"]',
         visible: true,
-        timeout: 55_000,
+        timeout: 40_000,
       },
-      actionTimeout: 60_000,
+      actionTimeout: 45_000,
       viewport: { width, height, deviceScaleFactor: 1 },
       screenshotOptions: {
         type: "png",
@@ -305,50 +243,46 @@ async function renderDocumentPagePdfJs(
       ? null
       : Math.min(Math.max(Number(input.dpi), 36), 300);
     const widthFromDpi = requestedDpi ? Math.round(requestedDpi * 8.27) : 1600;
-    const width = clampDimension(positiveInteger(input.width, widthFromDpi));
+    const boundingWidth = clampDimension(positiveInteger(input.width, widthFromDpi));
     const { verified, pdf } = await pdfBytesForRenderHotfix(context, itemId);
     const pdfInfo = inspectPdfBytes(pdf);
     if (page > pdfInfo.pageCount) {
       throw new ConnectorError("page_out_of_range", "The requested page or slide number is outside the document.");
     }
+
     const dimensions = pdfPageDimensions(pdf, page);
-    const naturalHeight = Math.round(width * dimensions.height / dimensions.width);
-    const height = clampDimension(positiveInteger(input.height, naturalHeight));
+    const naturalHeight = Math.round(boundingWidth * dimensions.height / dimensions.width);
+    const boundingHeight = clampDimension(positiveInteger(input.height, naturalHeight));
+    const scale = Math.min(
+      boundingWidth / dimensions.width,
+      boundingHeight / dimensions.height,
+    );
+    const renderedWidth = Math.max(1, Math.round(dimensions.width * scale));
+    const renderedHeight = Math.max(1, Math.round(dimensions.height * scale));
     const cropRaw = input.cropRegion as Record<string, unknown> | undefined;
     const crop = cropRaw
       ? {
-          x: Math.min(Math.max(Number(cropRaw.x ?? 0), 0), width - 1),
-          y: Math.min(Math.max(Number(cropRaw.y ?? 0), 0), height - 1),
-          width: Math.min(Math.max(Number(cropRaw.width ?? width), 1), width),
-          height: Math.min(Math.max(Number(cropRaw.height ?? height), 1), height),
+          x: Math.min(Math.max(Number(cropRaw.x ?? 0), 0), renderedWidth - 1),
+          y: Math.min(Math.max(Number(cropRaw.y ?? 0), 0), renderedHeight - 1),
+          width: Math.min(Math.max(Number(cropRaw.width ?? renderedWidth), 1), renderedWidth),
+          height: Math.min(Math.max(Number(cropRaw.height ?? renderedHeight), 1), renderedHeight),
         }
       : undefined;
     if (crop) {
-      crop.width = Math.min(crop.width, width - crop.x);
-      crop.height = Math.min(crop.height, height - crop.y);
+      crop.width = Math.min(crop.width, renderedWidth - crop.x);
+      crop.height = Math.min(crop.height, renderedHeight - crop.y);
     }
 
-    const renderToken = await sealJson(context.env.COOKIE_ENCRYPTION_KEY, {
-      kind: "document-render",
-      userId: context.userId,
-      itemId,
-      expiresAt: Date.now() + 90_000,
+    const outputWidth = Math.max(1, Math.round(crop?.width ?? renderedWidth));
+    const outputHeight = Math.max(1, Math.round(crop?.height ?? renderedHeight));
+    const html = buildPdfJsRenderHtml({
+      pdfBase64: bytesToBase64(pdf),
+      page,
+      width: renderedWidth,
+      height: renderedHeight,
+      crop,
     });
-    const params = new URLSearchParams({
-      page: String(page),
-      width: String(width),
-      height: String(height),
-    });
-    if (crop) {
-      params.set("cropX", String(crop.x));
-      params.set("cropY", String(crop.y));
-      params.set("cropWidth", String(crop.width));
-      params.set("cropHeight", String(crop.height));
-    }
-    const renderUrl = `${RENDER_ORIGIN}${RENDER_ROUTE_PREFIX}${encodeURIComponent(renderToken)}?${params}`;
-    const outputWidth = Math.max(1, Math.round(crop?.width ?? width));
-    const outputHeight = Math.max(1, Math.round(crop?.height ?? height));
-    const png = await screenshotCompletedCanvas(context, renderUrl, outputWidth, outputHeight);
+    const png = await screenshotCompletedCanvas(context, html, outputWidth, outputHeight);
     const converted = await convertImageOutput(context, png, outputFormat);
     const metadata = {
       ...compactVerifiedItem(verified),
@@ -364,7 +298,9 @@ async function renderDocumentPagePdfJs(
       officeConversion: extensionOf(verified.item.name) === ".pdf"
         ? "not_required"
         : "microsoft_graph_pdf",
-      renderer: "cloudflare_browser_run_pdfjs_canvas",
+      renderer: "cloudflare_browser_run_vendored_pdfjs_canvas",
+      pdfConversions: 1,
+      runtimeExternalDependencies: 0,
     };
     return {
       structuredContent: metadata,
@@ -382,7 +318,6 @@ export function registerIntegratedToolsWithPdfJsHotfix(
   server: McpServer,
   contextFactory: () => HotfixContext,
 ): void {
-  installPdfJsRenderRoute();
   const target = server as any;
   const proxy = new Proxy(target, {
     get(object, property) {
