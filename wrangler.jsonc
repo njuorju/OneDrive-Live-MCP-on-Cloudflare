@@ -4,6 +4,9 @@
   "main": "src/index-hotfix.ts",
   "compatibility_date": "2026-07-13",
   "compatibility_flags": ["nodejs_compat"],
+  "build": {
+    "command": "node scripts/prepare-pdfjs.mjs"
+  },
   "vars": {
     "CONNECTOR_NAME": "OneDrive Live MCP",
     "ONEDRIVE_ROOT": "REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER",
