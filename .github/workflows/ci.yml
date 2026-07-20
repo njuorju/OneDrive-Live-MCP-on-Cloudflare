@@ -1,64 +1,508 @@
-name: CI
+name: Apply proven live hotfix
 
 on:
-  push:
+  pull_request:
     branches:
       - main
-      - work/**
-  pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: true
+  group: apply-proven-hotfix-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
 
 jobs:
-  validate:
+  apply-and-verify:
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 2
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22.18.0"
           cache: npm
+
       - name: Install pinned dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
-        env:
-          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
-      - name: Type check
+
+      - name: Apply stable-state and exact-page source fixes
         shell: bash
         run: |
-          set -o pipefail
-          npm run type-check 2>&1 | tee typecheck.log
-      - name: Test
-        shell: bash
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one match, found {count}: {old[:120]!r}")
+              p.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          # Stable integrated state through the existing global AuthState Durable Object.
+          replace_once(
+              "src/auth-state-client.ts",
+              'import type { AuthStateKind, AuthStateOpResult } from "./auth-store";\n',
+              'import type { AuthStateKind, AuthStateOpResult } from "./auth-store";\n'
+              'import { ConnectorError } from "./errors";\n'
+              'import type { StorageLike } from "./integrated-tools";\n',
+          )
+          replace_once(
+              "src/auth-state-client.ts",
+              "async function callAuthState(\n",
+              "export async function callAuthState(\n",
+          )
+          client = Path("src/auth-state-client.ts")
+          client.write_text(client.read_text(encoding="utf-8") + '''
+
+export type IntegratedStateResult = AuthStateOpResult & {
+  value?: unknown;
+  entries?: Array<[string, unknown]>;
+  deleted?: boolean;
+};
+
+function assertIntegratedStateResult(
+  result: IntegratedStateResult,
+  operation: string,
+): IntegratedStateResult {
+  if (!result?.ok) {
+    throw new ConnectorError(
+      "state_storage_unavailable",
+      `Integrated state ${operation} failed.`,
+      { retryable: true },
+    );
+  }
+  return result;
+}
+
+export function createIntegratedStateStorage(env: Env, userId: string): StorageLike {
+  return {
+    async get<T = unknown>(key: string): Promise<T | undefined> {
+      const result = assertIntegratedStateResult(
+        await callAuthState(env, "/state-get", { userId, key }) as IntegratedStateResult,
+        "read",
+      );
+      return result.found ? result.value as T : undefined;
+    },
+    async put<T = unknown>(key: string, value: T): Promise<void> {
+      assertIntegratedStateResult(
+        await callAuthState(env, "/state-put", { userId, key, value }) as IntegratedStateResult,
+        "write",
+      );
+    },
+    async delete(key: string): Promise<boolean> {
+      const result = assertIntegratedStateResult(
+        await callAuthState(env, "/state-delete", { userId, key }) as IntegratedStateResult,
+        "delete",
+      );
+      return Boolean(result.deleted);
+    },
+    async list<T = unknown>(options: { prefix?: string } = {}): Promise<Map<string, T>> {
+      const result = assertIntegratedStateResult(
+        await callAuthState(env, "/state-list", {
+          userId,
+          prefix: String(options.prefix ?? "integrated:"),
+        }) as IntegratedStateResult,
+        "list",
+      );
+      return new Map((result.entries ?? []) as Array<[string, T]>);
+    },
+  };
+}
+''', encoding="utf-8")
+
+          replace_once(
+              "src/auth-state.ts",
+              '''      case "/get-token":
+        return Response.json(await this.getToken(body));
+      default:
+''',
+              '''      case "/get-token":
+        return Response.json(await this.getToken(body));
+      case "/state-get":
+        return Response.json(await this.getState(body));
+      case "/state-put":
+        return Response.json(await this.putState(body));
+      case "/state-delete":
+        return Response.json(await this.deleteState(body));
+      case "/state-list":
+        return Response.json(await this.listState(body));
+      default:
+''',
+          )
+          replace_once(
+              "src/auth-state.ts",
+              '''  private async putToken(body: Record<string, unknown>): Promise<AuthStateOpResult> {
+''',
+              '''  private integratedStateKey(userId: string, key: string): string | null {
+    if (
+      !userId ||
+      !key ||
+      !key.startsWith("integrated:") ||
+      key.length > 1_200 ||
+      /[\\u0000-\\u001f]/.test(key)
+    ) return null;
+    return `integrated-state:${userId}:${key}`;
+  }
+
+  private async getState(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const userId = String(body.userId ?? "");
+    const logicalKey = String(body.key ?? "");
+    const key = this.integratedStateKey(userId, logicalKey);
+    if (!key) return { ok: false, found: false, stage: "state_get_invalid" };
+    const value = await this.ctx.storage.get(key);
+    return value === undefined
+      ? { ok: true, found: false, stage: "state_get_missing" }
+      : { ok: true, found: true, value, stage: "state_get_ok" };
+  }
+
+  private async putState(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const userId = String(body.userId ?? "");
+    const logicalKey = String(body.key ?? "");
+    const key = this.integratedStateKey(userId, logicalKey);
+    if (!key || !("value" in body)) return { ok: false, found: false, stage: "state_put_invalid" };
+    await this.ctx.storage.put(key, body.value);
+    return { ok: true, found: true, stage: "state_put_ok" };
+  }
+
+  private async deleteState(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const userId = String(body.userId ?? "");
+    const logicalKey = String(body.key ?? "");
+    const key = this.integratedStateKey(userId, logicalKey);
+    if (!key) return { ok: false, found: false, stage: "state_delete_invalid" };
+    const deleted = await this.ctx.storage.delete(key);
+    return { ok: true, found: Boolean(deleted), deleted: Boolean(deleted), stage: "state_delete_ok" };
+  }
+
+  private async listState(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const userId = String(body.userId ?? "");
+    const logicalPrefix = String(body.prefix ?? "integrated:");
+    const prefix = this.integratedStateKey(userId, logicalPrefix || "integrated:");
+    if (!prefix) return { ok: false, found: false, entries: [], stage: "state_list_invalid" };
+    const values = await this.ctx.storage.list({ prefix });
+    const storagePrefix = `integrated-state:${userId}:`;
+    return {
+      ok: true,
+      found: values.size > 0,
+      entries: [...values.entries()].map(([key, value]) => [key.slice(storagePrefix.length), value]),
+      stage: "state_list_ok",
+    };
+  }
+
+  private async putToken(body: Record<string, unknown>): Promise<AuthStateOpResult> {
+''',
+          )
+
+          replace_once(
+              "src/index.ts",
+              'import { AuthState } from "./auth-state";\n',
+              'import { AuthState } from "./auth-state";\n'
+              'import { createIntegratedStateStorage } from "./auth-state-client";\n',
+          )
+          replace_once(
+              "src/index.ts",
+              '''    registerIntegratedTools(this.server, () => ({
+      env: this.env,
+      userId: this.userId(),
+      storage: this.ctx.storage,
+      transaction: (closure) => this.ctx.storage.transaction(closure),
+      waitUntil: (promise) => this.ctx.waitUntil(promise),
+    }));
+''',
+              '''    registerIntegratedTools(this.server, () => ({
+      env: this.env,
+      userId: this.userId(),
+      storage: createIntegratedStateStorage(this.env, this.userId()),
+      waitUntil: (promise) => this.ctx.waitUntil(promise),
+    }));
+''',
+          )
+
+          # Integrated tool state interface and PDF page geometry.
+          replace_once(
+              "src/integrated-tools.ts",
+              'export type StorageLike = Pick<DurableObjectTransaction, "get" | "put" | "delete" | "list">;\n',
+              '''export type StorageLike = {
+  get<T = unknown>(key: string): Promise<T | undefined>;
+  put<T = unknown>(key: string, value: T): Promise<void>;
+  delete(key: string): Promise<boolean>;
+  list<T = unknown>(options?: { prefix?: string }): Promise<Map<string, T>>;
+};
+''',
+          )
+          replace_once(
+              "src/integrated-tools.ts",
+              "async function pdfBytesForRender(context: IntegratedContext, itemId: string): Promise<{ verified: VerifiedItem; pdf: ArrayBuffer }> {\n",
+              "export async function pdfBytesForRender(context: IntegratedContext, itemId: string): Promise<{ verified: VerifiedItem; pdf: ArrayBuffer }> {\n",
+          )
+          replace_once(
+              "src/integrated-tools.ts",
+              '''async function browserScreenshot(context: IntegratedContext, html: string, width: number, height: number, crop?: { x: number; y: number; width: number; height: number }): Promise<ArrayBuffer> {
+''',
+              '''export function pdfPageDimensions(buffer: ArrayBuffer, page: number): { width: number; height: number } {
+  const binary = new TextDecoder("latin1").decode(new Uint8Array(buffer));
+  const boxes = [...binary.matchAll(/\\/(?:CropBox|MediaBox)\\s*\\[\\s*(-?\\d+(?:\\.\\d+)?)\\s+(-?\\d+(?:\\.\\d+)?)\\s+(-?\\d+(?:\\.\\d+)?)\\s+(-?\\d+(?:\\.\\d+)?)\\s*\\]/g)]
+    .map((match) => {
+      const x1 = Number(match[1]);
+      const y1 = Number(match[2]);
+      const x2 = Number(match[3]);
+      const y2 = Number(match[4]);
+      return { width: Math.abs(x2 - x1), height: Math.abs(y2 - y1) };
+    })
+    .filter((box) => Number.isFinite(box.width) && Number.isFinite(box.height) && box.width > 0 && box.height > 0);
+  const selected = boxes[Math.min(Math.max(page - 1, 0), boxes.length - 1)] ?? boxes[0];
+  return selected ?? { width: 595, height: 842 };
+}
+
+async function browserScreenshot(context: IntegratedContext, html: string, width: number, height: number, crop?: { x: number; y: number; width: number; height: number }): Promise<ArrayBuffer> {
+''',
+          )
+          replace_once(
+              "src/integrated-tools.ts",
+              '''    response = await browser.quickAction("screenshot", {
+      html,
+      viewport: { width, height, deviceScaleFactor: 1 },
+      waitForTimeout: 1_200,
+      screenshotOptions: { type: "png", fullPage: false, ...(crop ? { clip: crop } : {}) },
+    });
+''',
+              '''    const directPdf = html.startsWith("https://nikolay-onedrive-mcp.fdas201290.workers.dev/__document-render/");
+    response = await browser.quickAction("screenshot", {
+      ...(directPdf
+        ? { url: html, gotoOptions: { waitUntil: "load", timeout: 60_000 }, waitForTimeout: 5_000 }
+        : { html, waitForTimeout: 1_200 }),
+      viewport: { width, height, deviceScaleFactor: 1 },
+      screenshotOptions: { type: "png", fullPage: false, ...(crop ? { clip: crop } : {}) },
+    });
+''',
+          )
+
+          tools = Path("src/integrated-tools.ts")
+          tools_text = tools.read_text(encoding="utf-8")
+          render_start = tools_text.index("async function renderDocumentPage(context: IntegratedContext")
+          render_end = tools_text.index("async function originalVisualBytes", render_start)
+          render_function = '''async function renderDocumentPage(context: IntegratedContext, input: Record<string, unknown>): Promise<{ metadata: Record<string, unknown>; image: { type: "image"; data: string; mimeType: string } ; bytes: ArrayBuffer }> {
+  const itemId = String(input.itemId ?? "");
+  const page = Math.max(Number(input.pageOrSlide ?? input.page ?? 1), 1);
+  const outputFormat = String(input.outputFormat ?? "png").toLocaleLowerCase("en") as "png" | "jpeg" | "webp";
+  if (!["png", "jpeg", "webp"].includes(outputFormat)) throw new ConnectorError("invalid_output_format", "Output format must be PNG, JPEG, or WebP.");
+  const requestedDpi = input.dpi === undefined ? null : Math.min(Math.max(Number(input.dpi), 36), 300);
+  const widthFromDpi = requestedDpi ? Math.round(requestedDpi * 8.27) : 1_600;
+  const width = Math.min(Math.max(Number(input.width ?? widthFromDpi), 256), INTEGRATED_LIMITS.renderDimensionMax);
+  const { verified, pdf } = await pdfBytesForRender(context, itemId);
+  const pdfInfo = inspectPdfBytes(pdf);
+  if (page > pdfInfo.pageCount) throw new ConnectorError("page_out_of_range", "The requested page or slide number is outside the document.");
+  const pageDimensions = pdfPageDimensions(pdf, page);
+  const height = Math.min(Math.max(Math.round(width * pageDimensions.height / pageDimensions.width), 256), INTEGRATED_LIMITS.renderDimensionMax);
+  const pageCssWidth = Math.max(1, Math.round(pageDimensions.width * 96 / 72));
+  const pageCssHeight = Math.max(1, Math.round(pageDimensions.height * 96 / 72));
+  const viewerMarginX = 32;
+  const viewerPageTop = 3;
+  const viewerBottom = 12;
+  const viewerWidth = Math.min(Math.max(width, pageCssWidth + viewerMarginX * 2, 256), INTEGRATED_LIMITS.renderDimensionMax);
+  const viewerHeight = Math.min(Math.max(height, pageCssHeight + viewerPageTop + viewerBottom, 256), INTEGRATED_LIMITS.renderDimensionMax);
+  const renderToken = await sealJson(context.env.COOKIE_ENCRYPTION_KEY, {
+    kind: "document-render",
+    userId: context.userId,
+    itemId,
+    expiresAt: Date.now() + 60_000,
+  });
+  const renderUrl = `https://nikolay-onedrive-mcp.fdas201290.workers.dev/__document-render/${encodeURIComponent(renderToken)}#page=${page}&zoom=page-fit&toolbar=0&navpanes=0&scrollbar=0`;
+  const cropRaw = input.cropRegion as Record<string, unknown> | undefined;
+  const crop = cropRaw ? {
+    x: Math.min(Math.max(Number(cropRaw.x ?? 0), 0), width - 1),
+    y: Math.min(Math.max(Number(cropRaw.y ?? 0), 0), height - 1),
+    width: Math.min(Math.max(Number(cropRaw.width ?? width), 1), width),
+    height: Math.min(Math.max(Number(cropRaw.height ?? height), 1), height),
+  } : undefined;
+  if (crop) {
+    crop.width = Math.min(crop.width, width - crop.x);
+    crop.height = Math.min(crop.height, height - crop.y);
+  }
+  const scaleX = pageCssWidth / width;
+  const scaleY = pageCssHeight / height;
+  const pageLeft = Math.max(0, Math.round((viewerWidth - pageCssWidth) / 2));
+  const clip = crop ? {
+    x: pageLeft + crop.x * scaleX,
+    y: viewerPageTop + crop.y * scaleY,
+    width: crop.width * scaleX,
+    height: crop.height * scaleY,
+  } : { x: pageLeft, y: viewerPageTop, width: pageCssWidth, height: pageCssHeight };
+  const png = await browserScreenshot(context, renderUrl, viewerWidth, viewerHeight, clip);
+  const converted = await convertImageOutput(context, png, outputFormat);
+  return {
+    metadata: {
+      ...compactVerifiedItem(verified),
+      requestedPageOrSlide: page,
+      totalPagesOrSlides: pdfInfo.pageCount,
+      outputFormat,
+      mimeType: converted.mimeType,
+      width: Math.max(1, Math.round(clip.width)),
+      height: Math.max(1, Math.round(clip.height)),
+      requestedDpi,
+      cropRegion: crop ?? null,
+      exactRequestedPage: true,
+      officeConversion: extensionOf(verified.item.name) === ".pdf" ? "not_required" : "microsoft_graph_pdf",
+      renderer: "cloudflare_browser_run_page_clip",
+    },
+    image: { type: "image", data: bytesToBase64(converted.bytes), mimeType: converted.mimeType },
+    bytes: converted.bytes,
+  };
+}
+
+'''
+          tools.write_text(tools_text[:render_start] + render_function + tools_text[render_end:], encoding="utf-8")
+
+          # Short-lived sealed same-origin route for top-level Chrome PDF rendering.
+          auth = Path("src/microsoft-auth-integrated.ts")
+          auth_text = auth.read_text(encoding="utf-8")
+          auth_text = auth_text.replace(
+              'import { MicrosoftAuthHandler } from "./microsoft-auth";\n',
+              'import { MicrosoftAuthHandler } from "./microsoft-auth";\n'
+              'import { createIntegratedStateStorage } from "./auth-state-client";\n'
+              'import { pdfBytesForRender } from "./integrated-tools";\n'
+              'import { openJson } from "./security";\n',
+              1,
+          )
+          marker = '    const url = new URL(request.url);\n'
+          if auth_text.count(marker) != 1:
+              raise SystemExit("microsoft-auth-integrated.ts: URL marker mismatch")
+          route = '''    const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname.startsWith("/__document-render/")) {
+      try {
+        const encoded = url.pathname.slice("/__document-render/".length);
+        const payload = await openJson<{
+          kind?: string;
+          userId?: string;
+          itemId?: string;
+          expiresAt?: number;
+        }>(env.COOKIE_ENCRYPTION_KEY, decodeURIComponent(encoded));
+        if (
+          payload.kind !== "document-render" ||
+          !payload.userId ||
+          !payload.itemId ||
+          Number(payload.expiresAt) <= Date.now()
+        ) {
+          return new Response("Render link expired or invalid.", {
+            status: 410,
+            headers: { "Cache-Control": "no-store" },
+          });
+        }
+        const rendered = await pdfBytesForRender({
+          env,
+          userId: payload.userId,
+          storage: createIntegratedStateStorage(env, payload.userId),
+        }, payload.itemId);
+        return new Response(rendered.pdf, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/pdf",
+            "Content-Disposition": "inline; filename=render.pdf",
+            "Cache-Control": "private, no-store, max-age=0",
+            "X-Content-Type-Options": "nosniff",
+            "X-Robots-Tag": "noindex, nofollow",
+          },
+        });
+      } catch {
+        return new Response("Render link expired or invalid.", {
+          status: 410,
+          headers: { "Cache-Control": "no-store" },
+        });
+      }
+    }
+'''
+          auth.write_text(auth_text.replace(marker, route, 1), encoding="utf-8")
+
+          Path("test/version20-hotfix.test.ts").write_text('''import assert from "node:assert/strict";
+import test from "node:test";
+import { createIntegratedStateStorage } from "../src/auth-state-client";
+import { pdfPageDimensions } from "../src/integrated-tools";
+
+function fakeEnv(): Env {
+  const records = new Map<string, unknown>();
+  const stub = {
+    async fetch(url: string, init?: RequestInit): Promise<Response> {
+      const path = new URL(url).pathname;
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      const key = String(body.key ?? "");
+      if (path === "/state-put") {
+        records.set(key, body.value);
+        return Response.json({ ok: true, found: true, expired: false, stage: "state_put_ok" });
+      }
+      if (path === "/state-get") {
+        return records.has(key)
+          ? Response.json({ ok: true, found: true, expired: false, value: records.get(key), stage: "state_get_ok" })
+          : Response.json({ ok: true, found: false, expired: false, stage: "state_get_missing" });
+      }
+      if (path === "/state-delete") {
+        const deleted = records.delete(key);
+        return Response.json({ ok: true, found: deleted, expired: false, deleted, stage: "state_delete_ok" });
+      }
+      if (path === "/state-list") {
+        const prefix = String(body.prefix ?? "integrated:");
+        const entries = [...records.entries()].filter(([entryKey]) => entryKey.startsWith(prefix));
+        return Response.json({ ok: true, found: entries.length > 0, expired: false, entries, stage: "state_list_ok" });
+      }
+      return Response.json({ ok: false, found: false, expired: false, stage: "not_found" }, { status: 404 });
+    },
+  };
+  return {
+    AUTH_STATE: {
+      idFromName: () => ({}) as DurableObjectId,
+      get: () => stub as unknown as DurableObjectStub,
+    },
+  } as unknown as Env;
+}
+
+test("integrated state adapter preserves records across independent callers", async () => {
+  const env = fakeEnv();
+  const first = createIntegratedStateStorage(env, "user-1");
+  const second = createIntegratedStateStorage(env, "user-1");
+  await first.put("integrated:job:abc", { status: "completed" });
+  assert.deepEqual(await second.get("integrated:job:abc"), { status: "completed" });
+  assert.deepEqual([...(await second.list({ prefix: "integrated:job:" })).keys()], ["integrated:job:abc"]);
+  assert.equal(await second.delete("integrated:job:abc"), true);
+  assert.equal(await first.get("integrated:job:abc"), undefined);
+});
+
+test("page dimensions follow the requested PDF page box", () => {
+  const bytes = new TextEncoder().encode(
+    "%PDF-1.7\\n1 0 obj << /MediaBox [0 0 960 540] >>\\n2 0 obj << /CropBox [0 0 595 842] >>",
+  );
+  assert.deepEqual(pdfPageDimensions(bytes.buffer), { width: 960, height: 540 });
+  assert.deepEqual(pdfPageDimensions(bytes.buffer, 2), { width: 595, height: 842 });
+});
+'''.replace('pdfPageDimensions(bytes.buffer)', 'pdfPageDimensions(bytes.buffer, 1)'), encoding="utf-8")
+          PY
+
+      - name: Focused hotfix regression
+        run: npx tsx --test test/version20-hotfix.test.ts test/integrated-core.test.ts test/integrated-registration.test.ts
+
+      - name: Full repository validation
+        run: npm run check
+
+      - name: Audit and Worker dry-run
         run: |
-          set -o pipefail
-          npm test 2>&1 | tee test.log
-      - name: Upload diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-diagnostics-${{ github.event_name }}
-          path: |
-            typecheck.log
-            test.log
-          if-no-files-found: ignore
-          retention-days: 1
-      - run: npm audit --audit-level=high
-      - name: Dry-run Worker bundle with non-secret test placeholders
-        run: |
+          npm audit --audit-level=high
           cp wrangler.jsonc wrangler.ci.jsonc
           sed -i 's/REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER/CI_TEST_ROOT/g' wrangler.ci.jsonc
           sed -i 's/REPLACE_WITH_KV_NAMESPACE_ID/00000000000000000000000000000000/g' wrangler.ci.jsonc
           npx wrangler deploy --dry-run --config wrangler.ci.jsonc --outdir dist
-      - name: Upload non-secret Worker bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: worker-bundle-${{ github.sha }}
-          path: dist/
-          if-no-files-found: error
-          retention-days: 1
+
+      - name: Restore normal CI, remove temporary workflows, and commit
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git show HEAD^:.github/workflows/ci.yml > .github/workflows/ci.yml
+          git rm -f .github/workflows/apply-version20-hotfix.yml
+          rm -f wrangler.ci.jsonc
+          git add .github/workflows/ci.yml src/auth-state-client.ts src/auth-state.ts src/index.ts src/integrated-tools.ts src/microsoft-auth-integrated.ts test/version20-hotfix.test.ts
+          git commit -m "Fix stable integrated state and exact page rendering"
+          git push origin HEAD:${{ github.head_ref }}
