@@ -58,7 +58,7 @@ test("inline libraries cannot terminate their script element", () => {
     workerSource: "window.worker='</SCRIPT>';",
   });
 
-  assert.doesNotMatch(html, /window\.main='<\/script>'/i);
-  assert.match(html, /window\.main='<\\\/script>'/);
-  assert.match(html, /window\.worker='<\\\/SCRIPT>'/);
+  assert.doesNotMatch(html, /window\.(main|worker)='<\/script>'/i);
+  assert.match(html, /window\.main='<\\\/script>';/i);
+  assert.match(html, /window\.worker='<\\\/script>';/i);
 });
