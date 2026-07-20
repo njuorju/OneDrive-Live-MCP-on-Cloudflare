@@ -34,6 +34,12 @@ export function registerSourceSnapshotRepairTools(
   const originalSend = target.sendToolListChanged;
   target.sendToolListChanged = () => undefined;
   try {
+    // The integrated tool surface is registered first. Remove only the two legacy
+    // entries that this repair intentionally replaces before asking the SDK to
+    // register their resumable implementations.
+    delete target._registeredTools?.create_source_snapshot;
+    delete target._registeredTools?.get_job_status;
+
     server.registerTool(
       "create_source_snapshot",
       {
