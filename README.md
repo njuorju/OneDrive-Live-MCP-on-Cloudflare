@@ -1,229 +1,160 @@
 # OneDrive Live MCP on Cloudflare
 
-A private remote MCP server that lets ChatGPT work with one configured folder tree in a **personal Microsoft OneDrive** account without a local workstation, tunnel, or recurring corpus snapshot.
+A private OAuth-protected MCP server that gives ChatGPT live access to one configured folder tree in a personal Microsoft OneDrive account. The Worker supports ordinary search/read/write operations, deterministic document and visual inspection, immutable source-library snapshots, catalogue validation, and tightly controlled integrity plans.
 
 ```text
-ChatGPT
-  -> authenticated MCP over HTTPS
-  -> Cloudflare Worker
-  -> Microsoft Graph delegated Files.ReadWrite
-  -> one configured OneDrive folder tree
+ChatGPT -> authenticated MCP -> Cloudflare Worker
+        -> Microsoft Graph delegated Files.ReadWrite
+        -> one configured OneDrive root
 ```
 
-The Microsoft permission is account-wide, but the Worker is deliberately narrower. Every source item and destination folder is independently resolved and its live ancestry is walked back to `ONEDRIVE_ROOT` before reading, retrieving, renaming, replacing, moving, or creating content.
+Microsoft permission is account-wide, but every source and destination is resolved live and walked back to `ONEDRIVE_ROOT`. Cross-drive, remote/shared, ambiguous, stale, or out-of-root operations fail closed.
 
-The connector does **not** expose deletion, recycle-bin, sharing, public-link, permission-management, cross-drive move, arbitrary Graph request, arbitrary URL fetch, arbitrary binary upload, or Office-binary editing tools.
+## Permission boundary
 
-## Features
+The Entra application requires only:
 
-- Live Microsoft Graph search across filenames, metadata, and Microsoft-indexed contents.
-- Folder browsing and bounded document-text extraction under one configured root.
-- Direct PPTX slide and speaker-note extraction.
-- Cloudflare Workers AI conversion for supported PDF, Office, image, HTML, XML, CSV, ODT/ODS, and related formats.
-- Visual-asset discovery with dimensions, orientation, modified date, eTag, and analysis/original availability.
-- Actual MCP image content for vision-capable model analysis.
-- Exact original-file retrieval through an authenticated MCP resource link.
-- Bounded creation of folders and UTF-8 text/code files.
-- Mandatory eTag concurrency for text replacement.
-- Root-scoped rename and move operations with conflict and circular-move checks.
-- Fresh Microsoft consent for delegated `Files.ReadWrite`, `User.Read`, and `offline_access`.
-- Immutable Microsoft-account allow-list.
-- Strongly consistent one-time OAuth state in a Durable Object.
-- Microsoft tokens encrypted before Durable Object storage.
-- Optional converted-text cache in Workers KV; disabling it performs no cache reads or writes.
-- Separate liveness and authenticated readiness endpoints.
+- delegated `Files.ReadWrite`;
+- delegated `User.Read`;
+- OAuth `offline_access`.
 
-## MCP tools
+Do not add `.All`, Sites, directory, application, or tenant-wide SharePoint permissions. The connector does not expose sharing, public links, permission changes, permanent deletion, recycle-bin emptying, arbitrary Graph requests, arbitrary URL fetches, or unrestricted binary uploads.
 
-### Existing read compatibility
+## Existing compatibility tools
 
-- `onedrive_status`
-- `search_onedrive`
-- `search_onedrive_work`
-- `list_onedrive_folder`
-- `list_onedrive_work_folder`
-- `read_onedrive_file`
-- `read_onedrive_work_file`
-- canonical `search`
-- canonical `fetch`
+The following names and schemas remain compatible:
 
-### Visual and exact-file retrieval
+`onedrive_status`, `search`, `search_onedrive`, `search_onedrive_work`, `fetch`, `read_onedrive_file`, `read_onedrive_work_file`, `list_onedrive_folder`, `list_onedrive_work_folder`, `list_visual_assets`, `get_image_metadata`, `fetch_image_for_analysis`, `fetch_original_file`, `create_folder`, `create_text_file`, `replace_text_file`, `rename_item`, `move_item`.
 
-- `list_visual_assets`
-- `get_image_metadata`
-- `fetch_image_for_analysis`
-- `fetch_original_file`
+## Integrated tools
 
-Recommended model sequence:
+### Snapshots and inspection
 
-1. Discover candidates with `list_visual_assets`.
-2. Inspect shortlisted candidates with `get_image_metadata`.
-3. Call `fetch_image_for_analysis` to return actual MCP image content.
-4. Select the relevant asset.
-5. Call `fetch_original_file` to retrieve the unchanged original for reuse in an artifact.
+- `create_source_snapshot`
+- `query_source_snapshot`
+- `compare_snapshot_to_live`
+- `inspect_document`
+- `calculate_file_hashes`
+- `find_source_duplicates`
 
-### Bounded writes
+### Document visuals and rendering
 
-- `create_folder`
-- `create_text_file`
-- `replace_text_file`
-- `rename_item`
-- `move_item`
+- `scan_visual_sources`
+- `list_document_visuals`
+- `render_document_page`
+- `fetch_document_visual_for_analysis`
+- `fetch_document_visual_original`
+- `save_document_visual`
+- `create_visual_contact_sheet`
+- `find_visual_duplicates`
 
-All read tools are annotated read-only. Write tools are annotated mutating but non-destructive because no delete, recycle-bin, share, or permission operation exists.
+### Copy, plans, catalogues, and jobs
 
-## Image and file-transfer mechanisms
+- `copy_item`
+- `create_integrity_plan`
+- `validate_integrity_plan`
+- `execute_integrity_plan`
+- `get_integrity_plan_status`
+- `diff_scope_before_after`
+- `validate_catalogue`
+- `classify_administrative_files`
+- `get_job_status`
 
-`fetch_image_for_analysis` returns a protocol-defined MCP `image` content block containing a bounded PNG preview. It does not return a prose description, extracted Markdown, ordinary JSON base64, a Graph download URL, or a public URL.
+`execute_integrity_plan` is the only tool marked destructive. It can move explicitly approved items to the OneDrive recycle bin, never permanently delete them. It requires a validated, signed, short-lived token and rechecks ancestry, path, eTag, SHA-256, destination availability, dependencies, ambiguity, final decision, and deletion-log preparation before mutation.
 
-`fetch_original_file` returns an MCP `resource_link` using a private `onedrive-original:///items/...` URI. The authenticated resource handler revalidates the root boundary, eTag, allowlisted type, file signature, and size, then returns exact original bytes as binary MCP resource content.
+See [docs/INTEGRATED_TOOLS.md](docs/INTEGRATED_TOOLS.md) for schemas, lifecycle, error behavior, limits, and format details.
 
-See **[docs/OPENAI_MCP_FILES_IMAGES.md](docs/OPENAI_MCP_FILES_IMAGES.md)** for the protocol decision and official references.
+## Architecture
 
-## Quick start
+One service layer is shared by recursive enumeration, root validation, verified download/upload/copy, hashing, extraction, visual provenance, rendering, snapshots, jobs, plans, locks, and audit logs. Results are versioned by item ID, eTag, and operation options. An eTag change invalidates extracted, rendered, hashed, and inventoried results.
 
-1. Clone and install pinned dependencies:
+- Existing Durable Object storage holds bounded snapshot metadata/records, jobs, plans, locks, and operation logs.
+- Existing KV caches deterministic extracted text by version material.
+- Cloudflare Images handles bounded image conversion and previews.
+- Browser Run is used only for actual requested page/slide/contact-sheet rendering.
+- Office rendering uses Microsoft Graph PDF conversion followed by exact requested-page rendering.
+- No R2 bucket is required.
 
-   ```bash
-   npm ci
-   npx wrangler login
-   ```
-
-2. Create a Workers KV namespace:
-
-   ```bash
-   npx wrangler kv namespace create OAUTH_KV
-   ```
-
-3. Edit the tracked **sanitized template** `wrangler.jsonc`:
-
-   - replace `REPLACE_WITH_KV_NAMESPACE_ID`;
-   - replace `REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER` with the exact folder path, such as `Work` or `Work/Projects`;
-   - preserve all existing Durable Object migrations;
-   - ensure the `AI` and `IMAGES` bindings are available;
-   - optionally rename the Worker and connector.
-
-   Do not deploy the repository template over an existing personalized Worker until its live bindings, root, account-specific non-secret values, and rollback version have been captured.
-
-4. Add Worker secrets by name only:
-
-   ```bash
-   npx wrangler secret put MICROSOFT_CLIENT_ID
-   npx wrangler secret put MICROSOFT_CLIENT_SECRET
-   npx wrangler secret put COOKIE_ENCRYPTION_KEY
-   npx wrangler secret put OWNER_MICROSOFT_ID
-   ```
-
-5. Validate before deployment:
-
-   ```bash
-   npm run check
-   npx wrangler deploy --dry-run --outdir dist
-   ```
-
-6. Follow **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** for in-place deployment, rollback capture, fresh Microsoft consent, and bounded acceptance tests.
-
-## Configuration
-
-Tracked non-secret configuration in `wrangler.jsonc`:
-
-| Variable | Purpose | Default |
-|---|---|---:|
-| `CONNECTOR_NAME` | Human-readable consent/app name | `OneDrive Live MCP` |
-| `ONEDRIVE_ROOT` | Exact allowed OneDrive folder path | required |
-| `MAX_FILE_MB` | Maximum text-extraction download size | `20` |
-| `MAX_ORIGINAL_FILE_MB` | Maximum exact original-file size | `25` |
-| `MAX_TEXT_WRITE_KB` | Maximum UTF-8 text creation/replacement size | `512` |
-| `MAX_READ_CHARS` | Maximum text characters returned per call | `50000` |
-| `CACHE_TTL_SECONDS` | Converted-text cache lifetime; `0` fully disables cache I/O | `604800` |
-| `MAX_IMAGE_INPUT_MB` | Maximum source image bytes accepted for analysis | `15` |
-| `MAX_IMAGE_PIXELS` | Maximum decoded pixel count | `40000000` |
-| `MAX_IMAGE_DIMENSION` | Maximum source width or height | `8192` |
-| `MAX_IMAGE_PAGES` | Reserved bounded multi-page visual limit | `8` |
-| `IMAGE_PROCESSING_TIMEOUT_MS` | Image inspection/conversion timeout | `15000` |
-
-Malformed, negative, non-finite, fractional, or out-of-range numeric values fail closed during readiness and at use sites.
-
-Cloudflare Worker secrets:
-
-- `MICROSOFT_CLIENT_ID`
-- `MICROSOFT_CLIENT_SECRET`
-- `COOKIE_ENCRYPTION_KEY`
-- `OWNER_MICROSOFT_ID`
-
-Never commit these values, `.dev.vars`, OAuth state, tokens, downloaded OneDrive files, or private image fixtures.
-
-## Data handling
-
-There is no full OneDrive snapshot. Search and folder listing are live. A requested file is downloaded only for text extraction, visual analysis, or exact original retrieval.
-
-Converted document text may be cached for the configured TTL. Cache keys are one-way hashes of item version material and contain no token, account identifier, drive identifier, raw item ID, or raw eTag. Set `CACHE_TTL_SECONDS` to `0` to perform no cache reads and no cache writes.
-
-Original files and generated visual previews are not written back to OneDrive. Visual previews are ephemeral Worker results. No sharing link is created.
-
-See **[SECURITY.md](SECURITY.md)** for the threat model and storage boundaries.
+See [docs/INTEGRATED_SOURCE_INTEGRITY_ARCHITECTURE.md](docs/INTEGRATED_SOURCE_INTEGRITY_ARCHITECTURE.md).
 
 ## Supported formats
 
-### Text extraction
+Deterministic inspection and normalized-text hashing: PDF, DOCX, PPTX, POTX, PPSX, HTML, TXT, Markdown, CSV, and JSON where readable text exists.
 
-Direct decoding:
+Visual inventory: common loose images plus PDF, DOCX, PPTX, POTX, and PPSX embedded media/composite objects. Exact embedded originals are distinguished from objects that require rendering. PDF exact image extraction is limited to safely identifiable embedded streams; page/region rendering is available separately.
 
-- text, Markdown, JSON, YAML, TOML, INI, logs;
-- common programming and shell-script formats;
-- PPTX/POTX slides and speaker notes.
+Original loose-file retrieval retains the existing allowlist. Generated binary saving is restricted to PNG, JPEG, WebP, safe unchanged originals, and PDF where applicable. Silent overwrite is never allowed.
 
-Cloudflare Workers AI conversion includes supported PDF, DOCX, XLS/XLSX, CSV, HTML/XML, ODT/ODS, and image formats. Availability and account limits depend on Cloudflare.
+## Deterministic text normalization
 
-### Visual analysis
+Normalized-text SHA-256 uses UTF-8 text after Unicode NFKC normalization, BOM removal, normalized line endings, repeated-whitespace collapse, confident page-number-only line removal, and safe removal of obvious repeated extraction artefacts. Substantive word order is retained. Image-only/unextractable files return no normalized hash and `representation_status=image_only_or_unextractable`; bulk OCR is not automatic.
 
-Direct or deterministic Cloudflare Images preview support in this Worker:
+## Hard limits
 
-- JPG/JPEG;
-- PNG;
-- WebP;
-- GIF as a non-animated first-frame preview;
-- HEIC/HEIF where Cloudflare Images accepts the input;
-- SVG rasterized to PNG.
+| Limit | Value |
+|---|---:|
+| Snapshot records | 5,000 |
+| Default snapshot records | 1,000 |
+| Recursion depth | 128 |
+| File processing | 100 MiB |
+| Normalized extracted text | 2,000,000 characters |
+| OOXML ZIP entries | 8,000 |
+| OOXML compressed/uncompressed | 50/250 MiB |
+| OOXML compression ratio | 200:1 |
+| PDF pages | 500 |
+| Presentation slides | 500 |
+| Render dimension | 4,096 px |
+| Visual candidates | 1,000 |
+| Contact-sheet items | 64 |
+| Hash batch | 100 |
+| Snapshot/job/plan retention | 24 hours |
+| Execution-token validity | 15 minutes |
 
-TIFF, BMP, EMF, and WMF are discoverable, signature-checked, and retrievable unchanged through `fetch_original_file`, but the current Cloudflare Images binding does not provide a safe maintained decoder for them. The connector fails closed instead of claiming an analysis preview.
+Ordinary existing tool limits remain controlled by `wrangler.jsonc` variables.
 
-PDF and Office documents remain separate document-reading workflows; they are not silently treated as whole-document images.
+## Cloudflare bindings
 
-### Exact original retrieval
+Required bindings:
 
-Allowlisted originals include common images plus PDF, PPTX, POTX, DOCX, XLSX, CSV, JSON, Markdown, plain text, and common source/configuration formats. Exact bytes, filename, normalized MIME type, size, item ID, and eTag are preserved.
+- Durable Objects: `MCP_OBJECT`, `AUTH_STATE`;
+- KV: `OAUTH_KV`;
+- Workers AI: `AI`;
+- Images: `IMAGES`;
+- Browser Run: `BROWSER`.
 
-## Development
+Existing migrations remain unchanged: `v1 OneDriveMCP`, `v2 AuthState`. No R2, D1, Queue, Workflow, route, or additional secret is required.
+
+## Development and validation
 
 ```bash
-npm run dev
+npm ci
 npm run type-check
 npm test
-npm run check
+npm audit --audit-level=high
+npx wrangler deploy --dry-run --outdir dist
 ```
 
-For local secrets, copy `.dev.vars.example` to `.dev.vars`. The real `.dev.vars` file is ignored by Git.
+CI verifies existing registrations, integrated registrations, deterministic fixtures, security boundaries, type checking, audit status, and the Worker bundle.
 
-## Repository layout
+## Deployment
 
-```text
-src/                  Worker, OAuth, Graph, root-boundary, MCP, image, resource, and write code
-test/                 Unit, integration, protocol, security, image, original-file, and write tests
-docs/                 Deployment, architecture, protocol, and troubleshooting
-scripts/              Configuration validation
-.github/workflows/    CI
-wrangler.jsonc        Sanitized bindings and non-secret settings template
-```
+Follow [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). Capture the current Worker version and live bindings before deployment. Deploy a staged version, run the synthetic acceptance workflow inside a timestamped folder under the configured root, recycle that folder through its own approved cleanup plan, then deploy production from the merged commit. Roll back by redeploying the captured version, not by rebuilding old source.
 
-## Important limitations
+After production deployment, reconnect the ChatGPT app so the new MCP schemas are discovered. Microsoft reconsent is required only when the stored session lacks delegated `Files.ReadWrite` or the connector invalidates stale authorization.
 
-- The implementation targets personal Microsoft accounts through the `consumers` OAuth tenant.
-- Microsoft `Files.ReadWrite` is account-wide; the configured root is an application boundary enforced by Worker code.
-- OneDrive live search depends on Microsoft indexing, so newly uploaded content may not appear immediately.
-- A fresh Microsoft consent flow is required after upgrading from `Files.Read`.
-- Actual ChatGPT vision consumption and artifact-environment reuse of original files must be verified against the deployed connector; successful Graph download alone is not acceptance.
-- Direct upload of generated PPTX/DOCX/XLSX files to OneDrive is intentionally outside this patch.
+## Security and data handling
+
+Tokens are encrypted in `AuthState`. Logs exclude tokens, authorization headers, Graph download URLs, Browser Run URLs, raw document content, image bytes, secrets, and unnecessary account/drive identifiers. No sharing link is created. See [SECURITY.md](SECURITY.md).
+
+## Known limitations
+
+- Personal Microsoft accounts are targeted through the `consumers` OAuth tenant.
+- Snapshot/job/plan state is deliberately bounded and expires after 24 hours.
+- Bulk OCR is not performed.
+- Exact PDF embedded-image extraction is conservative; use page/region rendering when an exact original cannot be proven.
+- Word page rendering depends on Microsoft Graph PDF conversion; page boundaries are those of the converted PDF.
+- Browser Run quota exhaustion returns a structured retryable error; the connector does not enable paid overage automatically.
+- Rendering and OneDrive live mutations require deployed acceptance testing; source tests alone are not production acceptance.
 
 ## License
 
