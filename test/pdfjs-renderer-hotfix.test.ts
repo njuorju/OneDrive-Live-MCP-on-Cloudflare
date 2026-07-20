@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
+  registerIntegratedToolsWithQuietPdfJsHotfix,
+} from "../src/pdfjs-final-registration";
+import {
   buildPdfJsRenderHtml,
   registerIntegratedToolsWithPdfJsHotfix,
 } from "../src/pdfjs-renderer-hotfix";
@@ -68,4 +71,18 @@ test("PDF.js replaces the legacy renderer as the final registered tool callback"
   assert.ok(registered);
   assert.match(String(registered.handler), /renderDocumentPagePdfJs/);
   assert.doesNotMatch(String(registered.handler), /renderDocumentPageHotfix/);
+});
+
+test("quiet registration emits no tool-list-change notifications", () => {
+  const server = new McpServer({ name: "quiet-renderer-test", version: "1.0.0" });
+  let notifications = 0;
+  (server as any).sendToolListChanged = () => {
+    notifications += 1;
+  };
+
+  registerIntegratedToolsWithQuietPdfJsHotfix(server, () => ({}) as never);
+
+  assert.equal(notifications, 0);
+  const registered = (server as any)._registeredTools?.render_document_page;
+  assert.match(String(registered.handler), /renderDocumentPagePdfJs/);
 });
