@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { ConnectorError } from "./errors";
 import {
   MICROSOFT_SCOPES,
@@ -22,6 +23,9 @@ export type GraphDiagnostics = {
 type GraphErrorBody = { error?: { code?: string; message?: string } };
 const DEFAULT_TIMEOUT_MS = 12_000;
 const DEFAULT_MAX_ATTEMPTS = 4;
+const DEFAULT_HASH_MAX_MB = 512;
+const DEFAULT_HASH_TOTAL_TIMEOUT_MS = 5 * 60_000;
+const DEFAULT_HASH_IDLE_TIMEOUT_MS = 30_000;
 function boundedPath(value?: string): string | null {
   if (!value) return null;
   return value.replace(/[\u0000-\u001f]/g, "").split("/").slice(-4).join("/").slice(0, 240);
@@ -69,6 +73,23 @@ function classifyGraphStatus(status: number, graphCode: string, correlationId: s
   if (status === 429) return new ConnectorError("graph_rate_limited", "Microsoft Graph rate-limited the request.", options);
   if (status === 502 || status === 503 || status === 504) return new ConnectorError("graph_transient_failure", "Microsoft Graph returned a transient service failure.", options);
   return new ConnectorError(graphCode === "nameAlreadyExists" ? "name_conflict" : "graph_request_failed", "Microsoft Graph could not complete the request.", options);
+}
+function configuredNumber(env: Env, key: string, fallback: number, minimum: number, maximum: number): number {
+  const raw = Number((env as unknown as Record<string, unknown>)[key] ?? fallback);
+  return Math.min(Math.max(Number.isFinite(raw) ? raw : fallback, minimum), maximum);
+}
+async function readStreamChunk(reader: ReadableStreamDefaultReader<Uint8Array>, timeoutMs: number): Promise<ReadableStreamReadResult<Uint8Array>> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new ConnectorError("graph_stream_timeout", "Microsoft Graph file streaming timed out.", { retryable: true })), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 export async function reliableGraphAccessToken(env: Env, userId: string, diagnostics: GraphDiagnostics): Promise<string> {
@@ -170,16 +191,57 @@ export async function reliableGraphJson<T>(env: Env, userId: string, pathOrUrl: 
   catch { throw new ConnectorError("graph_invalid_response", "Microsoft Graph returned an invalid JSON response.", { retryable: true, correlationId: diagnostics.clientRequestId }); }
 }
 
-export async function reliableGraphBytes(env: Env, userId: string, itemId: string, expectedETag: string | null, diagnostics: GraphDiagnostics): Promise<ArrayBuffer> {
+async function verifiedFileMetadata(env: Env, userId: string, itemId: string, expectedETag: string | null, diagnostics: GraphDiagnostics): Promise<GraphDriveItem> {
   const current = await reliableGraphJson<GraphDriveItem>(env, userId, `/me/drive/items/${encodeURIComponent(itemId)}?$select=id,eTag,size,file`, { ...diagnostics, operation: `${diagnostics.operation}.verify`, endpointCategory: "item_metadata" });
   if (expectedETag && current.eTag !== expectedETag) throw new ConnectorError("snapshot_source_changed", "A source item changed while the snapshot was being captured.");
+  return current;
+}
+
+export async function reliableGraphBytes(env: Env, userId: string, itemId: string, expectedETag: string | null, diagnostics: GraphDiagnostics): Promise<ArrayBuffer> {
+  const current = await verifiedFileMetadata(env, userId, itemId, expectedETag, diagnostics);
   if (Number(current.size ?? 0) > INTEGRATED_LIMITS.fileBytesMax) throw new ConnectorError("file_too_large", "The file exceeds the integrated snapshot size limit.");
   const response = await reliableGraphResponse(env, userId, `/me/drive/items/${encodeURIComponent(itemId)}/content`, { redirect: "follow" }, { ...diagnostics, endpointCategory: "file_content" });
   const length = Number(response.headers.get("content-length") ?? 0);
   if (Number.isFinite(length) && length > INTEGRATED_LIMITS.fileBytesMax) throw new ConnectorError("file_too_large", "The file exceeds the integrated snapshot size limit.");
   const buffer = await response.arrayBuffer();
   if (buffer.byteLength > INTEGRATED_LIMITS.fileBytesMax) throw new ConnectorError("file_too_large", "The file exceeds the integrated snapshot size limit.");
+  if (Number(current.size ?? 0) && buffer.byteLength !== Number(current.size)) throw new ConnectorError("snapshot_source_changed", "The source file size changed while the snapshot was being captured.");
   return buffer;
 }
 
-export const snapshotGraphTestHooks = { retryAfterMs, delayMs, graphUrl, classifyGraphStatus, boundedPath, transientStatus };
+export async function reliableGraphSha256(env: Env, userId: string, itemId: string, expectedETag: string | null, diagnostics: GraphDiagnostics): Promise<{ sha256: string; byteLength: number }> {
+  const current = await verifiedFileMetadata(env, userId, itemId, expectedETag, diagnostics);
+  const expectedSize = Number(current.size ?? 0);
+  const maximumBytes = Math.round(configuredNumber(env, "SNAPSHOT_HASH_MAX_MB", DEFAULT_HASH_MAX_MB, 20, 2048) * 1024 * 1024);
+  if (expectedSize > maximumBytes) throw new ConnectorError("hash_size_limit", "The file exceeds the configured streaming hash size limit.");
+  const response = await reliableGraphResponse(env, userId, `/me/drive/items/${encodeURIComponent(itemId)}/content`, { redirect: "follow" }, { ...diagnostics, operation: `${diagnostics.operation}.sha256`, endpointCategory: "file_content_stream" });
+  if (!response.body) throw new ConnectorError("graph_invalid_response", "Microsoft Graph returned an empty file stream.", { retryable: true });
+  const contentLength = Number(response.headers.get("content-length") ?? 0);
+  if (Number.isFinite(contentLength) && contentLength > maximumBytes) throw new ConnectorError("hash_size_limit", "The file exceeds the configured streaming hash size limit.");
+  const reader = response.body.getReader();
+  const hash = createHash("sha256");
+  const started = Date.now();
+  const totalTimeoutMs = configuredNumber(env, "SNAPSHOT_HASH_TIMEOUT_MS", DEFAULT_HASH_TOTAL_TIMEOUT_MS, 30_000, 15 * 60_000);
+  const idleTimeoutMs = configuredNumber(env, "SNAPSHOT_HASH_IDLE_TIMEOUT_MS", DEFAULT_HASH_IDLE_TIMEOUT_MS, 5_000, 120_000);
+  let total = 0;
+  try {
+    while (true) {
+      if (Date.now() - started > totalTimeoutMs) throw new ConnectorError("graph_stream_timeout", "Microsoft Graph file streaming exceeded the total timeout.", { retryable: true });
+      const chunk = await readStreamChunk(reader, idleTimeoutMs);
+      if (chunk.done) break;
+      total += chunk.value.byteLength;
+      if (total > maximumBytes) throw new ConnectorError("hash_size_limit", "The file exceeds the configured streaming hash size limit.");
+      hash.update(chunk.value);
+    }
+  } catch (error) {
+    try { await reader.cancel(); } catch { /* best effort */ }
+    if (error instanceof ConnectorError) throw error;
+    throw new ConnectorError("graph_stream_error", "Microsoft Graph file streaming was interrupted.", { retryable: true });
+  }
+  if (expectedSize && total !== expectedSize) throw new ConnectorError("snapshot_source_changed", "The source file size changed while the snapshot was being captured.");
+  const sha256 = hash.digest("hex");
+  safeGraphLog("graph_stream_hash_success", { operation: diagnostics.operation, endpointCategory: "file_content_stream", clientRequestId: diagnostics.clientRequestId ?? null, elapsedMs: Date.now() - started, pageNumber: diagnostics.pageNumber ?? null, enumeratedCount: diagnostics.enumeratedCount ?? null, pathContext: boundedPath(diagnostics.pathContext), byteLength: total, concurrency: 1 });
+  return { sha256, byteLength: total };
+}
+
+export const snapshotGraphTestHooks = { retryAfterMs, delayMs, graphUrl, classifyGraphStatus, boundedPath, transientStatus, configuredNumber };
