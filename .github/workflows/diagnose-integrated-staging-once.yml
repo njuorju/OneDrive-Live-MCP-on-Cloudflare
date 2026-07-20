@@ -1,0 +1,76 @@
+name: Diagnose integrated staging once
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/diagnose-integrated-staging-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || secrets.CF_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      WORKER_NAME: nikolay-onedrive-mcp
+      WORKER_URL: https://nikolay-onedrive-mcp.fdas201290.workers.dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
+          cache: npm
+      - name: Run bounded diagnostics
+        shell: bash
+        run: |
+          set +e
+          mkdir -p .diag
+          printf '{"name":"%s"}\n' "$WORKER_NAME" > .diag/lookup.json
+          token_present=false; [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]] && token_present=true
+          account_present=false; [[ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]] && account_present=true
+
+          npm ci --ignore-scripts --no-audit --no-fund >.diag/npm.out 2>&1; npm_status=$?
+          npx wrangler whoami >.diag/whoami.out 2>&1; whoami_status=$?
+          npx wrangler versions list --name "$WORKER_NAME" --config .diag/lookup.json --json >.diag/versions.out 2>&1; versions_status=$?
+          npx wrangler deployments status --name "$WORKER_NAME" --config .diag/lookup.json --json >.diag/deployment.out 2>&1; deployment_status=$?
+          curl --fail --silent --show-error --max-time 30 "$WORKER_URL/health" >.diag/health.out 2>&1; health_status=$?
+
+          TOKEN_PRESENT="$token_present" ACCOUNT_PRESENT="$account_present" NPM_STATUS="$npm_status" WHOAMI_STATUS="$whoami_status" VERSIONS_STATUS="$versions_status" DEPLOYMENT_STATUS="$deployment_status" HEALTH_STATUS="$health_status" node <<'NODE'
+          import fs from 'node:fs';
+          const sanitize = (text) => text
+            .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '<redacted-email>')
+            .replace(/\b[a-f0-9]{32}\b/gi, '<redacted-account-id>')
+            .replace(/(Bearer\s+)[A-Za-z0-9._~+\/-]+/gi, '$1<redacted-token>')
+            .split('\n').slice(-30).join('\n');
+          const read = (name) => { try { return sanitize(fs.readFileSync(`.diag/${name}.out`, 'utf8')); } catch { return ''; } };
+          const result = {
+            tokenPresent: process.env.TOKEN_PRESENT === 'true',
+            accountIdPresent: process.env.ACCOUNT_PRESENT === 'true',
+            npm: { status: Number(process.env.NPM_STATUS), output: read('npm') },
+            whoami: { status: Number(process.env.WHOAMI_STATUS), output: read('whoami') },
+            versions: { status: Number(process.env.VERSIONS_STATUS), output: read('versions') },
+            deployment: { status: Number(process.env.DEPLOYMENT_STATUS), output: read('deployment') },
+            health: { status: Number(process.env.HEALTH_STATUS), output: read('health') }
+          };
+          fs.writeFileSync('/tmp/staging-diagnostic.json', JSON.stringify(result, null, 2));
+          NODE
+
+      - name: Commit diagnostics and remove workflow
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git switch -C main origin/main
+          cp /tmp/staging-diagnostic.json staging-diagnostic.json
+          rm -f .github/workflows/diagnose-integrated-staging-once.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add staging-diagnostic.json .github/workflows/diagnose-integrated-staging-once.yml
+          git commit -m "chore: record sanitized staging diagnostic"
+          git push origin main
