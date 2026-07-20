@@ -1,0 +1,117 @@
+name: Inspect integrated staging to file once
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/inspect-integrated-staging-to-file-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || secrets.CF_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      WORKER_NAME: nikolay-onedrive-mcp
+      EXPECTED_TAG: integrated-85b554cbf68a
+      CURRENT_VERSION_ID: ea3ee285-1958-46c5-9ac6-b2c8a3202ece
+      WORKER_URL: https://nikolay-onedrive-mcp.fdas201290.workers.dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
+          cache: npm
+
+      - name: Inspect Cloudflare state
+        id: inspect
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund >/dev/null
+          mkdir -p .inspect
+          printf '{"name":"%s"}\n' "$WORKER_NAME" > .inspect/lookup.json
+          npx wrangler versions list --name "$WORKER_NAME" --config .inspect/lookup.json --json > .inspect/versions.json
+          npx wrangler deployments status --name "$WORKER_NAME" --config .inspect/lookup.json --json > .inspect/deployment.json
+          curl --fail --silent --show-error --max-time 30 "$WORKER_URL/health" > .inspect/production-health.json
+
+          node <<'NODE'
+          import fs from 'node:fs';
+          const versions = JSON.parse(fs.readFileSync('.inspect/versions.json','utf8'));
+          const deployment = JSON.parse(fs.readFileSync('.inspect/deployment.json','utf8'));
+          const productionHealth = JSON.parse(fs.readFileSync('.inspect/production-health.json','utf8'));
+          const staged = versions.find((v) => v?.annotations?.['workers/tag'] === process.env.EXPECTED_TAG);
+          const serialized = JSON.stringify(deployment);
+          fs.writeFileSync('/tmp/inspect-result.json', JSON.stringify({
+            inspectedAt: new Date().toISOString(),
+            expectedTag: process.env.EXPECTED_TAG,
+            productionVersionId: process.env.CURRENT_VERSION_ID,
+            productionStillActive: serialized.includes(process.env.CURRENT_VERSION_ID),
+            productionHealth: productionHealth.ok === true,
+            stagedVersionId: staged?.id ?? null,
+            stagedVersionNumber: staged?.number ?? null,
+            stagedInActiveDeployment: Boolean(staged?.id && serialized.includes(staged.id)),
+            stagedCreatedOn: staged?.metadata?.created_on ?? null
+          }, null, 2));
+          NODE
+
+          staged_id="$(node -e "const x=require('/tmp/inspect-result.json'); if(x.stagedVersionId) process.stdout.write(x.stagedVersionId)")"
+          if [[ -n "$staged_id" ]]; then
+            override="${WORKER_NAME}=\"${staged_id}\""
+            set +e
+            curl --fail --silent --show-error --max-time 30 -H "Cloudflare-Workers-Version-Overrides: $override" "$WORKER_URL/health" > .inspect/staged-health.json
+            health_status=$?
+            curl --fail --silent --show-error --max-time 30 -H "Cloudflare-Workers-Version-Overrides: $override" "$WORKER_URL/ready" > .inspect/staged-ready.json
+            ready_status=$?
+            curl --fail --silent --show-error --max-time 30 -H "Cloudflare-Workers-Version-Overrides: $override" "$WORKER_URL/" > .inspect/staged-root.json
+            root_status=$?
+            set -e
+            HEALTH_STATUS="$health_status" READY_STATUS="$ready_status" ROOT_STATUS="$root_status" node <<'NODE'
+            import fs from 'node:fs';
+            const path = '/tmp/inspect-result.json';
+            const x = JSON.parse(fs.readFileSync(path,'utf8'));
+            const read = (p) => { try { return JSON.parse(fs.readFileSync(p,'utf8')); } catch { return null; } };
+            const health = read('.inspect/staged-health.json');
+            const ready = read('.inspect/staged-ready.json');
+            const root = read('.inspect/staged-root.json');
+            x.overrideHealth = Number(process.env.HEALTH_STATUS) === 0 && health?.ok === true;
+            x.overrideReady = Number(process.env.READY_STATUS) === 0 && ready?.ready === true && ready?.browserRun === true && ready?.integratedTools === true;
+            x.overrideCapabilities = Number(process.env.ROOT_STATUS) === 0 && root?.snapshots === true && root?.documentVisuals === true && root?.integrityPlans === true && root?.planGatedRecycle === true && root?.permanentDeletion === false;
+            x.readySummary = ready && typeof ready === 'object' ? {
+              ready: ready.ready,
+              bindings: ready.bindings,
+              authState: ready.authState,
+              graph: ready.graph,
+              root: ready.root,
+              browserRun: ready.browserRun,
+              integratedTools: ready.integratedTools
+            } : null;
+            fs.writeFileSync(path, JSON.stringify(x, null, 2));
+            NODE
+          fi
+
+      - name: Commit sanitized result and remove workflow
+        if: always()
+        env:
+          INSPECT_OUTCOME: ${{ steps.inspect.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f /tmp/inspect-result.json ]]; then
+            printf '{\n  "inspectionOutcome": "%s",\n  "error": "Cloudflare inspection did not produce a result"\n}\n' "$INSPECT_OUTCOME" > /tmp/inspect-result.json
+          fi
+          git fetch origin main
+          git switch -C main origin/main
+          cp /tmp/inspect-result.json staging-inspection.json
+          rm -f .github/workflows/inspect-integrated-staging-to-file-once.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add staging-inspection.json .github/workflows/inspect-integrated-staging-to-file-once.yml
+          git commit -m "chore: record sanitized integrated staging inspection"
+          git push origin main
