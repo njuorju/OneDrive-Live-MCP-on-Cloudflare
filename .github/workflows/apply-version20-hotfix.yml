@@ -1,0 +1,364 @@
+name: Apply version 20 hotfix
+
+on:
+  push:
+    branches:
+      - work/integrated-source-integrity-visuals
+    paths:
+      - .github/workflows/apply-version20-hotfix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+          cache: npm
+
+      - run: npm ci
+
+      - name: Apply deployed version 20 source fixes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one match, found {count}: {old[:120]!r}")
+              p.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          # Shared integrated state through the existing global AuthState Durable Object.
+          replace_once(
+              "src/auth-state-client.ts",
+              'import type { AuthStateKind, AuthStateOpResult } from "./auth-store";\n',
+              'import type { AuthStateKind, AuthStateOpResult } from "./auth-store";\n'
+              'import { ConnectorError } from "./errors";\n'
+              'import type { StorageLike } from "./integrated-tools";\n',
+          )
+          replace_once(
+              "src/auth-state-client.ts",
+              "async function callAuthState(\n",
+              "export async function callAuthState(\n",
+          )
+          client = Path("src/auth-state-client.ts")
+          client_text = client.read_text(encoding="utf-8")
+          client_text += '''
+
+export type IntegratedStateResult = AuthStateOpResult & {
+  value?: unknown;
+  entries?: Array<[string, unknown]>;
+  deleted?: boolean;
+};
+
+function assertIntegratedStateResult(
+  result: IntegratedStateResult,
+  operation: string,
+): IntegratedStateResult {
+  if (!result?.ok) {
+    throw new ConnectorError(
+      "state_storage_unavailable",
+      `Integrated state ${operation} failed.`,
+      { retryable: true },
+    );
+  }
+  return result;
+}
+
+export function createIntegratedStateStorage(env: Env, userId: string): StorageLike {
+  return {
+    async get<T = unknown>(key: string): Promise<T | undefined> {
+      const result = assertIntegratedStateResult(
+        await callAuthState(env, "/state-get", { userId, key }) as IntegratedStateResult,
+        "read",
+      );
+      return result.found ? result.value as T : undefined;
+    },
+    async put<T = unknown>(key: string, value: T): Promise<void> {
+      assertIntegratedStateResult(
+        await callAuthState(env, "/state-put", { userId, key, value }) as IntegratedStateResult,
+        "write",
+      );
+    },
+    async delete(key: string): Promise<boolean> {
+      const result = assertIntegratedStateResult(
+        await callAuthState(env, "/state-delete", { userId, key }) as IntegratedStateResult,
+        "delete",
+      );
+      return Boolean(result.deleted);
+    },
+    async list<T = unknown>(options: { prefix?: string } = {}): Promise<Map<string, T>> {
+      const result = assertIntegratedStateResult(
+        await callAuthState(env, "/state-list", {
+          userId,
+          prefix: String(options.prefix ?? "integrated:"),
+        }) as IntegratedStateResult,
+        "list",
+      );
+      return new Map((result.entries ?? []) as Array<[string, T]>);
+    },
+  };
+}
+'''
+          client.write_text(client_text, encoding="utf-8")
+
+          replace_once(
+              "src/auth-state.ts",
+              '''      case "/get-token":
+        return Response.json(await this.getToken(body));
+      default:
+''',
+              '''      case "/get-token":
+        return Response.json(await this.getToken(body));
+      case "/state-get":
+        return Response.json(await this.getState(body));
+      case "/state-put":
+        return Response.json(await this.putState(body));
+      case "/state-delete":
+        return Response.json(await this.deleteState(body));
+      case "/state-list":
+        return Response.json(await this.listState(body));
+      default:
+''',
+          )
+          replace_once(
+              "src/auth-state.ts",
+              '''  private async putToken(body: Record<string, unknown>): Promise<AuthStateOpResult> {
+''',
+              '''  private integratedStateKey(userId: string, key: string): string | null {
+    if (
+      !userId ||
+      !key ||
+      !key.startsWith("integrated:") ||
+      key.length > 1_200 ||
+      /[\\u0000-\\u001f]/.test(key)
+    ) return null;
+    return `integrated-state:${userId}:${key}`;
+  }
+
+  private async getState(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const userId = String(body.userId ?? "");
+    const logicalKey = String(body.key ?? "");
+    const key = this.integratedStateKey(userId, logicalKey);
+    if (!key) return { ok: false, found: false, stage: "state_get_invalid" };
+    const value = await this.ctx.storage.get(key);
+    return value === undefined
+      ? { ok: true, found: false, stage: "state_get_missing" }
+      : { ok: true, found: true, value, stage: "state_get_ok" };
+  }
+
+  private async putState(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const userId = String(body.userId ?? "");
+    const logicalKey = String(body.key ?? "");
+    const key = this.integratedStateKey(userId, logicalKey);
+    if (!key || !("value" in body)) {
+      return { ok: false, found: false, stage: "state_put_invalid" };
+    }
+    await this.ctx.storage.put(key, body.value);
+    return { ok: true, found: true, stage: "state_put_ok" };
+  }
+
+  private async deleteState(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const userId = String(body.userId ?? "");
+    const logicalKey = String(body.key ?? "");
+    const key = this.integratedStateKey(userId, logicalKey);
+    if (!key) return { ok: false, found: false, stage: "state_delete_invalid" };
+    const deleted = await this.ctx.storage.delete(key);
+    return {
+      ok: true,
+      found: Boolean(deleted),
+      deleted: Boolean(deleted),
+      stage: "state_delete_ok",
+    };
+  }
+
+  private async listState(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const userId = String(body.userId ?? "");
+    const logicalPrefix = String(body.prefix ?? "integrated:");
+    const prefix = this.integratedStateKey(userId, logicalPrefix || "integrated:");
+    if (!prefix) return { ok: false, found: false, entries: [], stage: "state_list_invalid" };
+    const values = await this.ctx.storage.list({ prefix });
+    const storagePrefix = `integrated-state:${userId}:`;
+    return {
+      ok: true,
+      found: values.size > 0,
+      entries: [...values.entries()].map(([key, value]) => [key.slice(storagePrefix.length), value]),
+      stage: "state_list_ok",
+    };
+  }
+
+  private async putToken(body: Record<string, unknown>): Promise<AuthStateOpResult> {
+''',
+          )
+
+          replace_once(
+              "src/index.ts",
+              'import { AuthState } from "./auth-state";\n',
+              'import { AuthState } from "./auth-state";\n'
+              'import { createIntegratedStateStorage } from "./auth-state-client";\n',
+          )
+          replace_once(
+              "src/index.ts",
+              '''    registerIntegratedTools(this.server, () => ({
+      env: this.env,
+      userId: this.userId(),
+      storage: this.ctx.storage,
+      transaction: (closure) => this.ctx.storage.transaction(closure),
+      waitUntil: (promise) => this.ctx.waitUntil(promise),
+    }));
+''',
+              '''    registerIntegratedTools(this.server, () => ({
+      env: this.env,
+      userId: this.userId(),
+      storage: createIntegratedStateStorage(this.env, this.userId()),
+      waitUntil: (promise) => this.ctx.waitUntil(promise),
+    }));
+''',
+          )
+
+          replace_once(
+              "src/integrated-tools.ts",
+              'export type StorageLike = Pick<DurableObjectTransaction, "get" | "put" | "delete" | "list">;\n',
+              '''export type StorageLike = {
+  get<T = unknown>(key: string): Promise<T | undefined>;
+  put<T = unknown>(key: string, value: T): Promise<void>;
+  delete(key: string): Promise<boolean>;
+  list<T = unknown>(options?: { prefix?: string }): Promise<Map<string, T>>;
+};
+''',
+          )
+          replace_once(
+              "src/integrated-tools.ts",
+              '''async function browserScreenshot(context: IntegratedContext, html: string, width: number, height: number, crop?: { x: number; y: number; width: number; height: number }): Promise<ArrayBuffer> {
+''',
+              '''export function pdfPageDimensions(buffer: ArrayBuffer, page: number): { width: number; height: number } {
+  const binary = new TextDecoder("latin1").decode(new Uint8Array(buffer));
+  const boxes = [...binary.matchAll(/\\/(?:CropBox|MediaBox)\\s*\\[\\s*(-?\\d+(?:\\.\\d+)?)\\s+(-?\\d+(?:\\.\\d+)?)\\s+(-?\\d+(?:\\.\\d+)?)\\s+(-?\\d+(?:\\.\\d+)?)\\s*\\]/g)]
+    .map((match) => {
+      const x1 = Number(match[1]);
+      const y1 = Number(match[2]);
+      const x2 = Number(match[3]);
+      const y2 = Number(match[4]);
+      return { width: Math.abs(x2 - x1), height: Math.abs(y2 - y1) };
+    })
+    .filter((box) => Number.isFinite(box.width) && Number.isFinite(box.height) && box.width > 0 && box.height > 0);
+  const selected = boxes[Math.min(Math.max(page - 1, 0), boxes.length - 1)] ?? boxes[0];
+  return selected ?? { width: 595, height: 842 };
+}
+
+async function browserScreenshot(context: IntegratedContext, html: string, width: number, height: number, crop?: { x: number; y: number; width: number; height: number }): Promise<ArrayBuffer> {
+''',
+          )
+          replace_once(
+              "src/integrated-tools.ts",
+              '''  const width = Math.min(Math.max(Number(input.width ?? widthFromDpi), 256), INTEGRATED_LIMITS.renderDimensionMax);
+  const height = Math.min(Math.max(Number(input.height ?? Math.round(width * 1.414)), 256), INTEGRATED_LIMITS.renderDimensionMax);
+  const { verified, pdf } = await pdfBytesForRender(context, itemId);
+  const pdfInfo = inspectPdfBytes(pdf);
+  if (page > pdfInfo.pageCount) throw new ConnectorError("page_out_of_range", "The requested page or slide number is outside the document.");
+  const data = bytesToBase64(pdf);
+''',
+              '''  const width = Math.min(Math.max(Number(input.width ?? widthFromDpi), 256), INTEGRATED_LIMITS.renderDimensionMax);
+  const { verified, pdf } = await pdfBytesForRender(context, itemId);
+  const pdfInfo = inspectPdfBytes(pdf);
+  if (page > pdfInfo.pageCount) throw new ConnectorError("page_out_of_range", "The requested page or slide number is outside the document.");
+  const pageDimensions = pdfPageDimensions(pdf, page);
+  const height = Math.min(
+    Math.max(Math.round(width * pageDimensions.height / pageDimensions.width), 256),
+    INTEGRATED_LIMITS.renderDimensionMax,
+  );
+  const data = bytesToBase64(pdf);
+''',
+          )
+
+          Path("test/version20-hotfix.test.ts").write_text('''import assert from "node:assert/strict";
+import test from "node:test";
+import { createIntegratedStateStorage } from "../src/auth-state-client";
+import { pdfPageDimensions } from "../src/integrated-tools";
+
+function fakeEnv() {
+  const records = new Map<string, unknown>();
+  const stub = {
+    async fetch(_url: string, init?: RequestInit): Promise<Response> {
+      const path = new URL(_url).pathname;
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      const key = String(body.key ?? "");
+      if (path === "/state-put") {
+        records.set(key, body.value);
+        return Response.json({ ok: true, found: true, expired: false, stage: "state_put_ok" });
+      }
+      if (path === "/state-get") {
+        return records.has(key)
+          ? Response.json({ ok: true, found: true, expired: false, value: records.get(key), stage: "state_get_ok" })
+          : Response.json({ ok: true, found: false, expired: false, stage: "state_get_missing" });
+      }
+      if (path === "/state-delete") {
+        const deleted = records.delete(key);
+        return Response.json({ ok: true, found: deleted, expired: false, deleted, stage: "state_delete_ok" });
+      }
+      if (path === "/state-list") {
+        const prefix = String(body.prefix ?? "integrated:");
+        const entries = [...records.entries()].filter(([entryKey]) => entryKey.startsWith(prefix));
+        return Response.json({ ok: true, found: entries.length > 0, expired: false, entries, stage: "state_list_ok" });
+      }
+      return Response.json({ ok: false, found: false, expired: false, stage: "not_found" }, { status: 404 });
+    },
+  };
+  return {
+    AUTH_STATE: {
+      idFromName: () => ({}) as DurableObjectId,
+      get: () => stub as unknown as DurableObjectStub,
+    },
+  } as unknown as Env;
+}
+
+test("integrated state adapter preserves records across independent callers", async () => {
+  const env = fakeEnv();
+  const first = createIntegratedStateStorage(env, "user-1");
+  const second = createIntegratedStateStorage(env, "user-1");
+  await first.put("integrated:job:abc", { status: "completed" });
+  assert.deepEqual(await second.get("integrated:job:abc"), { status: "completed" });
+  assert.deepEqual(
+    [...(await second.list({ prefix: "integrated:job:" })).keys()],
+    ["integrated:job:abc"],
+  );
+  assert.equal(await second.delete("integrated:job:abc"), true);
+  assert.equal(await first.get("integrated:job:abc"), undefined);
+});
+
+test("page dimensions follow the requested PDF page box", () => {
+  const bytes = new TextEncoder().encode(
+    "%PDF-1.7\\n1 0 obj << /MediaBox [0 0 960 540] >>\\n2 0 obj << /CropBox [0 0 595 842] >>",
+  );
+  assert.deepEqual(pdfPageDimensions(bytes.buffer, 1), { width: 960, height: 540 });
+  assert.deepEqual(pdfPageDimensions(bytes.buffer, 2), { width: 595, height: 842 });
+});
+''', encoding="utf-8")
+          PY
+
+      - name: Focused hotfix regression
+        run: npx tsx --test test/version20-hotfix.test.ts test/integrated-core.test.ts test/integrated-registration.test.ts
+
+      - name: Full repository validation
+        run: npm run check
+
+      - name: Commit verified hotfix and remove one-shot workflow
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/apply-version20-hotfix.yml
+          git add src/auth-state-client.ts src/auth-state.ts src/index.ts src/integrated-tools.ts test/version20-hotfix.test.ts
+          git commit -m "Fix stable integrated state and exact page rendering"
+          git push origin HEAD:work/integrated-source-integrity-visuals
