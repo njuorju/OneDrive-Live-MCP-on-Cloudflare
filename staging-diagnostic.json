@@ -1,0 +1,24 @@
+{
+  "tokenPresent": false,
+  "accountIdPresent": false,
+  "npm": {
+    "status": 0,
+    "output": "\nadded 225 packages in 4s\n"
+  },
+  "whoami": {
+    "status": 0,
+    "output": "\n ⛅️ wrangler 4.105.0\n────────────────────\nGetting User settings...\nYou are not authenticated. Please run `wrangler login`.\nTo deploy without logging in, run a command like `wrangler deploy --temporary` to use a temporary preview account.\n"
+  },
+  "versions": {
+    "status": 1,
+    "output": "\n\u001b[31m✘ \u001b[41;31m[\u001b[41;97mERROR\u001b[41;31m]\u001b[0m \u001b[1mIn a non-interactive environment, it's necessary to set a CLOUDFLARE_API_TOKEN environment variable for wrangler to work. Please go to https://developers.cloudflare.com/fundamentals/api/get-started/create-token/ for instructions on how to create an api token, and assign its value to CLOUDFLARE_API_TOKEN.\u001b[0m\n\n  \n  To continue without logging in, rerun this command with `--temporary`. Wrangler will use a temporary account and print a claim URL.\n\n\n🪵  Logs were written to \"/home/runner/.config/.wrangler/logs/wrangler-2026-07-20_07-07-05_508.log\"\n"
+  },
+  "deployment": {
+    "status": 1,
+    "output": "\n\u001b[31m✘ \u001b[41;31m[\u001b[41;97mERROR\u001b[41;31m]\u001b[0m \u001b[1mIn a non-interactive environment, it's necessary to set a CLOUDFLARE_API_TOKEN environment variable for wrangler to work. Please go to https://developers.cloudflare.com/fundamentals/api/get-started/create-token/ for instructions on how to create an api token, and assign its value to CLOUDFLARE_API_TOKEN.\u001b[0m\n\n  \n  To continue without logging in, rerun this command with `--temporary`. Wrangler will use a temporary account and print a claim URL.\n\n\n🪵  Logs were written to \"/home/runner/.config/.wrangler/logs/wrangler-2026-07-20_07-07-06_796.log\"\n"
+  },
+  "health": {
+    "status": 0,
+    "output": "{\"ok\":true,\"service\":\"nikolay-onedrive-mcp\"}"
+  }
+}
