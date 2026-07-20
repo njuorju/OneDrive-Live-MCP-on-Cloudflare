@@ -9,7 +9,7 @@ import {
 } from "./auth-store";
 
 /**
- * Strongly consistent OAuth/session storage.
+ * Strongly consistent OAuth/session and integrated-workflow storage.
  * Single global instance via idFromName("global").
  * DO request serialization makes put/get/consume atomic without KV eventual consistency.
  */
@@ -51,6 +51,14 @@ export class AuthState extends DurableObject {
         return Response.json(await this.putToken(body));
       case "/get-token":
         return Response.json(await this.getToken(body));
+      case "/state-get":
+        return Response.json(await this.getState(body));
+      case "/state-put":
+        return Response.json(await this.putState(body));
+      case "/state-delete":
+        return Response.json(await this.deleteState(body));
+      case "/state-list":
+        return Response.json(await this.listState(body));
       default:
         return Response.json(
           { ok: false, found: false, expired: false, stage: "not_found" },
@@ -96,6 +104,75 @@ export class AuthState extends DurableObject {
       expired: false,
       value: envelope.value,
       stage: `consume_${kind}_ok`,
+    };
+  }
+
+  private integratedStateKey(userId: string, key: string): string | null {
+    if (
+      !userId ||
+      !key ||
+      !key.startsWith("integrated:") ||
+      key.length > 1_200 ||
+      /[\u0000-\u001f]/.test(key)
+    ) {
+      return null;
+    }
+    return `integrated-state:${userId}:${key}`;
+  }
+
+  private async getState(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const userId = String(body.userId ?? "");
+    const logicalKey = String(body.key ?? "");
+    const key = this.integratedStateKey(userId, logicalKey);
+    if (!key) return { ok: false, found: false, stage: "state_get_invalid" };
+    const value = await this.ctx.storage.get(key);
+    return value === undefined
+      ? { ok: true, found: false, stage: "state_get_missing" }
+      : { ok: true, found: true, value, stage: "state_get_ok" };
+  }
+
+  private async putState(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const userId = String(body.userId ?? "");
+    const logicalKey = String(body.key ?? "");
+    const key = this.integratedStateKey(userId, logicalKey);
+    if (!key || !("value" in body)) {
+      return { ok: false, found: false, stage: "state_put_invalid" };
+    }
+    await this.ctx.storage.put(key, body.value);
+    return { ok: true, found: true, stage: "state_put_ok" };
+  }
+
+  private async deleteState(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const userId = String(body.userId ?? "");
+    const logicalKey = String(body.key ?? "");
+    const key = this.integratedStateKey(userId, logicalKey);
+    if (!key) return { ok: false, found: false, stage: "state_delete_invalid" };
+    const deleted = await this.ctx.storage.delete(key);
+    return {
+      ok: true,
+      found: Boolean(deleted),
+      deleted: Boolean(deleted),
+      stage: "state_delete_ok",
+    };
+  }
+
+  private async listState(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const userId = String(body.userId ?? "");
+    const logicalPrefix = String(body.prefix ?? "integrated:");
+    const prefix = this.integratedStateKey(userId, logicalPrefix || "integrated:");
+    if (!prefix) {
+      return { ok: false, found: false, entries: [], stage: "state_list_invalid" };
+    }
+    const values = await this.ctx.storage.list({ prefix });
+    const storagePrefix = `integrated-state:${userId}:`;
+    return {
+      ok: true,
+      found: values.size > 0,
+      entries: [...values.entries()].map(([key, value]) => [
+        key.slice(storagePrefix.length),
+        value,
+      ]),
+      stage: "state_list_ok",
     };
   }
 
