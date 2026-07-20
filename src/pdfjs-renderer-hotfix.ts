@@ -10,6 +10,8 @@ import {
   bytesToBase64,
   inspectPdfBytes,
 } from "./integrated-core";
+import { IntegratedMicrosoftAuthHandler } from "./microsoft-auth-integrated";
+import { openJson, sealJson } from "./security";
 import {
   pdfBytesForRenderHotfix,
   pdfPageDimensions,
@@ -17,7 +19,22 @@ import {
   type HotfixContext,
 } from "./version20-hotfix";
 
+const PDFJS_VERSION = "3.2.146";
+const PDFJS_MAIN_ROUTE = "/__pdfjs-main.js";
+const PDFJS_WORKER_ROUTE = "/__pdfjs-worker.js";
+const RENDER_PAGE_PREFIX = "/__pdfjs-render/";
+const RENDER_PDF_PREFIX = "/__pdfjs-pdf/";
+const RENDER_ORIGIN = "https://nikolay-onedrive-mcp.fdas201290.workers.dev";
+
 type Crop = { x: number; y: number; width: number; height: number };
+
+type RenderToken = {
+  kind?: string;
+  userId?: string;
+  itemId?: string;
+  renderId?: string;
+  expiresAt?: number;
+};
 
 function positiveInteger(value: unknown, fallback: number): number {
   const parsed = Number(value);
@@ -32,25 +49,77 @@ function escapeForInlineScript(value: string): string {
   return JSON.stringify(value).replace(/</g, "\\u003c");
 }
 
-function safeInlineLibrary(source: string): string {
-  return source
-    .replace(/<\/script/gi, "<\\/script")
-    .replace(/\u2028/g, "\\u2028")
-    .replace(/\u2029/g, "\\u2029");
+function authStateStub(env: Env): DurableObjectStub {
+  return env.AUTH_STATE.get(env.AUTH_STATE.idFromName("global"));
+}
+
+async function putRenderCache(
+  env: Env,
+  renderId: string,
+  pdf: ArrayBuffer,
+  expiresAt: number,
+): Promise<void> {
+  let response: Response;
+  try {
+    response = await authStateStub(env).fetch("https://auth-state/render-cache-put", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/pdf",
+        "X-Render-Id": renderId,
+        "X-Render-Expires-At": String(expiresAt),
+      },
+      body: pdf,
+    });
+  } catch {
+    throw new ConnectorError(
+      "render_cache_unavailable",
+      "The short-lived render cache is unavailable.",
+      { retryable: true },
+    );
+  }
+  if (!response.ok) {
+    throw new ConnectorError(
+      "render_cache_unavailable",
+      "The converted PDF could not be staged for deterministic rendering.",
+      { retryable: response.status >= 500 },
+    );
+  }
+}
+
+async function getRenderCache(env: Env, renderId: string): Promise<Response> {
+  try {
+    return await authStateStub(env).fetch("https://auth-state/render-cache-get", {
+      method: "POST",
+      headers: { "X-Render-Id": renderId },
+    });
+  } catch {
+    return new Response("Render cache unavailable.", {
+      status: 503,
+      headers: { "Cache-Control": "no-store" },
+    });
+  }
+}
+
+async function deleteRenderCache(env: Env, renderId: string): Promise<void> {
+  try {
+    await authStateStub(env).fetch("https://auth-state/render-cache-delete", {
+      method: "POST",
+      headers: { "X-Render-Id": renderId },
+    });
+  } catch {
+    // The entry is short-lived and AuthState removes expired entries lazily.
+  }
 }
 
 export function buildPdfJsRenderHtml(input: {
-  pdfBase64: string;
+  token: string;
   page: number;
   width: number;
   height: number;
   crop?: Crop;
-  mainSource?: string;
-  workerSource?: string;
 }): string {
+  const pdfUrl = `${RENDER_PDF_PREFIX}${encodeURIComponent(input.token)}`;
   const crop = input.crop ?? null;
-  const mainSource = safeInlineLibrary(input.mainSource ?? pdfJsMainSource);
-  const workerSource = safeInlineLibrary(input.workerSource ?? pdfJsWorkerSource);
   return `<!doctype html>
 <html>
 <head>
@@ -61,26 +130,19 @@ html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#
 #page-canvas{display:block;margin:0;padding:0;background:#fff}
 </style>
 <script>try{Object.defineProperty(window,"Worker",{value:undefined,configurable:true});}catch{window.Worker=undefined;}</script>
-<script>${mainSource}</script>
-<script>${workerSource}</script>
+<script src="${PDFJS_MAIN_ROUTE}?v=${PDFJS_VERSION}"></script>
+<script src="${PDFJS_WORKER_ROUTE}?v=${PDFJS_VERSION}"></script>
 </head>
 <body>
 <canvas id="page-canvas" aria-label="Rendered PDF page"></canvas>
 <script>
 (() => {
-  const PDF_BASE64 = ${escapeForInlineScript(input.pdfBase64)};
+  const PDF_URL = ${escapeForInlineScript(pdfUrl)};
   const PAGE = ${input.page};
   const TARGET_WIDTH = ${input.width};
   const TARGET_HEIGHT = ${input.height};
   const CROP = ${JSON.stringify(crop)};
   const output = document.getElementById("page-canvas");
-
-  function decodePdf() {
-    const binary = atob(PDF_BASE64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return bytes;
-  }
 
   function validateCanvas(canvas) {
     const context = canvas.getContext("2d", { willReadFrequently: true });
@@ -99,8 +161,9 @@ html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#
 
   async function render() {
     if (!window.pdfjsLib || !window.pdfjsWorker) throw new Error("pdfjs_not_loaded");
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = "${PDFJS_WORKER_ROUTE}?v=${PDFJS_VERSION}";
     const loadingTask = window.pdfjsLib.getDocument({
-      data: decodePdf(),
+      url: PDF_URL,
       disableRange: true,
       disableStream: true,
       disableAutoFetch: true,
@@ -154,9 +217,122 @@ html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#
 </html>`;
 }
 
+async function validateRenderToken(
+  url: URL,
+  env: Env,
+  prefix: string,
+): Promise<Required<RenderToken>> {
+  const encoded = url.pathname.slice(prefix.length);
+  const payload = await openJson<RenderToken>(
+    env.COOKIE_ENCRYPTION_KEY,
+    decodeURIComponent(encoded),
+  );
+  if (
+    payload.kind !== "document-render-cache" ||
+    !payload.userId ||
+    !payload.itemId ||
+    !payload.renderId ||
+    Number(payload.expiresAt) <= Date.now()
+  ) {
+    throw new Error("expired");
+  }
+  return payload as Required<RenderToken>;
+}
+
+function javascriptResponse(source: string): Response {
+  return new Response(source, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/javascript; charset=utf-8",
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "X-Content-Type-Options": "nosniff",
+      "X-Robots-Tag": "noindex, nofollow",
+    },
+  });
+}
+
+function installPdfJsRenderRoutes(): void {
+  const handler = IntegratedMicrosoftAuthHandler as typeof IntegratedMicrosoftAuthHandler & {
+    __pdfJsRenderRoutesInstalled?: boolean;
+  };
+  if (handler.__pdfJsRenderRoutesInstalled) return;
+  const originalFetch = handler.fetch.bind(handler);
+  handler.fetch = async (request: Request, env: Env, ctx: ExecutionContext): Promise<Response> => {
+    const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === PDFJS_MAIN_ROUTE) {
+      return javascriptResponse(pdfJsMainSource);
+    }
+    if (request.method === "GET" && url.pathname === PDFJS_WORKER_ROUTE) {
+      return javascriptResponse(pdfJsWorkerSource);
+    }
+    if (request.method === "GET" && url.pathname.startsWith(RENDER_PDF_PREFIX)) {
+      try {
+        const payload = await validateRenderToken(url, env, RENDER_PDF_PREFIX);
+        const cached = await getRenderCache(env, payload.renderId);
+        if (!cached.ok) {
+          return new Response("Render cache entry unavailable.", {
+            status: cached.status,
+            headers: { "Cache-Control": "no-store" },
+          });
+        }
+        const headers = new Headers(cached.headers);
+        headers.set("Content-Disposition", "inline; filename=render.pdf");
+        headers.set("Cache-Control", "private, no-store, max-age=0");
+        return new Response(cached.body, { status: 200, headers });
+      } catch {
+        return new Response("Render link expired or invalid.", {
+          status: 410,
+          headers: { "Cache-Control": "no-store" },
+        });
+      }
+    }
+    if (request.method === "GET" && url.pathname.startsWith(RENDER_PAGE_PREFIX)) {
+      try {
+        const encoded = url.pathname.slice(RENDER_PAGE_PREFIX.length);
+        const token = decodeURIComponent(encoded);
+        await validateRenderToken(url, env, RENDER_PAGE_PREFIX);
+        const page = positiveInteger(url.searchParams.get("page"), 1);
+        const width = clampDimension(positiveInteger(url.searchParams.get("width"), 1600));
+        const height = clampDimension(positiveInteger(url.searchParams.get("height"), 900));
+        const crop = url.searchParams.has("cropX")
+          ? {
+              x: Math.max(0, Number(url.searchParams.get("cropX"))),
+              y: Math.max(0, Number(url.searchParams.get("cropY"))),
+              width: Math.max(1, Number(url.searchParams.get("cropWidth"))),
+              height: Math.max(1, Number(url.searchParams.get("cropHeight"))),
+            }
+          : undefined;
+        return new Response(buildPdfJsRenderHtml({ token, page, width, height, crop }), {
+          status: 200,
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "private, no-store, max-age=0",
+            "Content-Security-Policy": "default-src 'none'; script-src 'self' 'unsafe-inline'; connect-src 'self'; style-src 'unsafe-inline'; worker-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+            "X-Robots-Tag": "noindex, nofollow",
+          },
+        });
+      } catch {
+        return new Response("Render link expired or invalid.", {
+          status: 410,
+          headers: { "Cache-Control": "no-store" },
+        });
+      }
+    }
+    return originalFetch(request, env, ctx);
+  };
+  Object.defineProperty(handler, "__pdfJsRenderRoutesInstalled", {
+    value: true,
+    enumerable: false,
+  });
+}
+
+installPdfJsRenderRoutes();
+
 async function screenshotCompletedCanvas(
   context: Pick<HotfixContext, "env">,
-  html: string,
+  url: string,
   width: number,
   height: number,
 ): Promise<ArrayBuffer> {
@@ -167,13 +343,14 @@ async function screenshotCompletedCanvas(
   let response: Response;
   try {
     response = await browser.quickAction("screenshot", {
-      html,
+      url,
+      gotoOptions: { waitUntil: "domcontentloaded", timeout: 30_000 },
       waitForSelector: {
         selector: '#page-canvas[data-render-complete="true"]',
         visible: true,
-        timeout: 40_000,
+        timeout: 25_000,
       },
-      actionTimeout: 45_000,
+      actionTimeout: 30_000,
       viewport: { width, height, deviceScaleFactor: 1 },
       screenshotOptions: {
         type: "png",
@@ -232,6 +409,7 @@ async function renderDocumentPagePdfJs(
   context: HotfixContext,
   input: Record<string, unknown>,
 ): Promise<CallToolResult> {
+  let renderId: string | null = null;
   try {
     const itemId = String(input.itemId ?? "");
     const page = positiveInteger(input.pageOrSlide, 1);
@@ -273,16 +451,31 @@ async function renderDocumentPagePdfJs(
       crop.height = Math.min(crop.height, renderedHeight - crop.y);
     }
 
+    renderId = crypto.randomUUID();
+    const expiresAt = Date.now() + 90_000;
+    await putRenderCache(context.env, renderId, pdf, expiresAt);
+    const token = await sealJson(context.env.COOKIE_ENCRYPTION_KEY, {
+      kind: "document-render-cache",
+      userId: context.userId,
+      itemId,
+      renderId,
+      expiresAt,
+    });
+    const params = new URLSearchParams({
+      page: String(page),
+      width: String(renderedWidth),
+      height: String(renderedHeight),
+    });
+    if (crop) {
+      params.set("cropX", String(crop.x));
+      params.set("cropY", String(crop.y));
+      params.set("cropWidth", String(crop.width));
+      params.set("cropHeight", String(crop.height));
+    }
+    const renderUrl = `${RENDER_ORIGIN}${RENDER_PAGE_PREFIX}${encodeURIComponent(token)}?${params}`;
     const outputWidth = Math.max(1, Math.round(crop?.width ?? renderedWidth));
     const outputHeight = Math.max(1, Math.round(crop?.height ?? renderedHeight));
-    const html = buildPdfJsRenderHtml({
-      pdfBase64: bytesToBase64(pdf),
-      page,
-      width: renderedWidth,
-      height: renderedHeight,
-      crop,
-    });
-    const png = await screenshotCompletedCanvas(context, html, outputWidth, outputHeight);
+    const png = await screenshotCompletedCanvas(context, renderUrl, outputWidth, outputHeight);
     const converted = await convertImageOutput(context, png, outputFormat);
     const metadata = {
       ...compactVerifiedItem(verified),
@@ -298,9 +491,10 @@ async function renderDocumentPagePdfJs(
       officeConversion: extensionOf(verified.item.name) === ".pdf"
         ? "not_required"
         : "microsoft_graph_pdf",
-      renderer: "cloudflare_browser_run_vendored_pdfjs_canvas",
+      renderer: "cloudflare_browser_run_vendored_pdfjs_authstate_cache",
       pdfConversions: 1,
       runtimeExternalDependencies: 0,
+      renderCache: "authstate_ephemeral_memory",
     };
     return {
       structuredContent: metadata,
@@ -311,6 +505,8 @@ async function renderDocumentPagePdfJs(
     } as CallToolResult;
   } catch (error) {
     return safeErrorResult(error) as CallToolResult;
+  } finally {
+    if (renderId) await deleteRenderCache(context.env, renderId);
   }
 }
 
