@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildPdfJsRenderHtml } from "../src/pdfjs-renderer-hotfix";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import {
+  buildPdfJsRenderHtml,
+  registerIntegratedToolsWithPdfJsHotfix,
+} from "../src/pdfjs-renderer-hotfix";
 
 test("PDF.js renderer targets one requested page through same-origin routes", () => {
   const html = buildPdfJsRenderHtml({
@@ -54,4 +58,14 @@ test("render tokens are URL-encoded before insertion into inline JavaScript", ()
 
   assert.doesNotMatch(html, /token<unsafe/);
   assert.match(html, /token%3Cunsafe/);
+});
+
+test("PDF.js replaces the legacy renderer as the final registered tool callback", () => {
+  const server = new McpServer({ name: "renderer-test", version: "1.0.0" });
+  registerIntegratedToolsWithPdfJsHotfix(server, () => ({}) as never);
+
+  const registered = (server as any)._registeredTools?.render_document_page;
+  assert.ok(registered);
+  assert.match(String(registered.handler), /renderDocumentPagePdfJs/);
+  assert.doesNotMatch(String(registered.handler), /renderDocumentPageHotfix/);
 });
