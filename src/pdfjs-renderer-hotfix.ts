@@ -514,25 +514,13 @@ export function registerIntegratedToolsWithPdfJsHotfix(
   server: McpServer,
   contextFactory: () => HotfixContext,
 ): void {
-  const target = server as any;
-  const proxy = new Proxy(target, {
-    get(object, property) {
-      if (property === "registerTool") {
-        return (name: string, config: unknown, callback: unknown) => {
-          if (name === "render_document_page") {
-            return object.registerTool(
-              name,
-              config,
-              async (input: Record<string, unknown>) =>
-                renderDocumentPagePdfJs(contextFactory(), input),
-            );
-          }
-          return object.registerTool(name, config, callback);
-        };
-      }
-      const value = Reflect.get(object, property, object);
-      return typeof value === "function" ? value.bind(object) : value;
-    },
+  registerIntegratedToolsWithVersion20Hotfix(server, contextFactory);
+  const registered = (server as any)._registeredTools?.render_document_page;
+  if (!registered || typeof registered.update !== "function") {
+    throw new Error("render_document_page was not registered by the integrated tool surface.");
+  }
+  registered.update({
+    callback: async (input: Record<string, unknown>) =>
+      renderDocumentPagePdfJs(contextFactory(), input),
   });
-  registerIntegratedToolsWithVersion20Hotfix(proxy as McpServer, contextFactory);
 }
