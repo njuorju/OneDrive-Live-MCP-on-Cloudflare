@@ -1,9 +1,12 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "onedrive-live-mcp",
-  "main": "src/index.ts",
+  "main": "src/index-hotfix.ts",
   "compatibility_date": "2026-07-13",
   "compatibility_flags": ["nodejs_compat"],
+  "build": {
+    "command": "node scripts/prepare-pdfjs.mjs"
+  },
   "vars": {
     "CONNECTOR_NAME": "OneDrive Live MCP",
     "ONEDRIVE_ROOT": "REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER",
@@ -19,43 +22,21 @@
     "IMAGE_PROCESSING_TIMEOUT_MS": "15000"
   },
   "migrations": [
-    {
-      "new_sqlite_classes": ["OneDriveMCP"],
-      "tag": "v1"
-    },
-    {
-      "new_sqlite_classes": ["AuthState"],
-      "tag": "v2"
-    }
+    { "new_sqlite_classes": ["OneDriveMCP"], "tag": "v1" },
+    { "new_sqlite_classes": ["AuthState"], "tag": "v2" }
   ],
   "durable_objects": {
     "bindings": [
-      {
-        "class_name": "OneDriveMCP",
-        "name": "MCP_OBJECT"
-      },
-      {
-        "class_name": "AuthState",
-        "name": "AUTH_STATE"
-      }
+      { "class_name": "OneDriveMCP", "name": "MCP_OBJECT" },
+      { "class_name": "AuthState", "name": "AUTH_STATE" }
     ]
   },
   "kv_namespaces": [
-    {
-      "binding": "OAUTH_KV",
-      "id": "REPLACE_WITH_KV_NAMESPACE_ID"
-    }
+    { "binding": "OAUTH_KV", "id": "REPLACE_WITH_KV_NAMESPACE_ID" }
   ],
-  "ai": {
-    "binding": "AI"
-  },
-  "images": {
-    "binding": "IMAGES"
-  },
-  "observability": {
-    "enabled": true
-  },
-  "dev": {
-    "port": 8788
-  }
+  "ai": { "binding": "AI" },
+  "images": { "binding": "IMAGES" },
+  "browser": { "binding": "BROWSER" },
+  "observability": { "enabled": true },
+  "dev": { "port": 8788 }
 }

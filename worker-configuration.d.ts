@@ -4,6 +4,7 @@ interface Env {
   AUTH_STATE: DurableObjectNamespace;
   AI: Ai;
   IMAGES: ImagesBinding;
+  BROWSER: BrowserRun;
   MICROSOFT_CLIENT_ID: string;
   MICROSOFT_CLIENT_SECRET: string;
   COOKIE_ENCRYPTION_KEY: string;
