@@ -456,6 +456,24 @@ export function compactVerifiedItem(verified: VerifiedItem): CompactItem {
   };
 }
 
+export function verifiedChildFromListedItem(folder: VerifiedItem, child: GraphDriveItem): VerifiedItem {
+  if (!child.id || !child.name || child.remoteItem || child.deleted) {
+    throw new ConnectorError("outside_root", "Shared, remote, deleted, or ambiguous child items are not allowed.");
+  }
+  const parentDriveId = child.parentReference?.driveId;
+  const parentId = child.parentReference?.id;
+  if (!parentDriveId || !parentId || parentDriveId !== folder.driveId || parentId !== folder.item.id) {
+    throw new ConnectorError("outside_root", "The listed child does not belong to the verified parent folder.");
+  }
+  return {
+    item: child,
+    root: folder.root,
+    relativePath: folder.relativePath ? `${folder.relativePath}/${child.name}` : child.name,
+    ancestorIds: [child.id, ...folder.ancestorIds],
+    driveId: folder.driveId,
+  };
+}
+
 export async function listVerifiedChildren(
   env: Env,
   userId: string,
@@ -471,7 +489,7 @@ export async function listVerifiedChildren(
   const items: VerifiedItem[] = [];
   for (const child of result.value) {
     try {
-      items.push(await verifyItemInsideRoot(env, userId, child.id));
+      items.push(verifiedChildFromListedItem(folder, child));
     } catch (error) {
       logSafeError("root_boundary_rejected_child", error);
     }
