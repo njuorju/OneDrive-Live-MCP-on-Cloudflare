@@ -25,10 +25,12 @@ const PLAN_PREFIX = "integrated:plan:";
 const OPERATION_PREFIX = "integrated:operation:";
 const RECONCILIATION_PREFIX = "integrated:reconciliation:";
 const RECONCILIATION_ITEM_SELECT = "id,name,size,eTag,lastModifiedDateTime,file,folder,parentReference,remoteItem,deleted";
+const MAX_DECLARED_DESTINATIONS = 3;
 
 function planKey(planId: string): string { return `${PLAN_PREFIX}${planId}`; }
 function operationKey(planId: string, actionId: string): string { return `${OPERATION_PREFIX}${planId}:${actionId}`; }
 function reconciliationKey(planId: string, actionId: string): string { return `${RECONCILIATION_PREFIX}${planId}:${actionId}`; }
+function parentPath(path: string): string { return strictRelativePath(path).split("/").slice(0, -1).join("/"); }
 function nowIso(): string { return new Date().toISOString(); }
 
 function textResult(data: Record<string, unknown>): CallToolResult {
@@ -47,7 +49,7 @@ async function getPlan(context: HotfixContext, planId: string): Promise<Integrit
   return plan;
 }
 
-export function findDeclaredDownstreamMove(plan: IntegrityPlan, action: PlanAction): PlanAction | null {
+export function findDeclaredDownstreamMoves(plan: IntegrityPlan, action: PlanAction): PlanAction[] {
   return [...plan.actions]
     .filter((candidate) =>
       candidate.action === "MOVE"
@@ -56,7 +58,12 @@ export function findDeclaredDownstreamMove(plan: IntegrityPlan, action: PlanActi
       && (candidate.dependencies ?? []).includes(action.actionId)
       && Boolean(candidate.destinationPath),
     )
-    .sort((a, b) => Number(a.operationOrder ?? 0) - Number(b.operationOrder ?? 0))[0] ?? null;
+    .sort((a, b) => Number(a.operationOrder ?? 0) - Number(b.operationOrder ?? 0))
+    .slice(0, MAX_DECLARED_DESTINATIONS);
+}
+
+export function findDeclaredDownstreamMove(plan: IntegrityPlan, action: PlanAction): PlanAction | null {
+  return findDeclaredDownstreamMoves(plan, action)[0] ?? null;
 }
 
 export function relativePathFromParentReference(root: GraphDriveItem, item: GraphDriveItem): string | null {
@@ -72,42 +79,82 @@ export function relativePathFromParentReference(root: GraphDriveItem, item: Grap
   return strictRelativePath(relativeParent ? `${relativeParent}/${item.name}` : item.name);
 }
 
-async function verifyDeclaredDownstreamItem(
+async function readStableItemBounded(
   context: HotfixContext,
+  root: GraphDriveItem,
   action: PlanAction,
-  downstreamMove: PlanAction,
-): Promise<VerifiedItem> {
-  if (!action.sourceItemId || !action.proposedFilename || !downstreamMove.destinationPath) {
-    throw new ConnectorError("invalid_plan_action", "The downstream reconciliation action is incomplete.");
-  }
-  const root = await resolveConfiguredRoot(context.env, context.userId);
-  const rootDriveId = root.parentReference?.driveId;
-  if (!rootDriveId) throw new ConnectorError("root_invalid", "The configured OneDrive root could not be verified.");
-
-  const relativePath = strictRelativePath(`${downstreamMove.destinationPath}/${action.proposedFilename}`);
-  const configuredRootPath = strictRelativePath(context.env.ONEDRIVE_ROOT);
+): Promise<VerifiedItem | null> {
+  if (!action.sourceItemId) return null;
   const item = await graphFetch<GraphDriveItem>(
     context.env,
     context.userId,
-    `/me/drive/root:/${encodeGraphPath(`${configuredRootPath}/${relativePath}`)}?$select=${RECONCILIATION_ITEM_SELECT}`,
+    `/me/drive/items/${encodeURIComponent(action.sourceItemId)}?$select=${RECONCILIATION_ITEM_SELECT}`,
   );
+  if (item.remoteItem || item.deleted || item.id !== action.sourceItemId) return null;
+  const relativePath = relativePathFromParentReference(root, item);
+  const driveId = root.parentReference?.driveId;
+  if (relativePath === null || !driveId || item.parentReference?.driveId !== driveId) return null;
+  return { item, root, relativePath, ancestorIds: [item.id, root.id], driveId };
+}
 
+async function readDeclaredDestinationBounded(
+  context: HotfixContext,
+  root: GraphDriveItem,
+  action: PlanAction,
+  move: PlanAction,
+): Promise<VerifiedItem | null> {
+  if (!action.sourceItemId || !action.proposedFilename || !move.destinationPath) return null;
+  const relativePath = strictRelativePath(`${move.destinationPath}/${action.proposedFilename}`);
+  const configuredRootPath = strictRelativePath(context.env.ONEDRIVE_ROOT);
+  let item: GraphDriveItem;
+  try {
+    item = await graphFetch<GraphDriveItem>(
+      context.env,
+      context.userId,
+      `/me/drive/root:/${encodeGraphPath(`${configuredRootPath}/${relativePath}`)}?$select=${RECONCILIATION_ITEM_SELECT}`,
+    );
+  } catch (error) {
+    if (error instanceof ConnectorError && error.code === "item_not_found") return null;
+    throw error;
+  }
+  const driveId = root.parentReference?.driveId;
   if (
-    item.id !== action.sourceItemId
+    !driveId
+    || item.id !== action.sourceItemId
     || item.remoteItem
     || item.deleted
-    || !item.parentReference?.driveId
-    || item.parentReference.driveId !== rootDriveId
-  ) {
-    throw new ConnectorError("identity_conflict", "The item at the declared downstream destination does not match the plan stable item ID.");
+    || item.parentReference?.driveId !== driveId
+  ) return null;
+  return { item, root, relativePath, ancestorIds: [item.id, root.id], driveId };
+}
+
+async function verifyDownstreamPostcondition(
+  context: HotfixContext,
+  plan: IntegrityPlan,
+  action: PlanAction,
+): Promise<{ live: VerifiedItem | null; downstreamMove: PlanAction | null; discrepancy?: string }> {
+  const downstreamMoves = findDeclaredDownstreamMoves(plan, action);
+  if (downstreamMoves.length === 0) return { live: null, downstreamMove: null, discrepancy: "no_declared_downstream_move" };
+  const root = await resolveConfiguredRoot(context.env, context.userId);
+
+  const stable = await readStableItemBounded(context, root, action).catch((error) => {
+    if (error instanceof ConnectorError && error.code === "item_not_found") return null;
+    throw error;
+  });
+  if (stable && stable.item.name === action.proposedFilename) {
+    const liveParent = parentPath(stable.relativePath).toLocaleLowerCase("en");
+    const matchedMove = downstreamMoves.find((move) => strictRelativePath(String(move.destinationPath)).toLocaleLowerCase("en") === liveParent) ?? null;
+    if (matchedMove) return { live: stable, downstreamMove: matchedMove };
   }
 
+  for (const move of downstreamMoves) {
+    const live = await readDeclaredDestinationBounded(context, root, action, move);
+    if (live) return { live, downstreamMove: move };
+  }
   return {
-    item,
-    root,
-    relativePath,
-    ancestorIds: [item.id, root.id],
-    driveId: rootDriveId,
+    live: stable,
+    downstreamMove: downstreamMoves[0] ?? null,
+    discrepancy: stable ? "downstream_postcondition_not_satisfied" : "stable_item_not_resolved_inside_root",
   };
 }
 
@@ -128,70 +175,75 @@ async function verifySnapshotHash(context: HotfixContext, action: PlanAction, it
   }
 }
 
+type DownstreamOutcome = {
+  examinedActionId: string | null;
+  reconciledActionId: string | null;
+  discrepancy?: string;
+  liveEvidence?: Record<string, unknown> | null;
+};
+
 async function reconcileOneDownstreamRename(
   context: HotfixContext,
   plan: IntegrityPlan,
-): Promise<string | null> {
+): Promise<DownstreamOutcome> {
   refreshDependencySkips(plan);
   const completed = new Set(plan.completedActions);
+  const failed = new Set(plan.failedActions.map((entry) => entry.actionId));
   const candidates = [...plan.actions]
-    .filter((action) => action.action === "RENAME" && !completed.has(action.actionId))
-    .sort((a, b) => Number(a.operationOrder ?? 0) - Number(b.operationOrder ?? 0));
+    .filter((action) => action.action === "RENAME" && !completed.has(action.actionId) && findDeclaredDownstreamMoves(plan, action).length > 0)
+    .sort((a, b) => Number(failed.has(b.actionId)) - Number(failed.has(a.actionId)) || Number(a.operationOrder ?? 0) - Number(b.operationOrder ?? 0));
+  const action = candidates[0];
+  if (!action) return { examinedActionId: null, reconciledActionId: null };
 
-  for (const action of candidates) {
-    if (!action.sourceItemId || !action.proposedFilename) continue;
-    const downstreamMove = findDeclaredDownstreamMove(plan, action);
-    if (!downstreamMove?.destinationPath) continue;
-
-    let live: VerifiedItem;
-    try {
-      live = await verifyDeclaredDownstreamItem(context, action, downstreamMove);
-    } catch (error) {
-      if (error instanceof ConnectorError && ["item_not_found", "identity_conflict"].includes(error.code)) continue;
-      throw error;
-    }
-
-    await verifySnapshotHash(
-      context,
-      action,
-      live.item.id,
-      Number(live.item.size ?? 0),
-      live.item.eTag,
-    );
-
-    const reconciledAt = nowIso();
-    const audit = {
-      actionId: action.actionId,
-      action: action.action,
-      reconciliationStatus: "externally_reconciled_after_downstream_move",
-      alreadyApplied: true,
-      originalPlanAction: action,
-      downstreamPlanAction: downstreamMove,
-      snapshotEvidence: {
-        sourceItemId: action.sourceItemId,
-        sourcePath: action.sourcePath ?? null,
-        snapshotETag: action.snapshotETag ?? null,
-        snapshotSha256: action.snapshotSha256 ?? null,
-      },
-      liveEvidence: compactVerifiedItem(live),
-      reconciledAt,
+  const verification = await verifyDownstreamPostcondition(context, plan, action);
+  if (!verification.live || !verification.downstreamMove) {
+    return {
+      examinedActionId: action.actionId,
+      reconciledActionId: null,
+      discrepancy: verification.discrepancy,
+      liveEvidence: verification.live ? compactVerifiedItem(verification.live) : null,
     };
-
-    plan.completedActions = uniqueStrings([...plan.completedActions, action.actionId]);
-    plan.failedActions = plan.failedActions.filter((entry) => entry.actionId !== action.actionId);
-    plan.results = upsertResult(plan.results, audit);
-    refreshDependencySkips(plan);
-    const remaining = remainingActions(plan.actions, plan.completedActions, plan.failedActions, plan.skippedDependencyActions);
-    plan.nextAction = remaining[0]?.actionId ?? null;
-    plan.status = remaining.length > 0 ? "running" : plan.status;
-    plan.executionStatus = remaining.length > 0 ? "running" : plan.executionStatus;
-
-    await context.storage.put(planKey(plan.planId), plan);
-    await context.storage.put(operationKey(plan.planId, action.actionId), { state: "completed", ...audit });
-    await context.storage.put(reconciliationKey(plan.planId, action.actionId), audit);
-    return action.actionId;
   }
-  return null;
+
+  await verifySnapshotHash(
+    context,
+    action,
+    verification.live.item.id,
+    Number(verification.live.item.size ?? 0),
+    verification.live.item.eTag,
+  );
+
+  const reconciledAt = nowIso();
+  const audit = {
+    actionId: action.actionId,
+    action: action.action,
+    reconciliationStatus: "externally_reconciled_after_downstream_move",
+    alreadyApplied: true,
+    originalPlanAction: action,
+    downstreamPlanAction: verification.downstreamMove,
+    snapshotEvidence: {
+      sourceItemId: action.sourceItemId,
+      sourcePath: action.sourcePath ?? null,
+      snapshotETag: action.snapshotETag ?? null,
+      snapshotSha256: action.snapshotSha256 ?? null,
+    },
+    liveEvidence: compactVerifiedItem(verification.live),
+    reconciledAt,
+  };
+
+  plan.completedActions = uniqueStrings([...plan.completedActions, action.actionId]);
+  plan.failedActions = plan.failedActions.filter((entry) => entry.actionId !== action.actionId);
+  plan.results = upsertResult(plan.results, audit);
+  refreshDependencySkips(plan);
+  const remaining = remainingActions(plan.actions, plan.completedActions, plan.failedActions, plan.skippedDependencyActions);
+  plan.nextAction = remaining[0]?.actionId ?? null;
+  plan.status = remaining.length > 0 ? "running" : plan.status;
+  plan.executionStatus = remaining.length > 0 ? "running" : plan.executionStatus;
+
+  await context.storage.put(planKey(plan.planId), plan);
+  await context.storage.put(operationKey(plan.planId, action.actionId), { state: "completed", ...audit });
+  await context.storage.put(reconciliationKey(plan.planId, action.actionId), audit);
+  return { examinedActionId: action.actionId, reconciledActionId: action.actionId };
 }
 
 export async function executeIntegrityPlanWithDownstreamReconciliation(
@@ -207,8 +259,8 @@ export async function executeIntegrityPlanWithDownstreamReconciliation(
   }
 
   const plan = await getPlan(context, token.planId);
-  const reconciled = await reconcileOneDownstreamRename(context, plan);
-  if (reconciled) {
+  const outcome = await reconcileOneDownstreamRename(context, plan);
+  if (outcome.reconciledActionId) {
     const updated = await getPlan(context, token.planId);
     refreshDependencySkips(updated);
     const remaining = remainingActions(updated.actions, updated.completedActions, updated.failedActions, updated.skippedDependencyActions);
@@ -218,7 +270,7 @@ export async function executeIntegrityPlanWithDownstreamReconciliation(
       status: updated.status,
       executionStatus: updated.executionStatus,
       completedThisInvocation: [],
-      reconciledThisInvocation: [reconciled],
+      reconciledThisInvocation: [outcome.reconciledActionId],
       failedThisInvocation: [],
       remainingActions: remaining.length,
       nextAction: updated.nextAction ?? remaining[0]?.actionId ?? null,
@@ -226,6 +278,29 @@ export async function executeIntegrityPlanWithDownstreamReconciliation(
       auditPending: updated.auditStatus === "pending" || updated.auditStatus === "running",
       mutationPerformed: false,
       reconciliationOnlyThisInvocation: true,
+    };
+  }
+
+  if (outcome.examinedActionId && plan.failedActions.some((entry) => entry.actionId === outcome.examinedActionId)) {
+    const remaining = remainingActions(plan.actions, plan.completedActions, plan.failedActions, plan.skippedDependencyActions);
+    return {
+      planId: plan.planId,
+      status: plan.status,
+      executionStatus: plan.executionStatus,
+      completedThisInvocation: [],
+      reconciledThisInvocation: [],
+      failedThisInvocation: [],
+      remainingActions: remaining.length,
+      nextAction: plan.nextAction ?? remaining[0]?.actionId ?? null,
+      resumeRequired: remaining.length > 0,
+      auditPending: plan.auditStatus === "pending" || plan.auditStatus === "running",
+      mutationPerformed: false,
+      reconciliationOnlyThisInvocation: true,
+      discrepancy: {
+        actionId: outcome.examinedActionId,
+        code: outcome.discrepancy ?? "postcondition_not_satisfied",
+        liveEvidence: outcome.liveEvidence ?? null,
+      },
     };
   }
 
@@ -243,7 +318,7 @@ export function registerDownstreamRenameReconciliationTool(
     delete target._registeredTools?.execute_integrity_plan;
     server.registerTool("execute_integrity_plan", {
       title: "Resume reconciled integrity plan",
-      description: "Reconcile stable-item rename and move postconditions, including externally completed downstream moves, before executing at most one mutation.",
+      description: "Reconcile one stable-item rename postcondition per invocation, including externally completed downstream moves, before executing at most one mutation.",
       inputSchema: { executionToken: z.string().min(1).max(50_000) },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     }, async (input) => {
