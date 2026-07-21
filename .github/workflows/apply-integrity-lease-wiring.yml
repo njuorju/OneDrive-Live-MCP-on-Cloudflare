@@ -7,6 +7,7 @@ on:
     paths:
       - scripts/apply-integrity-lease-wiring.mjs
       - scripts/fix-integrity-hardening-tests.mjs
+      - scripts/fix-integrity-final-edges.mjs
       - .github/workflows/apply-integrity-lease-wiring.yml
       - src/integrity-coordination.ts
       - src/integrity-lease-tools.ts
@@ -38,6 +39,7 @@ jobs:
         run: |
           node scripts/apply-integrity-lease-wiring.mjs
           node scripts/fix-integrity-hardening-tests.mjs
+          node scripts/fix-integrity-final-edges.mjs
       - name: Install pinned dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Validate hardening
@@ -61,7 +63,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/integrity-coordination.ts src/integrity-lease-tools.ts src/integrity-resume-repair.ts test/integrity-coordination.test.ts
-          git commit -m "Harden fenced integrity execution and recovery" || exit 0
+          git commit -m "Fix final integrity lease edge cases" || exit 0
           git fetch origin work/integrity-resume-reconciliation
           git rebase origin/work/integrity-resume-reconciliation
           git push origin HEAD:work/integrity-resume-reconciliation
