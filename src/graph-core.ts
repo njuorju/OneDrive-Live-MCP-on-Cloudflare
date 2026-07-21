@@ -217,10 +217,16 @@ export function classifyGraphFetchException(error: unknown): GraphFetchException
 }
 
 function retryDelayMs(response: Response, attempt: number): number {
-  const graphMilliseconds = Number(response.headers.get("x-ms-retry-after-ms") ?? "");
-  if (Number.isFinite(graphMilliseconds) && graphMilliseconds >= 0) return Math.min(graphMilliseconds, 1_000);
-  const retryAfter = Number(response.headers.get("retry-after") ?? "");
-  if (Number.isFinite(retryAfter) && retryAfter >= 0) return Math.min(retryAfter * 1_000, 1_000);
+  const graphHeader = response.headers.get("x-ms-retry-after-ms");
+  if (graphHeader !== null && graphHeader.trim() !== "") {
+    const graphMilliseconds = Number(graphHeader);
+    if (Number.isFinite(graphMilliseconds) && graphMilliseconds >= 0) return Math.min(graphMilliseconds, 1_000);
+  }
+  const retryHeader = response.headers.get("retry-after");
+  if (retryHeader !== null && retryHeader.trim() !== "") {
+    const retryAfter = Number(retryHeader);
+    if (Number.isFinite(retryAfter) && retryAfter >= 0) return Math.min(retryAfter * 1_000, 1_000);
+  }
   return Math.min(100 * 2 ** attempt, 1_000);
 }
 
@@ -236,6 +242,8 @@ export async function graphResponse(
 ): Promise<Response> {
   const token = await getGraphAccessToken(env, userId);
   const correlationId = crypto.randomUUID();
+  const method = String(init.method ?? "GET").toUpperCase();
+  const retryWithinInvocation = method === "GET" || method === "HEAD";
   const maximumAttempts = 3;
   for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
     let response: Response;
@@ -262,7 +270,7 @@ export async function graphResponse(
         },
       });
       logSafeError("microsoft_graph_fetch_exception", error);
-      if (classified.code !== "graph_subrequest_limit" && classified.retryable && attempt + 1 < maximumAttempts) {
+      if (classified.code !== "graph_subrequest_limit" && classified.retryable && retryWithinInvocation && attempt + 1 < maximumAttempts) {
         await delay(Math.min(100 * 2 ** attempt, 1_000));
         continue;
       }
@@ -310,7 +318,7 @@ export async function graphResponse(
       details,
     });
     logSafeError("microsoft_graph_error", error);
-    if (retryable && attempt + 1 < maximumAttempts) {
+    if (retryable && retryWithinInvocation && attempt + 1 < maximumAttempts) {
       await response.body?.cancel();
       await delay(retryDelayMs(response, attempt));
       continue;
