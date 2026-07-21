@@ -55,7 +55,6 @@ export function findDeclaredDownstreamMoves(plan: IntegrityPlan, action: PlanAct
       candidate.action === "MOVE"
       && candidate.sourceItemId === action.sourceItemId
       && Number(candidate.operationOrder ?? 0) > Number(action.operationOrder ?? 0)
-      && (candidate.dependencies ?? []).includes(action.actionId)
       && Boolean(candidate.destinationPath),
     )
     .sort((a, b) => Number(a.operationOrder ?? 0) - Number(b.operationOrder ?? 0))
@@ -318,7 +317,7 @@ export function registerDownstreamRenameReconciliationTool(
     delete target._registeredTools?.execute_integrity_plan;
     server.registerTool("execute_integrity_plan", {
       title: "Resume reconciled integrity plan",
-      description: "Reconcile one stable-item rename postcondition per invocation, including externally completed downstream moves, before executing at most one mutation.",
+      description: "Reconcile one stable-item rename postcondition per invocation, including externally completed later moves, before executing at most one mutation.",
       inputSchema: { executionToken: z.string().min(1).max(50_000) },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     }, async (input) => {
