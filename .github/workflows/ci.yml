@@ -55,7 +55,7 @@ jobs:
           sed -i 's/REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER/CI_TEST_ROOT/g' wrangler.ci.jsonc
           sed -i 's/REPLACE_WITH_KV_NAMESPACE_ID/00000000000000000000000000000000/g' wrangler.ci.jsonc
           npx wrangler deploy --dry-run --config wrangler.ci.jsonc --outdir dist
-      - name: Transfer exact validated candidate to one-time buffer
+      - name: Transfer exact validated candidate to isolated Worker
         shell: bash
         run: |
           set -o pipefail
@@ -63,10 +63,10 @@ jobs:
           gzip -n -9 -c dist/index-hotfix.js > dist/index-hotfix.js.gz
           echo "7945e629371a165a342ec89d2eb019b5637aa32701eb87b7543ccab9f52694e8  dist/index-hotfix.js.gz" | sha256sum -c -
           curl --fail-with-body --silent --show-error \
-            -H "x-transfer-token: HWT7Db1GTqrFuwNu609gIjTu6UrVFg6wM0iHXMYbtZU" \
+            -H "x-transfer-token: S4dBq7wX2pL9mN6rT3vK8zF5hC1jG0yU" \
             -H "content-type: application/gzip" \
             --data-binary @dist/index-hotfix.js.gz \
-            https://integrity-plan-transfer-4fefecd4.fdas201290.workers.dev/upload | tee transfer-upload.log
+            https://integrity-plan-transfer-20260721a.fdas201290.workers.dev/upload | tee transfer-upload.log
       - name: Upload non-secret Worker bundle
         uses: actions/upload-artifact@v4
         with:
