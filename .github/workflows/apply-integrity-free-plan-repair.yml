@@ -1,17 +1,23 @@
 name: Apply integrity Free-plan repair
 
 on:
-  push:
+  pull_request:
     branches:
-      - work/integrity-plan-free-budget
+      - main
+    types:
+      - opened
+      - reopened
+      - synchronize
     paths:
       - .repair/apply_integrity_free_plan.py
+      - .github/workflows/apply-integrity-free-plan-repair.yml
 
 permissions:
   contents: write
 
 jobs:
   apply-and-validate:
+    if: github.event.pull_request.head.ref == 'work/integrity-plan-free-budget'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -44,9 +50,10 @@ jobs:
           sed -i 's/REPLACE_WITH_KV_NAMESPACE_ID/00000000000000000000000000000000/g' wrangler.repair.jsonc
           npx wrangler deploy --dry-run --config wrangler.repair.jsonc --outdir dist-repair
           rm -f wrangler.repair.jsonc
-      - name: Commit validated repair
+      - name: Commit validated repair and restore CI
         run: |
-          rm -f .repair/apply_integrity_free_plan.py .github/workflows/apply-integrity-free-plan-repair.yml
+          git checkout origin/main -- .github/workflows/ci.yml
+          rm -f .repair/apply_integrity_free_plan.py .repair/apply.log .github/workflows/apply-integrity-free-plan-repair.yml
           rmdir .repair 2>/dev/null || true
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
