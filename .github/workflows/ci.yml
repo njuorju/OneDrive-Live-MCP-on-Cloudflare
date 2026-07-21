@@ -8,7 +8,7 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
@@ -20,8 +20,6 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: "22.18.0"
@@ -40,20 +38,6 @@ jobs:
         run: |
           set -o pipefail
           npm test 2>&1 | tee test.log
-      - name: Commit validated traversal hash repair
-        if: github.event_name == 'push' && github.ref_name == 'work/integrity-plan-free-budget'
-        shell: bash
-        run: |
-          git add src/graph-core.ts src/integrated-tools.ts test/integrity-free-plan.test.ts
-          if git diff --cached --quiet; then
-            echo "Validated source already committed."
-          else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git diff --cached --check
-            git commit -m "Reuse verified traversal for audit hashing"
-            git push origin HEAD:work/integrity-plan-free-budget
-          fi
       - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v4
