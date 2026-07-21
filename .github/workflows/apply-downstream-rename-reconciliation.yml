@@ -1,4 +1,5 @@
 name: Apply downstream rename reconciliation fix
+# Trigger after workflow registration.
 
 on:
   push:
