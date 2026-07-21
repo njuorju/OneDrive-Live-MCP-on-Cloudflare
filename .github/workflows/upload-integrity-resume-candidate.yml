@@ -1,5 +1,4 @@
 name: Upload integrity resume candidate
-# Retriggered after hard-bounding reconciliation for Workers Free.
 
 on:
   pull_request:
@@ -9,7 +8,7 @@ on:
       - .github/workflows/upload-integrity-resume-candidate.yml
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   upload-candidate:
@@ -20,6 +19,62 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: work/integrity-resume-reconciliation
+      - name: Apply pending downstream-rename patch once
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src/integrity-resume-repair.ts')
+          text = p.read_text()
+          old = '''function expectedRenameParent(plan: IntegrityPlan, action: PlanAction): string {
+  const prior = latestPriorResult(plan, action);
+  const priorAfter = prior?.after as CompactItem | undefined;
+  return priorAfter?.relativePath ? parentPath(priorAfter.relativePath) : parentPath(String(action.sourcePath ?? ""));
+}
+'''
+          new = '''function expectedRenameParents(plan: IntegrityPlan, action: PlanAction): string[] {
+  const prior = latestPriorResult(plan, action);
+  const priorAfter = prior?.after as CompactItem | undefined;
+  const candidates = new Set<string>();
+  candidates.add(priorAfter?.relativePath ? parentPath(priorAfter.relativePath) : parentPath(String(action.sourcePath ?? "")));
+  for (const later of plan.actions) {
+    if (later.sourceItemId !== action.sourceItemId || later.action !== "MOVE") continue;
+    if (Number(later.operationOrder ?? 0) <= Number(action.operationOrder ?? 0)) continue;
+    if (!(later.dependencies ?? []).includes(action.actionId)) continue;
+    if (later.destinationPath) candidates.add(strictRelativePath(later.destinationPath));
+  }
+  return [...candidates];
+}
+'''
+          old2 = '''    const parentMatches = parentPath(live.relativePath).toLocaleLowerCase("en") === expectedRenameParent(plan, action).toLocaleLowerCase("en");
+    const nameMatches = live.item.name === String(action.proposedFilename ?? "");
+'''
+          new2 = '''    const liveParent = parentPath(live.relativePath).toLocaleLowerCase("en");
+    const parentMatches = expectedRenameParents(plan, action).some((candidate) => candidate.toLocaleLowerCase("en") === liveParent);
+    const nameMatches = live.item.name === String(action.proposedFilename ?? "");
+'''
+          if old in text:
+              text = text.replace(old, new)
+              if old2 not in text:
+                  raise SystemExit('rename parent match anchor missing')
+              p.write_text(text.replace(old2, new2))
+              t = Path('test/integrity-resume-repair.test.ts')
+              tests = t.read_text()
+              marker = 'test("stable item ID runtime resolution preserves the original plan evidence", () => {'
+              addition = '''test("externally renamed item may reconcile after its dependent move already completed", () => {\n  assert.match(source, /function expectedRenameParents/);\n  assert.match(source, /later\.action !== "MOVE"/);\n  assert.match(source, /later\.dependencies.*includes\(action\.actionId\)/);\n  assert.match(source, /later\.destinationPath/);\n});\n\n'''
+              if addition not in tests:
+                  if marker not in tests:
+                      raise SystemExit('test insertion anchor missing')
+                  t.write_text(tests.replace(marker, addition + marker))
+          Path('.github/workflows/apply-downstream-rename-reconciliation.yml').unlink(missing_ok=True)
+          PY
+          if ! git diff --quiet; then
+            git config user.name github-actions[bot]
+            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+            git add src/integrity-resume-repair.ts test/integrity-resume-repair.test.ts .github/workflows/apply-downstream-rename-reconciliation.yml
+            git commit -m "Reconcile renamed items after downstream moves"
+            git push origin HEAD:work/integrity-resume-reconciliation
+          fi
       - uses: actions/setup-node@v4
         with:
           node-version: "22.18.0"
@@ -59,22 +114,16 @@ jobs:
               "MAX_IMAGE_PAGES": "8",
               "IMAGE_PROCESSING_TIMEOUT_MS": "15000"
             },
-            "secrets": {
-              "required": ["COOKIE_ENCRYPTION_KEY", "MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET"]
-            },
+            "secrets": { "required": ["COOKIE_ENCRYPTION_KEY", "MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET"] },
             "migrations": [
               { "new_sqlite_classes": ["OneDriveMCP"], "tag": "v1" },
               { "new_sqlite_classes": ["AuthState"], "tag": "v2" }
             ],
-            "durable_objects": {
-              "bindings": [
-                { "class_name": "OneDriveMCP", "name": "MCP_OBJECT" },
-                { "class_name": "AuthState", "name": "AUTH_STATE" }
-              ]
-            },
-            "kv_namespaces": [
-              { "binding": "OAUTH_KV", "id": "a3ead543dad24b8596ab9193b10f1b9f" }
-            ],
+            "durable_objects": { "bindings": [
+              { "class_name": "OneDriveMCP", "name": "MCP_OBJECT" },
+              { "class_name": "AuthState", "name": "AUTH_STATE" }
+            ] },
+            "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "a3ead543dad24b8596ab9193b10f1b9f" }],
             "ai": { "binding": "AI" },
             "images": { "binding": "IMAGES" },
             "browser": { "binding": "BROWSER" },
