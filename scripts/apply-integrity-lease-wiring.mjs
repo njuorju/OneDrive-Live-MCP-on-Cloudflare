@@ -64,16 +64,4 @@ edit("wrangler.jsonc", [
   ],
 ]);
 
-edit(".github/workflows/upload-integrity-resume-candidate.yml", [
-  [
-    '    paths:\n      - .github/workflows/upload-integrity-resume-candidate.yml\n',
-    '    paths:\n      - .github/workflows/upload-integrity-resume-candidate.yml\n      - src/auth-state.ts\n      - src/index-hotfix.ts\n      - src/integrity-coordination.ts\n      - src/integrity-lease-tools.ts\n      - src/integrity-resume-repair.ts\n      - test/integrity-coordination.test.ts\n      - worker-configuration.d.ts\n      - wrangler.jsonc\n',
-  ],
-  [
-    '              "IMAGE_PROCESSING_TIMEOUT_MS": "15000"\n',
-    '              "IMAGE_PROCESSING_TIMEOUT_MS": "15000",\n              "INTEGRITY_LEASE_SECONDS": "600",\n              "WORKER_DEPLOYMENT_ID": "repo-${{ github.event.pull_request.head.sha }}"\n',
-  ],
-]);
-
-console.log("Integrity lease wiring applied.");
-// One-shot trigger after workflow installation.
+console.log("Integrity lease source wiring applied.");
