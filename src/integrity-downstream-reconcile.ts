@@ -8,7 +8,6 @@ import {
   graphFetchBytes,
   resolveConfiguredRoot,
   strictRelativePath,
-  verifyItemInsideRoot,
   type VerifiedItem,
 } from "./graph-core";
 import { INTEGRATED_LIMITS, sha256Bytes } from "./integrated-core";
@@ -18,7 +17,7 @@ import {
   executeIntegrityPlanRepair,
   refreshDependencySkips,
 } from "./integrity-resume-repair";
-import { openJson } from "./security";
+import { encodeGraphPath, openJson } from "./security";
 import type { GraphDriveItem } from "./types";
 import type { HotfixContext } from "./version20-hotfix";
 
@@ -30,7 +29,6 @@ const RECONCILIATION_ITEM_SELECT = "id,name,size,eTag,lastModifiedDateTime,file,
 function planKey(planId: string): string { return `${PLAN_PREFIX}${planId}`; }
 function operationKey(planId: string, actionId: string): string { return `${OPERATION_PREFIX}${planId}:${actionId}`; }
 function reconciliationKey(planId: string, actionId: string): string { return `${RECONCILIATION_PREFIX}${planId}:${actionId}`; }
-function parentPath(path: string): string { return strictRelativePath(path).split("/").slice(0, -1).join("/"); }
 function nowIso(): string { return new Date().toISOString(); }
 
 function textResult(data: Record<string, unknown>): CallToolResult {
@@ -74,26 +72,42 @@ export function relativePathFromParentReference(root: GraphDriveItem, item: Grap
   return strictRelativePath(relativeParent ? `${relativeParent}/${item.name}` : item.name);
 }
 
-async function verifyItemForReconciliation(context: HotfixContext, itemId: string): Promise<VerifiedItem> {
+async function verifyDeclaredDownstreamItem(
+  context: HotfixContext,
+  action: PlanAction,
+  downstreamMove: PlanAction,
+): Promise<VerifiedItem> {
+  if (!action.sourceItemId || !action.proposedFilename || !downstreamMove.destinationPath) {
+    throw new ConnectorError("invalid_plan_action", "The downstream reconciliation action is incomplete.");
+  }
   const root = await resolveConfiguredRoot(context.env, context.userId);
+  const rootDriveId = root.parentReference?.driveId;
+  if (!rootDriveId) throw new ConnectorError("root_invalid", "The configured OneDrive root could not be verified.");
+
+  const relativePath = strictRelativePath(`${downstreamMove.destinationPath}/${action.proposedFilename}`);
+  const configuredRootPath = strictRelativePath(context.env.ONEDRIVE_ROOT);
   const item = await graphFetch<GraphDriveItem>(
     context.env,
     context.userId,
-    `/me/drive/items/${encodeURIComponent(itemId)}?$select=${RECONCILIATION_ITEM_SELECT}`,
+    `/me/drive/root:/${encodeGraphPath(`${configuredRootPath}/${relativePath}`)}?$select=${RECONCILIATION_ITEM_SELECT}`,
   );
-  if (item.remoteItem || item.deleted || !item.parentReference?.driveId) {
-    throw new ConnectorError("outside_root", "Shared, remote, deleted, or ambiguous items are not allowed.");
+
+  if (
+    item.id !== action.sourceItemId
+    || item.remoteItem
+    || item.deleted
+    || !item.parentReference?.driveId
+    || item.parentReference.driveId !== rootDriveId
+  ) {
+    throw new ConnectorError("identity_conflict", "The item at the declared downstream destination does not match the plan stable item ID.");
   }
-  const relativePath = relativePathFromParentReference(root, item);
-  if (relativePath === null) {
-    return verifyItemInsideRoot(context.env, context.userId, itemId);
-  }
+
   return {
     item,
     root,
     relativePath,
-    ancestorIds: item.id === root.id ? [root.id] : [item.id, root.id],
-    driveId: item.parentReference.driveId,
+    ancestorIds: [item.id, root.id],
+    driveId: rootDriveId,
   };
 }
 
@@ -129,17 +143,13 @@ async function reconcileOneDownstreamRename(
     const downstreamMove = findDeclaredDownstreamMove(plan, action);
     if (!downstreamMove?.destinationPath) continue;
 
-    let live;
+    let live: VerifiedItem;
     try {
-      live = await verifyItemForReconciliation(context, action.sourceItemId);
+      live = await verifyDeclaredDownstreamItem(context, action, downstreamMove);
     } catch (error) {
-      if (error instanceof ConnectorError && error.code === "item_not_found") continue;
+      if (error instanceof ConnectorError && ["item_not_found", "identity_conflict"].includes(error.code)) continue;
       throw error;
     }
-
-    const liveParent = parentPath(live.relativePath).toLocaleLowerCase("en");
-    const expectedParent = strictRelativePath(downstreamMove.destinationPath).toLocaleLowerCase("en");
-    if (live.item.name !== action.proposedFilename || liveParent !== expectedParent) continue;
 
     await verifySnapshotHash(
       context,
