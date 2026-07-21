@@ -10,6 +10,7 @@ import {
 import { createIntegratedStateStorage } from "./version20-hotfix";
 import { registerIntegrityResumeRepairTools } from "./integrity-resume-repair";
 import { registerDownstreamRenameReconciliationTool } from "./integrity-downstream-reconcile";
+import { registerBlockedMoveReconciliationTool } from "./integrity-blocked-move-reconcile";
 
 const prototype = OneDriveMCP.prototype as any;
 if (!prototype.__version20HotfixApplied) {
@@ -66,6 +67,7 @@ if (!prototype.__version20HotfixApplied) {
     registerSourceSnapshotRepairTools(replacementServer, contextFactory, schedule);
     registerIntegrityResumeRepairTools(replacementServer, contextFactory, schedule);
     registerDownstreamRenameReconciliationTool(replacementServer, contextFactory);
+    registerBlockedMoveReconciliationTool(replacementServer, contextFactory);
 
     const actual = this.server as any;
     const replacement = replacementServer as any;
