@@ -8,84 +8,13 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
-  apply-integrity-repair:
-    if: github.event_name == 'push' && github.ref_name == 'work/integrity-plan-free-budget'
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: work/integrity-plan-free-budget
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22.18.0"
-          cache: npm
-      - name: Apply source-controlled repair
-        id: apply
-        shell: bash
-        run: |
-          set +e
-          python .repair/apply_integrity_free_plan.py > .repair/apply.log 2>&1
-          code=$?
-          cat .repair/apply.log
-          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
-          exit 0
-      - name: Persist apply diagnostics
-        if: steps.apply.outputs.exit_code != '0'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .repair/apply.log
-          git commit -m "chore: record integrity repair apply failure" || true
-          git push origin HEAD:work/integrity-plan-free-budget || true
-      - name: Stop after apply failure
-        if: steps.apply.outputs.exit_code != '0'
-        run: exit 1
-      - name: Install pinned dependencies
-        if: steps.apply.outputs.exit_code == '0'
-        run: npm ci --ignore-scripts --no-audit --no-fund
-        env:
-          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
-      - name: Type check
-        if: steps.apply.outputs.exit_code == '0'
-        run: npm run type-check
-      - name: Full test suite
-        if: steps.apply.outputs.exit_code == '0'
-        run: npm test
-      - name: Focused integrity-plan tests
-        if: steps.apply.outputs.exit_code == '0'
-        run: npx tsx --test test/integrity-free-plan.test.ts test/graph-error-classification.test.ts
-      - name: Audit
-        if: steps.apply.outputs.exit_code == '0'
-        run: npm audit --audit-level=high
-      - name: Wrangler dry-run
-        if: steps.apply.outputs.exit_code == '0'
-        run: |
-          cp wrangler.jsonc wrangler.repair.jsonc
-          sed -i 's/REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER/CI_TEST_ROOT/g' wrangler.repair.jsonc
-          sed -i 's/REPLACE_WITH_KV_NAMESPACE_ID/00000000000000000000000000000000/g' wrangler.repair.jsonc
-          npx wrangler deploy --dry-run --config wrangler.repair.jsonc --outdir dist-repair
-          rm -f wrangler.repair.jsonc
-      - name: Commit validated repair and restore CI
-        if: steps.apply.outputs.exit_code == '0'
-        run: |
-          git checkout origin/main -- .github/workflows/ci.yml
-          rm -f .repair/apply_integrity_free_plan.py .repair/apply.log .github/workflows/apply-integrity-free-plan-repair.yml
-          rmdir .repair 2>/dev/null || true
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "Repair resumable integrity execution for Workers Free"
-          git push origin HEAD:work/integrity-plan-free-budget
-
   validate:
     runs-on: ubuntu-latest
     timeout-minutes: 20

@@ -7,6 +7,8 @@ import {
   compactVerifiedItem,
   downloadVerifiedItem,
   getGraphAccessToken,
+  graphFetchBytes,
+  graphResponse,
   listVerifiedChildren,
   resolveRelativeFolder,
   resolveRelativeItem,
@@ -18,11 +20,16 @@ import {
 import { readAllowedFile } from "./onedrive-files";
 import { fetchImageForAnalysisSecure } from "./visual-assets";
 import {
+  createFolderInVerifiedDestinationStrict,
   createFolderStrict,
+  createTextFileInVerifiedDestinationStrict,
   createTextFileStrict,
   moveItemStrict,
+  moveVerifiedItemStrict,
   renameItemStrict,
+  renameVerifiedItemStrict,
   replaceTextFileStrict,
+  replaceVerifiedTextFileStrict,
 } from "./write-operations";
 import { extensionOf, isVisualAsset, normalizedMimeType, validateFileSignature } from "./file-types";
 import { openJson, sealJson, sha256Hex } from "./security";
@@ -50,6 +57,15 @@ import {
   type DocumentVisualCandidate,
   type OoxmlEntryMap,
 } from "./integrated-core";
+import {
+  MAX_MUTATIONS_PER_INVOCATION,
+  advanceDependencySkips,
+  normalizeProgress,
+  remainingActions,
+  uniqueStrings,
+  upsertFailure,
+  upsertResult,
+} from "./integrity-execution";
 
 const READ_ONLY = {
   readOnlyHint: true,
@@ -168,11 +184,15 @@ export type IntegrityPlan = {
   currentAction: string | null;
   actions: PlanAction[];
   completedActions: string[];
-  failedActions: Array<{ actionId: string; code: string; message: string }>;
+  failedActions: Array<{ actionId: string; code: string; message: string; retryable?: boolean; status?: number; correlationId?: string; details?: Record<string, unknown> }>;
   skippedDependencyActions: string[];
   results: Array<Record<string, unknown>>;
   deletionLogsPrepared: string[];
   finalFilesystemDiffReference: string | null;
+  nextAction?: string | null;
+  auditStatus?: "not_requested" | "pending" | "running" | "completed" | "failed";
+  completedInvocations?: number;
+  lastExecutionAt?: string | null;
   planHash: string;
 };
 
@@ -1151,22 +1171,7 @@ async function fetchOpaqueMicrosoftUrl(url: URL, init: RequestInit = {}): Promis
 }
 
 async function graphRaw(context: IntegratedContext, pathOrUrl: string, init: RequestInit = {}): Promise<Response> {
-  const token = await getGraphAccessToken(context.env, context.userId);
-  const url = pathOrUrl.startsWith("https://") ? new URL(pathOrUrl) : new URL(`${GRAPH_ROOT}${pathOrUrl}`);
-  if (url.protocol !== "https:" || url.hostname.toLocaleLowerCase("en") !== "graph.microsoft.com") throw new ConnectorError("unsafe_graph_url", "The upstream URL is not trusted.");
-  const response = await fetch(url.href, {
-    ...init,
-    redirect: init.redirect ?? "follow",
-    headers: { ...(init.headers ?? {}), Authorization: `Bearer ${token}`, "client-request-id": crypto.randomUUID(), "return-client-request-id": "true" },
-  });
-  if (!response.ok) {
-    throw new ConnectorError(
-      response.status === 404 ? "item_not_found" : response.status === 409 ? "name_conflict" : response.status === 412 ? "etag_conflict" : response.status === 429 ? "graph_rate_limited" : "graph_request_failed",
-      response.status === 409 ? "An item with that name already exists." : "Microsoft Graph could not complete the request.",
-      { status: response.status, retryable: response.status === 429 || response.status >= 500 },
-    );
-  }
-  return response;
+  return graphResponse(context.env, context.userId, pathOrUrl, init);
 }
 
 async function pdfBytesForRender(context: IntegratedContext, itemId: string): Promise<{ verified: VerifiedItem; pdf: ArrayBuffer }> {
@@ -1624,14 +1629,18 @@ async function createIntegrityPlan(context: IntegratedContext, input: Record<str
     results: [],
     deletionLogsPrepared: [],
     finalFilesystemDiffReference: null,
+    nextAction: actions[0]?.actionId ?? null,
+    auditStatus: "not_requested",
+    completedInvocations: 0,
+    lastExecutionAt: null,
     planHash,
   };
   await storePlan(context, plan);
   return { planId, snapshotId, scopePath, actionCount: actions.length, planJson: JSON.stringify(plan, null, 2), planCsv: toCsv(actions as Array<Record<string, unknown>>) };
 }
 
-async function validateIntegrityPlan(context: IntegratedContext, planId: string): Promise<Record<string, unknown>> {
-  const plan = await getPlan(context, planId);
+export async function validateIntegrityPlan(context: IntegratedContext, planId: string): Promise<Record<string, unknown>> {
+  const plan = normalizeProgress(await getPlan(context, planId));
   const records = await listSnapshotRecords(context, plan.snapshotId);
   const byId = new Map(records.map((record) => [record.itemId, record]));
   const errors: Array<Record<string, unknown>> = [];
@@ -1662,61 +1671,23 @@ async function validateIntegrityPlan(context: IntegratedContext, planId: string)
       if (destinationMap.has(destinationKey)) errors.push({ actionId: action.actionId, code: "duplicate_destination", conflictingActionId: destinationMap.get(destinationKey) });
       destinationMap.set(destinationKey, action.actionId);
     }
-    if (action.action === "MOVE" && action.sourcePath && action.destinationPath && `${strictRelativePath(action.destinationPath)}/`.toLocaleLowerCase("en").startsWith(`${strictRelativePath(action.sourcePath)}/`.toLocaleLowerCase("en"))) {
-      errors.push({ actionId: action.actionId, code: "circular_move" });
-    }
+    if (action.action === "MOVE" && action.sourcePath && action.destinationPath && `${strictRelativePath(action.destinationPath)}/`.toLocaleLowerCase("en").startsWith(`${strictRelativePath(action.sourcePath)}/`.toLocaleLowerCase("en"))) errors.push({ actionId: action.actionId, code: "circular_move" });
     if (action.action === "RECYCLE_FOLDER" && action.requiredStructuralPlaceholder) errors.push({ actionId: action.actionId, code: "required_placeholder_protected" });
     if (actionIsDestructive(action) && ambiguityIsYes(action)) errors.push({ actionId: action.actionId, code: "ambiguous_destructive_action" });
     if (actionIsDestructive(action) && !deletionApproved(action)) errors.push({ actionId: action.actionId, code: "destructive_decision_missing" });
+    if (action.proposedFilename) {
+      try { validateItemName(action.proposedFilename); } catch (error) { const safe = connectorError(error); errors.push({ actionId: action.actionId, code: safe.code, message: safe.message }); }
+    }
     if (action.sourceItemId) {
       const snapshot = byId.get(action.sourceItemId);
-      if (!snapshot) {
-        errors.push({ actionId: action.actionId, code: "source_missing_from_snapshot" });
-        continue;
-      }
-      try {
-        const live = await verifyItemInsideRoot(context.env, context.userId, action.sourceItemId);
-        if (!scopeContains(plan.scopePath, live.relativePath)) errors.push({ actionId: action.actionId, code: "live_source_outside_scope" });
-        if (action.sourcePath && live.relativePath !== action.sourcePath) errors.push({ actionId: action.actionId, code: "path_changed", before: action.sourcePath, after: live.relativePath });
-        if (action.snapshotETag && live.item.eTag !== action.snapshotETag) errors.push({ actionId: action.actionId, code: "etag_changed" });
-        if (snapshot.byteSize !== (live.item.size ?? null)) errors.push({ actionId: action.actionId, code: "size_changed" });
-        if (actionIsDestructive(action)) {
-          if (!action.snapshotSha256 && !live.item.folder) errors.push({ actionId: action.actionId, code: "destructive_hash_required" });
-          if (action.snapshotSha256 && !live.item.folder) {
-            const currentSha = (await shaForItem(context, live.item.id)).sha256;
-            if (currentSha !== action.snapshotSha256) errors.push({ actionId: action.actionId, code: "sha256_changed" });
-          }
-        }
-        if (action.action === "RENAME" && action.proposedFilename) {
-          const parentId = live.item.parentReference?.id;
-          if (!parentId) errors.push({ actionId: action.actionId, code: "root_rename_forbidden" });
-          else {
-            const parent = await verifyItemInsideRoot(context.env, context.userId, parentId);
-            if (!(await assertNameAvailable(context, parent, action.proposedFilename, live.item.id))) errors.push({ actionId: action.actionId, code: "destination_collision" });
-          }
-        }
-        if (action.action === "MOVE" && action.destinationPath) {
-          const destination = await resolveRelativeFolder(context.env, context.userId, action.destinationPath);
-          const finalName = action.proposedFilename ?? live.item.name;
-          const exclude = destination.item.id === live.item.parentReference?.id ? live.item.id : undefined;
-          if (!(await assertNameAvailable(context, destination, finalName, exclude))) errors.push({ actionId: action.actionId, code: "destination_collision" });
-        }
-      } catch (error) {
-        const safe = connectorError(error);
-        errors.push({ actionId: action.actionId, code: safe.code, message: safe.message });
-      }
+      if (!snapshot) { errors.push({ actionId: action.actionId, code: "source_missing_from_snapshot" }); continue; }
+      if (action.sourcePath && snapshot.relativePath !== action.sourcePath) errors.push({ actionId: action.actionId, code: "snapshot_path_mismatch" });
+      if (action.currentFilename && snapshot.filename !== action.currentFilename) errors.push({ actionId: action.actionId, code: "snapshot_filename_mismatch" });
+      if (action.snapshotETag && snapshot.eTag !== action.snapshotETag) errors.push({ actionId: action.actionId, code: "snapshot_etag_mismatch" });
+      if (action.snapshotSha256 && snapshot.sha256 && snapshot.sha256 !== action.snapshotSha256) errors.push({ actionId: action.actionId, code: "snapshot_sha256_mismatch" });
+      if (["MOVE", "RENAME", "REPLACE_TEXT", "RECYCLE"].includes(action.action) && snapshot.type === "file" && !action.snapshotSha256) errors.push({ actionId: action.actionId, code: "mutation_hash_required" });
     }
-    if (["CREATE_FOLDER", "CREATE_TEXT"].includes(action.action)) {
-      try {
-        const destination = await resolveRelativeFolder(context.env, context.userId, action.destinationPath ?? plan.scopePath);
-        const finalName = action.proposedFilename ?? action.currentFilename ?? "";
-        if (!finalName) errors.push({ actionId: action.actionId, code: "destination_name_required" });
-        else if (!(await assertNameAvailable(context, destination, finalName))) errors.push({ actionId: action.actionId, code: "destination_collision" });
-      } catch (error) {
-        const safe = connectorError(error);
-        errors.push({ actionId: action.actionId, code: safe.code, message: safe.message });
-      }
-    }
+    if (["CREATE_FOLDER", "CREATE_TEXT"].includes(action.action) && !(action.proposedFilename ?? action.currentFilename)) errors.push({ actionId: action.actionId, code: "destination_name_required" });
   }
   const recycleFolders = plan.actions.filter((action) => action.action === "RECYCLE_FOLDER");
   for (const folder of recycleFolders) {
@@ -1726,23 +1697,45 @@ async function validateIntegrityPlan(context: IntegratedContext, planId: string)
   }
   if (errors.length > 0) {
     plan.validationStatus = "invalid";
-    plan.status = "draft";
+    if (plan.executionStatus === "not_started") plan.status = "draft";
     await storePlan(context, plan);
-    return { valid: false, planId, errors };
+    return { valid: false, planId, errors, validationExternalGraphRequests: 0 };
   }
-  plan.deletionLogsPrepared = [];
+  const retryableFailures = new Set(plan.failedActions.filter((entry) => entry.retryable).map((entry) => entry.actionId));
+  if (retryableFailures.size > 0) {
+    plan.failedActions = plan.failedActions.filter((entry) => !retryableFailures.has(entry.actionId));
+    plan.skippedDependencyActions = [];
+  }
+  const prepared = new Set(plan.deletionLogsPrepared);
   for (const action of plan.actions.filter(actionIsDestructive)) {
+    if (prepared.has(action.actionId)) continue;
     await context.storage.put(operationKey(plan.planId, `deletion-prepared-${action.actionId}`), {
       preparedAt: nowIso(), planId: plan.planId, actionId: action.actionId, sourceItemId: action.sourceItemId, sourcePath: action.sourcePath,
       snapshotETag: action.snapshotETag, snapshotSha256: action.snapshotSha256, finalDecision: action.finalDecision,
     });
-    plan.deletionLogsPrepared.push(action.actionId);
+    prepared.add(action.actionId);
   }
+  plan.deletionLogsPrepared = [...prepared];
   plan.validationStatus = "valid";
-  plan.status = "validated";
+  const remaining = remainingActions(plan.actions, plan.completedActions, plan.failedActions, plan.skippedDependencyActions);
+  if (plan.executionStatus !== "completed") {
+    plan.status = plan.completedActions.length || plan.failedActions.length || plan.skippedDependencyActions.length ? "running" : "validated";
+    plan.executionStatus = plan.completedActions.length || plan.failedActions.length || plan.skippedDependencyActions.length ? "running" : "not_started";
+  }
+  plan.nextAction = remaining[0]?.actionId ?? null;
   await storePlan(context, plan);
   const executionToken = await sealJson(context.env.COOKIE_ENCRYPTION_KEY, { planId: plan.planId, planHash: plan.planHash, expiresAt: Date.now() + INTEGRATED_LIMITS.executionTokenSeconds * 1000 });
-  return { valid: true, planId, executionToken, expiresInSeconds: INTEGRATED_LIMITS.executionTokenSeconds, deletionLogsPrepared: plan.deletionLogsPrepared };
+  return {
+    valid: true,
+    planId,
+    executionToken,
+    expiresInSeconds: INTEGRATED_LIMITS.executionTokenSeconds,
+    deletionLogsPrepared: plan.deletionLogsPrepared,
+    validationExternalGraphRequests: 0,
+    livePreconditionsDeferredUntilMutation: true,
+    resumeFromAction: plan.nextAction,
+    completedActions: plan.completedActions,
+  };
 }
 
 async function acquireScopeLock(context: IntegratedContext, plan: IntegrityPlan): Promise<void> {
@@ -1762,119 +1755,192 @@ async function releaseScopeLock(context: IntegratedContext, plan: IntegrityPlan)
   await context.storage.delete(`${lockPrefix()}${await sha256Hex(plan.scopePath)}`);
 }
 
-async function recycleItem(context: IntegratedContext, action: PlanAction, plan: IntegrityPlan): Promise<Record<string, unknown>> {
-  if (!action.sourceItemId) throw new ConnectorError("source_item_required", "Recycle actions require sourceItemId.");
-  if (!plan.deletionLogsPrepared.includes(action.actionId)) throw new ConnectorError("recycle_log_missing", "The recycle deletion log was not prepared.");
-  const current = await verifyItemInsideRoot(context.env, context.userId, action.sourceItemId);
-  if (!scopeContains(plan.scopePath, current.relativePath)) throw new ConnectorError("outside_scope", "The recycle source is outside the plan scope.");
-  if (action.snapshotETag && current.item.eTag !== action.snapshotETag) throw new ConnectorError("etag_conflict", "The recycle source changed since validation.");
-  if (action.snapshotSha256 && !current.item.folder) {
-    const currentSha = (await shaForItem(context, current.item.id)).sha256;
-    if (currentSha !== action.snapshotSha256) throw new ConnectorError("sha256_conflict", "The recycle source content changed since validation.");
+function actionNeedsContentHash(action: PlanAction): boolean {
+  return ["MOVE", "RENAME", "REPLACE_TEXT", "RECYCLE"].includes(action.action) || actionIsDestructive(action);
+}
+
+async function shaForRetainedItem(context: IntegratedContext, source: VerifiedItem): Promise<string> {
+  if (source.item.folder) throw new ConnectorError("folder_not_file", "A folder does not have a file SHA-256.");
+  if ((source.item.size ?? 0) > INTEGRATED_LIMITS.fileBytesMax) throw new ConnectorError("file_too_large", "The file exceeds the integrated-operation size limit.");
+  const buffer = await graphFetchBytes(context.env, context.userId, `/me/drive/items/${encodeURIComponent(source.item.id)}/content`, INTEGRATED_LIMITS.fileBytesMax);
+  return sha256Bytes(buffer);
+}
+
+function expectedAppliedPath(action: PlanAction): string | null {
+  if (action.action === "MOVE" && action.destinationPath) {
+    const name = action.proposedFilename ?? action.currentFilename ?? action.sourcePath?.split("/").pop();
+    return name ? strictRelativePath(`${action.destinationPath}/${name}`) : null;
   }
-  if (action.action === "RECYCLE_FOLDER") {
-    if (current.item.id === current.root.id) throw new ConnectorError("scope_root_recycle_forbidden", "The scope root cannot be recycled.");
-    const page = await listVerifiedChildren(context.env, context.userId, current, 200);
-    if (page.items.length > 0 || page.nextUrl) throw new ConnectorError("folder_not_empty", "The folder is not empty after descendant actions.");
+  if (action.action === "RENAME" && action.sourcePath && action.proposedFilename) {
+    const parent = action.sourcePath.split("/").slice(0, -1).join("/");
+    return strictRelativePath(parent ? `${parent}/${action.proposedFilename}` : action.proposedFilename);
   }
-  const before = compactVerifiedItem(current);
-  await context.storage.put(operationKey(plan.planId, action.actionId), { state: "prepared", preparedAt: nowIso(), before, action });
-  await graphRaw(context, `/me/drive/items/${encodeURIComponent(current.item.id)}`, { method: "DELETE", headers: current.item.eTag ? { "If-Match": current.item.eTag } : {} });
-  const result = { actionId: action.actionId, action: action.action, before, after: null, recycled: true, reversibleThroughOneDriveRecycleBin: true, automaticRollbackAvailable: false, completedAt: nowIso() };
-  await context.storage.put(operationKey(plan.planId, action.actionId), { state: "completed", ...result });
+  return null;
+}
+
+async function completedOperation(context: IntegratedContext, plan: IntegrityPlan, action: PlanAction, result: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const completed = { state: "completed", ...result };
+  await context.storage.put(operationKey(plan.planId, action.actionId), completed);
   return result;
 }
 
 async function executePlanAction(context: IntegratedContext, plan: IntegrityPlan, action: PlanAction): Promise<Record<string, unknown>> {
+  let source: VerifiedItem | null = null;
   if (action.sourceItemId) {
-    const live = await verifyItemInsideRoot(context.env, context.userId, action.sourceItemId);
-    if (!scopeContains(plan.scopePath, live.relativePath)) throw new ConnectorError("outside_scope", "The source moved outside the plan scope.");
-    if (action.sourcePath && live.relativePath !== action.sourcePath) throw new ConnectorError("path_conflict", "The source path changed after validation.");
-    if (action.snapshotETag && live.item.eTag !== action.snapshotETag) throw new ConnectorError("etag_conflict", "The source changed after validation.");
+    source = await verifyItemInsideRoot(context.env, context.userId, action.sourceItemId);
+    if (!scopeContains(plan.scopePath, source.relativePath)) throw new ConnectorError("outside_scope", "The source moved outside the plan scope.");
+    const expectedApplied = expectedAppliedPath(action);
+    if (action.sourcePath && source.relativePath !== action.sourcePath) {
+      if (expectedApplied && source.relativePath === expectedApplied) {
+        if (action.snapshotSha256 && !source.item.folder && await shaForRetainedItem(context, source) !== action.snapshotSha256) throw new ConnectorError("sha256_conflict", "The already-moved item no longer matches the snapshot hash.");
+        return completedOperation(context, plan, action, { actionId: action.actionId, action: action.action, before: null, after: compactVerifiedItem(source), alreadyApplied: true, completedAt: nowIso() });
+      }
+      throw new ConnectorError("path_conflict", "The source path changed after the plan snapshot was created.");
+    }
+    if (action.snapshotETag && source.item.eTag !== action.snapshotETag) throw new ConnectorError("etag_conflict", "The source changed after the plan snapshot was created.");
+    if (actionNeedsContentHash(action) && !source.item.folder) {
+      if (!action.snapshotSha256) throw new ConnectorError("mutation_hash_required", "The file mutation requires the snapshot SHA-256.");
+      if (await shaForRetainedItem(context, source) !== action.snapshotSha256) throw new ConnectorError("sha256_conflict", "The source content changed after the plan snapshot was created.");
+    }
   }
-  if (action.destinationPath) {
-    if (!scopeContains(plan.scopePath, action.destinationPath)) throw new ConnectorError("outside_scope", "The destination is outside the plan scope.");
-    await resolveRelativeFolder(context.env, context.userId, action.destinationPath);
+  if (action.destinationPath && !scopeContains(plan.scopePath, action.destinationPath)) throw new ConnectorError("outside_scope", "The destination is outside the plan scope.");
+  if (action.action === "KEEP" || action.action === "METADATA_ONLY" || action.action === "CATALOGUE_ONLY") {
+    return completedOperation(context, plan, action, { actionId: action.actionId, action: action.action, status: "recorded", completedAt: nowIso() });
   }
-  if (action.action === "KEEP" || action.action === "METADATA_ONLY" || action.action === "CATALOGUE_ONLY") return { actionId: action.actionId, action: action.action, status: "recorded", completedAt: nowIso() };
   if (action.action === "CREATE_FOLDER") {
-    const result = await createFolderStrict(context.env, context.userId, String(action.destinationPath ?? plan.scopePath), String(action.proposedFilename ?? action.currentFilename ?? ""));
-    return { actionId: action.actionId, action: action.action, after: result, rollbackPossible: true, completedAt: nowIso() };
+    const destination = await resolveRelativeFolder(context.env, context.userId, String(action.destinationPath ?? plan.scopePath));
+    await context.storage.put(operationKey(plan.planId, action.actionId), { state: "prepared", preparedAt: nowIso(), action, before: null, destination: compactVerifiedItem(destination) });
+    const result = await createFolderInVerifiedDestinationStrict(context.env, context.userId, destination, String(action.proposedFilename ?? action.currentFilename ?? ""));
+    return completedOperation(context, plan, action, { actionId: action.actionId, action: action.action, after: result, rollbackPossible: true, completedAt: nowIso() });
   }
   if (action.action === "CREATE_TEXT") {
-    const result = await createTextFileStrict(context.env, context.userId, String(action.destinationPath ?? plan.scopePath), String(action.proposedFilename ?? action.currentFilename ?? ""), String(action.content ?? ""));
-    return { actionId: action.actionId, action: action.action, after: result, rollbackPossible: true, completedAt: nowIso() };
+    const destination = await resolveRelativeFolder(context.env, context.userId, String(action.destinationPath ?? plan.scopePath));
+    await context.storage.put(operationKey(plan.planId, action.actionId), { state: "prepared", preparedAt: nowIso(), action, before: null, destination: compactVerifiedItem(destination) });
+    const result = await createTextFileInVerifiedDestinationStrict(context.env, context.userId, destination, String(action.proposedFilename ?? action.currentFilename ?? ""), String(action.content ?? ""));
+    return completedOperation(context, plan, action, { actionId: action.actionId, action: action.action, after: result, rollbackPossible: true, completedAt: nowIso() });
   }
   if (action.action === "REPLACE_TEXT") {
-    if (!action.sourceItemId || !action.snapshotETag) throw new ConnectorError("etag_required", "REPLACE_TEXT requires sourceItemId and snapshotETag.");
-    const before = compactVerifiedItem(await verifyItemInsideRoot(context.env, context.userId, action.sourceItemId));
-    const result = await replaceTextFileStrict(context.env, context.userId, action.sourceItemId, action.snapshotETag, String(action.content ?? ""));
-    return { actionId: action.actionId, action: action.action, before, after: result, rollbackPossible: false, completedAt: nowIso() };
+    if (!source || !action.snapshotETag) throw new ConnectorError("etag_required", "REPLACE_TEXT requires a retained source and snapshot eTag.");
+    const before = compactVerifiedItem(source);
+    await context.storage.put(operationKey(plan.planId, action.actionId), { state: "prepared", preparedAt: nowIso(), action, before });
+    const result = await replaceVerifiedTextFileStrict(context.env, context.userId, source, action.snapshotETag, String(action.content ?? ""));
+    return completedOperation(context, plan, action, { actionId: action.actionId, action: action.action, before, after: result, rollbackPossible: false, completedAt: nowIso() });
   }
   if (action.action === "RENAME") {
-    if (!action.sourceItemId || !action.proposedFilename) throw new ConnectorError("rename_fields_required", "RENAME requires sourceItemId and proposedFilename.");
-    const before = compactVerifiedItem(await verifyItemInsideRoot(context.env, context.userId, action.sourceItemId));
-    const result = await renameItemStrict(context.env, context.userId, action.sourceItemId, action.proposedFilename);
-    return { actionId: action.actionId, action: action.action, before, after: result, rollbackPossible: true, completedAt: nowIso() };
+    if (!source || !action.proposedFilename || !action.snapshotETag) throw new ConnectorError("rename_fields_required", "RENAME requires source, proposedFilename, and snapshotETag.");
+    const parentId = source.item.parentReference?.id;
+    if (!parentId) throw new ConnectorError("root_rename_forbidden", "The configured root cannot be renamed.");
+    const parent = await verifyItemInsideRoot(context.env, context.userId, parentId);
+    const before = compactVerifiedItem(source);
+    await context.storage.put(operationKey(plan.planId, action.actionId), { state: "prepared", preparedAt: nowIso(), action, before, destination: compactVerifiedItem(parent) });
+    const result = await renameVerifiedItemStrict(context.env, context.userId, source, parent, action.proposedFilename, action.snapshotETag);
+    return completedOperation(context, plan, action, { actionId: action.actionId, action: action.action, before, after: result, rollbackPossible: true, completedAt: nowIso() });
   }
   if (action.action === "MOVE") {
-    if (!action.sourceItemId || !action.destinationPath) throw new ConnectorError("move_fields_required", "MOVE requires sourceItemId and destinationPath.");
-    const before = compactVerifiedItem(await verifyItemInsideRoot(context.env, context.userId, action.sourceItemId));
-    let result = await moveItemStrict(context.env, context.userId, action.sourceItemId, action.destinationPath);
-    if (action.proposedFilename && action.proposedFilename !== result.filename) result = await renameItemStrict(context.env, context.userId, result.itemId, action.proposedFilename);
-    return { actionId: action.actionId, action: action.action, before, after: result, rollbackPossible: true, completedAt: nowIso() };
+    if (!source || !action.destinationPath || !action.snapshotETag) throw new ConnectorError("move_fields_required", "MOVE requires source, destinationPath, and snapshotETag.");
+    const destination = await resolveRelativeFolder(context.env, context.userId, action.destinationPath);
+    const before = compactVerifiedItem(source);
+    await context.storage.put(operationKey(plan.planId, action.actionId), { state: "prepared", preparedAt: nowIso(), action, before, destination: compactVerifiedItem(destination) });
+    const result = await moveVerifiedItemStrict(context.env, context.userId, source, destination, action.snapshotETag, action.proposedFilename);
+    return completedOperation(context, plan, action, { actionId: action.actionId, action: action.action, before, after: result, rollbackPossible: true, completedAt: nowIso() });
   }
-  if (action.action === "RECYCLE" || action.action === "RECYCLE_FOLDER") return recycleItem(context, action, plan);
+  if (action.action === "RECYCLE" || action.action === "RECYCLE_FOLDER") {
+    if (!source) throw new ConnectorError("source_item_required", "Recycle actions require a retained source.");
+    if (!plan.deletionLogsPrepared.includes(action.actionId)) throw new ConnectorError("recycle_log_missing", "The recycle deletion log was not prepared.");
+    if (action.action === "RECYCLE_FOLDER") {
+      if (source.item.id === source.root.id) throw new ConnectorError("scope_root_recycle_forbidden", "The scope root cannot be recycled.");
+      const page = await listVerifiedChildren(context.env, context.userId, source, 200);
+      if (page.items.length > 0 || page.nextUrl) throw new ConnectorError("folder_not_empty", "The folder is not empty after descendant actions.");
+    }
+    const before = compactVerifiedItem(source);
+    await context.storage.put(operationKey(plan.planId, action.actionId), { state: "prepared", preparedAt: nowIso(), before, action });
+    await graphRaw(context, `/me/drive/items/${encodeURIComponent(source.item.id)}`, { method: "DELETE", headers: action.snapshotETag ? { "If-Match": action.snapshotETag } : {} });
+    return completedOperation(context, plan, action, { actionId: action.actionId, action: action.action, before, after: null, recycled: true, reversibleThroughOneDriveRecycleBin: true, automaticRollbackAvailable: false, completedAt: nowIso() });
+  }
   throw new ConnectorError("unsupported_plan_action", "The plan contains an unsupported action.");
 }
 
-async function executeIntegrityPlan(context: IntegratedContext, input: Record<string, unknown>): Promise<Record<string, unknown>> {
+export async function executeIntegrityPlan(context: IntegratedContext, input: Record<string, unknown>): Promise<Record<string, unknown>> {
   const token = await openJson<{ planId: string; planHash: string; expiresAt: number }>(context.env.COOKIE_ENCRYPTION_KEY, String(input.executionToken ?? "")).catch(() => null);
   if (!token || token.expiresAt <= Date.now()) throw new ConnectorError("execution_token_invalid", "The execution token is invalid or expired.");
-  const plan = await getPlan(context, token.planId);
+  const plan = normalizeProgress(await getPlan(context, token.planId));
   if (plan.validationStatus !== "valid" || plan.planHash !== token.planHash) throw new ConnectorError("plan_not_validated", "The integrity plan is not currently validated.");
   await acquireScopeLock(context, plan);
-  plan.status = "running";
-  plan.executionStatus = "running";
-  await storePlan(context, plan);
+  const completedThisInvocation: string[] = [];
+  const failedThisInvocation: string[] = [];
   try {
-    const ordered = [...plan.actions].sort((left, right) => Number(left.operationOrder ?? 0) - Number(right.operationOrder ?? 0));
-    const failed = new Set<string>();
-    for (const action of ordered) {
+    advanceDependencySkips(plan);
+    let remaining = remainingActions(plan.actions, plan.completedActions, plan.failedActions, plan.skippedDependencyActions);
+    if (remaining.length > 0) {
+      const action = remaining[0];
       plan.currentAction = action.actionId;
+      plan.nextAction = action.actionId;
+      plan.status = "running";
+      plan.executionStatus = "running";
       await storePlan(context, plan);
-      if ((action.dependencies ?? []).some((dependency) => failed.has(dependency) || plan.skippedDependencyActions.includes(dependency))) {
-        plan.skippedDependencyActions.push(action.actionId);
-        continue;
+      const existing = await context.storage.get<Record<string, unknown>>(operationKey(plan.planId, action.actionId));
+      if (existing?.state === "completed") {
+        const reconciled = { ...existing, actionId: action.actionId };
+        plan.results = upsertResult(plan.results, reconciled);
+        plan.completedActions = uniqueStrings([...plan.completedActions, action.actionId]);
+        completedThisInvocation.push(action.actionId);
+      } else {
+        try {
+          const result = await executePlanAction(context, plan, action);
+          plan.results = upsertResult(plan.results, result);
+          plan.completedActions = uniqueStrings([...plan.completedActions, action.actionId]);
+          plan.failedActions = plan.failedActions.filter((entry) => entry.actionId !== action.actionId);
+          completedThisInvocation.push(action.actionId);
+        } catch (error) {
+          const safe = connectorError(error);
+          plan.failedActions = upsertFailure(plan.failedActions, {
+            actionId: action.actionId,
+            code: safe.code,
+            message: safe.message,
+            retryable: safe.retryable,
+            status: safe.status,
+            correlationId: safe.correlationId,
+            details: safe.details,
+          });
+          failedThisInvocation.push(action.actionId);
+          await context.storage.put(operationKey(plan.planId, action.actionId), { state: "failed", failedAt: nowIso(), error: { code: safe.code, message: safe.message, retryable: safe.retryable, status: safe.status ?? null, correlationId: safe.correlationId, details: safe.details ?? null }, action });
+        }
       }
-      try {
-        const result = await executePlanAction(context, plan, action);
-        plan.results.push(result);
-        plan.completedActions.push(action.actionId);
-      } catch (error) {
-        const safe = connectorError(error);
-        failed.add(action.actionId);
-        plan.failedActions.push({ actionId: action.actionId, code: safe.code, message: safe.message });
-        await context.storage.put(operationKey(plan.planId, action.actionId), { state: "failed", failedAt: nowIso(), error: { code: safe.code, message: safe.message }, action });
-      }
-      await storePlan(context, plan);
     }
+    normalizeProgress(plan);
+    advanceDependencySkips(plan);
+    remaining = remainingActions(plan.actions, plan.completedActions, plan.failedActions, plan.skippedDependencyActions);
     plan.currentAction = null;
-    plan.executionStatus = plan.failedActions.length > 0 ? "failed" : "completed";
-    plan.status = plan.failedActions.length > 0 ? "failed" : "completed";
-    plan.finalFilesystemDiffReference = `integrated:diff:${plan.planId}`;
+    plan.nextAction = remaining[0]?.actionId ?? null;
+    plan.completedInvocations = Number(plan.completedInvocations ?? 0) + 1;
+    plan.lastExecutionAt = nowIso();
+    if (remaining.length > 0) {
+      plan.status = "running";
+      plan.executionStatus = "running";
+    } else {
+      plan.executionStatus = plan.failedActions.length > 0 ? "failed" : "completed";
+      plan.status = plan.failedActions.length > 0 ? "failed" : "completed";
+      if (plan.completedActions.length > 0) plan.auditStatus = "pending";
+    }
     await storePlan(context, plan);
-    const diff = await diffScopeBeforeAfter(context, plan.planId);
-    await context.storage.put(plan.finalFilesystemDiffReference, diff);
     return {
       planId: plan.planId,
       status: plan.status,
+      executionStatus: plan.executionStatus,
+      resumeRequired: remaining.length > 0,
+      completedThisInvocation,
+      failedThisInvocation,
+      mutationLimitThisInvocation: MAX_MUTATIONS_PER_INVOCATION,
+      remainingActions: remaining.length,
+      remainingActionIds: remaining.map((action) => action.actionId),
+      nextAction: plan.nextAction,
       completedActions: plan.completedActions,
       failedActions: plan.failedActions,
       skippedDependencyActions: plan.skippedDependencyActions,
       results: plan.results,
+      auditPending: plan.auditStatus === "pending",
       finalFilesystemDiffReference: plan.finalFilesystemDiffReference,
-      recoveryState: plan.failedActions.length > 0 ? { successfulActionsRemainApplied: true, dependentActionsSkipped: true, automaticRollbackPerformed: false } : null,
+      recoveryState: plan.failedActions.length > 0 ? { successfulActionsRemainApplied: true, dependentActionsSkipped: true, automaticRollbackPerformed: false, revalidateToRetryTransientFailures: plan.failedActions.some((entry) => entry.retryable) } : null,
     };
   } finally {
     await releaseScopeLock(context, plan);
@@ -2245,9 +2311,9 @@ export function registerIntegratedTools(server: McpServer, contextFactory: () =>
   server.registerTool("copy_item", { title: "Copy OneDrive item non-destructively", description: "Copy a verified file or folder inside the configured root, monitor Microsoft Graph asynchronous completion, and optionally verify the copied SHA-256. HTTP 202 alone is never reported as success.", inputSchema: COPY_ITEM_SCHEMA, annotations: MUTATING }, async (input) => { try { return textResult(await copyItem(contextFactory(), input)); } catch (error) { return errorResult(error); } });
   server.registerTool("create_integrity_plan", { title: "Create source-library integrity dry-run", description: "Create and export a non-mutating CSV/JSON integrity plan tied to one immutable snapshot and explicit scope.", inputSchema: CREATE_PLAN_SCHEMA, annotations: READ_ONLY }, async (input) => { try { return textResult(await createIntegrityPlan(contextFactory(), input)); } catch (error) { return errorResult(error); } });
   server.registerTool("validate_integrity_plan", { title: "Validate integrity plan preconditions", description: "Fail closed on stale, ambiguous, conflicting, circular, out-of-scope, unlogged, or unapproved actions. Returns a signed short-lived execution token only when every check passes.", inputSchema: { planId: z.string().uuid() }, annotations: READ_ONLY }, async ({ planId }) => { try { return textResult(await validateIntegrityPlan(contextFactory(), planId)); } catch (error) { return errorResult(error); } });
-  server.registerTool("execute_integrity_plan", { title: "Execute validated integrity plan serially", description: "Execute one validated plan under an overlap-aware scope lock with live ancestry, path, eTag, SHA-256, and destination checks before every action. Recycling is reversible through the OneDrive recycle bin; permanent deletion is unavailable.", inputSchema: { executionToken: z.string().min(1).max(50_000) }, annotations: DESTRUCTIVE }, async (input) => { try { return textResult(await executeIntegrityPlan(contextFactory(), input)); } catch (error) { return errorResult(error); } });
-  server.registerTool("get_integrity_plan_status", { title: "Get integrity plan status", description: "Return validation, execution, completed, failed, dependency-skipped, and final-diff status for an integrity plan.", inputSchema: { planId: z.string().uuid() }, annotations: READ_ONLY }, async ({ planId }) => { try { const plan = await getPlan(contextFactory(), planId); return textResult({ planId, planStatus: plan.status, validationStatus: plan.validationStatus, executionStatus: plan.executionStatus, currentAction: plan.currentAction, completedActions: plan.completedActions, failedActions: plan.failedActions, skippedDependencyActions: plan.skippedDependencyActions, finalFilesystemDiffReference: plan.finalFilesystemDiffReference }); } catch (error) { return errorResult(error); } });
-  server.registerTool("diff_scope_before_after", { title: "Verify scope before and after", description: "Compare the original snapshot, executed plan, operation logs, and final live scope, including evidence that no plan operation modified an item outside the declared scope.", inputSchema: { planId: z.string().uuid() }, annotations: READ_ONLY }, async ({ planId }) => { try { return textResult(await diffScopeBeforeAfter(contextFactory(), planId)); } catch (error) { return errorResult(error); } });
+  server.registerTool("execute_integrity_plan", { title: "Resume validated integrity plan", description: "Execute at most one mutation per invocation under an overlap-aware scope lock, persisting progress and rechecking live ancestry, path, eTag, SHA-256, destination, collision, circularity, and If-Match preconditions immediately before mutation.", inputSchema: { executionToken: z.string().min(1).max(50_000) }, annotations: DESTRUCTIVE }, async (input) => { try { return textResult(await executeIntegrityPlan(contextFactory(), input)); } catch (error) { return errorResult(error); } });
+  server.registerTool("get_integrity_plan_status", { title: "Get integrity plan status", description: "Return validation, execution, completed, failed, dependency-skipped, and final-diff status for an integrity plan.", inputSchema: { planId: z.string().uuid() }, annotations: READ_ONLY }, async ({ planId }) => { try { const plan = await getPlan(contextFactory(), planId); const remaining = remainingActions(plan.actions, plan.completedActions, plan.failedActions, plan.skippedDependencyActions); return textResult({ planId, planStatus: plan.status, validationStatus: plan.validationStatus, executionStatus: plan.executionStatus, currentAction: plan.currentAction, nextAction: plan.nextAction ?? remaining[0]?.actionId ?? null, resumeRequired: remaining.length > 0, remainingActions: remaining.length, completedActions: plan.completedActions, failedActions: plan.failedActions, skippedDependencyActions: plan.skippedDependencyActions, auditStatus: plan.auditStatus ?? "not_requested", finalFilesystemDiffReference: plan.finalFilesystemDiffReference }); } catch (error) { return errorResult(error); } });
+  server.registerTool("diff_scope_before_after", { title: "Verify scope before and after", description: "Run the final full-scope enumeration, hashing, catalogue analysis, and operation-log comparison as a separate follow-up after bounded plan execution.", inputSchema: { planId: z.string().uuid() }, annotations: READ_ONLY }, async ({ planId }) => { const context = contextFactory(); try { const plan = await getPlan(context, planId); plan.auditStatus = "running"; await storePlan(context, plan); const diff = await diffScopeBeforeAfter(context, planId); plan.finalFilesystemDiffReference = `integrated:diff:${plan.planId}`; plan.auditStatus = "completed"; await context.storage.put(plan.finalFilesystemDiffReference, diff); await storePlan(context, plan); return textResult(diff); } catch (error) { try { const plan = await getPlan(context, planId); plan.auditStatus = "failed"; await storePlan(context, plan); } catch { /* preserve the original error */ } return errorResult(error); } });
   server.registerTool("validate_catalogue", { title: "Validate catalogue against filesystem", description: "Validate catalogue paths, IDs, exact and normalized hashes, controlled codes, required fields, administrative exclusions, and substantive-file coverage without inventing semantic metadata.", inputSchema: VALIDATE_CATALOGUE_SCHEMA, annotations: READ_ONLY }, async (input) => { try { return textResult(await validateCatalogue(contextFactory(), input)); } catch (error) { return errorResult(error); } });
   server.registerTool("classify_administrative_files", { title: "Classify administrative and substantive files", description: "Apply caller-supplied path and filename patterns to separate catalogues, reports, manifests, logs, inventories, duplicate registers, audit tables, manual-download lists, and README files from substantive sources.", inputSchema: CLASSIFY_ADMIN_SCHEMA, annotations: READ_ONLY }, async (input) => { try { return textResult(await classifyAdministrativeFiles(contextFactory(), input)); } catch (error) { return errorResult(error); } });
   server.registerTool("get_job_status", { title: "Get integrated job status", description: "Return queued, running, completed, failed, or cancelled status, progress, stage, result references, structured error, retryability, and expiry for long integrated operations.", inputSchema: { jobId: z.string().uuid() }, annotations: READ_ONLY }, async ({ jobId }) => { try { return textResult(await getJob(contextFactory(), jobId)); } catch (error) { return errorResult(error); } });
