@@ -27,69 +27,29 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
         env:
           NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
-      - name: Generate exact live upload configuration
+      - name: Build and verify exact candidate module
         run: |
-          cat > wrangler.live.jsonc <<'JSON'
-          {
-            "$schema": "node_modules/wrangler/config-schema.json",
-            "name": "nikolay-onedrive-mcp",
-            "main": "src/index-hotfix.ts",
-            "compatibility_date": "2026-07-13",
-            "compatibility_flags": ["nodejs_compat"],
-            "keep_vars": true,
-            "build": { "command": "node scripts/prepare-pdfjs.mjs" },
-            "vars": {
-              "CONNECTOR_NAME": "OneDrive Live MCP",
-              "ONEDRIVE_ROOT": "Работа",
-              "OWNER_MICROSOFT_ID": "ecb0593363f23423",
-              "MAX_FILE_MB": "20",
-              "MAX_ORIGINAL_FILE_MB": "25",
-              "MAX_TEXT_WRITE_KB": "512",
-              "MAX_READ_CHARS": "50000",
-              "CACHE_TTL_SECONDS": "604800",
-              "MAX_IMAGE_INPUT_MB": "15",
-              "MAX_IMAGE_PIXELS": "40000000",
-              "MAX_IMAGE_DIMENSION": "8192",
-              "MAX_IMAGE_PAGES": "8",
-              "IMAGE_PROCESSING_TIMEOUT_MS": "15000"
-            },
-            "secrets": {
-              "required": ["COOKIE_ENCRYPTION_KEY", "MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET"]
-            },
-            "migrations": [
-              { "new_sqlite_classes": ["OneDriveMCP"], "tag": "v1" },
-              { "new_sqlite_classes": ["AuthState"], "tag": "v2" }
-            ],
-            "durable_objects": {
-              "bindings": [
-                { "class_name": "OneDriveMCP", "name": "MCP_OBJECT" },
-                { "class_name": "AuthState", "name": "AUTH_STATE" }
-              ]
-            },
-            "kv_namespaces": [
-              { "binding": "OAUTH_KV", "id": "a3ead543dad24b8596ab9193b10f1b9f" }
-            ],
-            "ai": { "binding": "AI" },
-            "images": { "binding": "IMAGES" },
-            "browser": { "binding": "BROWSER" },
-            "observability": { "enabled": true }
-          }
-          JSON
-      - name: Upload undeployed candidate version
+          cp wrangler.jsonc wrangler.transfer.jsonc
+          sed -i 's/REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER/CI_TEST_ROOT/g' wrangler.transfer.jsonc
+          sed -i 's/REPLACE_WITH_KV_NAMESPACE_ID/00000000000000000000000000000000/g' wrangler.transfer.jsonc
+          npx wrangler deploy --dry-run --config wrangler.transfer.jsonc --outdir transfer-dist
+          echo "9a6c9d1cf655f41dde064795ed04b84639b11e92e066314c088e90e5708fb021  transfer-dist/index-hotfix.js" | sha256sum -c -
+          gzip -n -9 -c transfer-dist/index-hotfix.js > transfer-dist/index-hotfix.js.gz
+          echo "bc97f152636276c2b759da312331d279590cf294605117e31e811dd7715dbf79  transfer-dist/index-hotfix.js.gz" | sha256sum -c -
+      - name: Transfer candidate to one-time Cloudflare buffer
         shell: bash
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: 3f67b673280f2119de4eedd09745e20f
         run: |
           set -o pipefail
-          npx wrangler versions upload --config wrangler.live.jsonc --keep-vars \
-            --message "Feature PR #9 commit 4fefecd4cb4aa6d39a287d317b136e8e08401b96; resumable Workers Free integrity executor; CI passed" \
-            --tag "repo-4fefecd4cb4aa6d39a287d317b136e8e08401b96" 2>&1 | tee version-upload.log
-      - name: Upload deployment evidence
+          curl --fail-with-body --silent --show-error \
+            -H "x-transfer-token: HWT7Db1GTqrFuwNu609gIjTu6UrVFg6wM0iHXMYbtZU" \
+            -H "content-type: application/gzip" \
+            --data-binary @transfer-dist/index-hotfix.js.gz \
+            https://integrity-plan-transfer-4fefecd4.fdas201290.workers.dev/upload 2>&1 | tee transfer-upload.log
+      - name: Upload transfer evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: integrity-candidate-upload
-          path: version-upload.log
+          name: integrity-candidate-transfer
+          path: transfer-upload.log
           if-no-files-found: ignore
           retention-days: 1
