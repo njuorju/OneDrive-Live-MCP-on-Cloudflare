@@ -63,7 +63,7 @@ async function verifySnapshotHash(context: HotfixContext, action: PlanAction, it
     INTEGRATED_LIMITS.fileBytesMax,
     eTag ? { headers: { "If-Match": eTag } } : {},
   );
-  if (sha256Bytes(bytes) !== action.snapshotSha256) {
+  if (await sha256Bytes(bytes) !== action.snapshotSha256) {
     throw new ConnectorError("sha256_conflict", "The live item does not match the plan snapshot hash.");
   }
 }
