@@ -1,4 +1,4 @@
-name: Delete merged feature branch
+name: Delete merged feature branches
 
 on:
   push:
@@ -9,8 +9,10 @@ permissions:
   contents: write
 
 jobs:
-  delete-branch:
+  delete-branches:
     runs-on: ubuntu-latest
     steps:
-      - name: Delete merged remote branch
-        run: git push "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" --delete work/integrity-plan-free-budget
+      - name: Delete merged remote branches
+        run: |
+          git push "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" --delete work/integrity-plan-free-budget
+          git push "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" --delete cleanup/trigger-integrity-branch-delete || true
