@@ -1,4 +1,5 @@
 name: Upload integrity resume candidate
+# Retriggered after hard-bounding reconciliation for Workers Free.
 
 on:
   pull_request:
