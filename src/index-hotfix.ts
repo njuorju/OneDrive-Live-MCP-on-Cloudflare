@@ -9,6 +9,7 @@ import {
 } from "./source-snapshot-repair";
 import { createIntegratedStateStorage } from "./version20-hotfix";
 import { registerIntegrityResumeRepairTools } from "./integrity-resume-repair";
+import { registerDownstreamRenameReconciliationTool } from "./integrity-downstream-reconcile";
 
 const prototype = OneDriveMCP.prototype as any;
 if (!prototype.__version20HotfixApplied) {
@@ -64,6 +65,7 @@ if (!prototype.__version20HotfixApplied) {
     registerIntegratedToolsWithQuietPdfJsHotfix(replacementServer, contextFactory);
     registerSourceSnapshotRepairTools(replacementServer, contextFactory, schedule);
     registerIntegrityResumeRepairTools(replacementServer, contextFactory, schedule);
+    registerDownstreamRenameReconciliationTool(replacementServer, contextFactory);
 
     const actual = this.server as any;
     const replacement = replacementServer as any;
