@@ -21,19 +21,36 @@ on:
       - test/integrity-downstream-reconcile.test.ts
       - worker-configuration.d.ts
       - wrangler.jsonc
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/upload-integrity-resume-candidate.yml
+      - src/auth-state.ts
+      - src/index-hotfix.ts
+      - src/integrity-coordination.ts
+      - src/integrity-lease-tools.ts
+      - src/integrity-resume-repair.ts
+      - src/integrity-blocked-move-reconcile.ts
+      - src/integrity-downstream-reconcile.ts
+      - src/integrity-execution.ts
+      - src/snapshot-runner.ts
+      - test/integrity-coordination.test.ts
+      - test/integrity-resume-repair.test.ts
+      - test/integrity-blocked-move-reconcile.test.ts
+      - test/integrity-downstream-reconcile.test.ts
+      - worker-configuration.d.ts
+      - wrangler.jsonc
 
 permissions:
   contents: read
 
 jobs:
   upload-candidate:
-    if: github.event.pull_request.head.ref == 'work/integrity-resume-reconciliation'
+    if: github.event_name == 'push' || github.event.pull_request.head.ref == 'work/integrity-resume-reconciliation'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: work/integrity-resume-reconciliation
       - uses: actions/setup-node@v4
         with:
           node-version: "22.18.0"
@@ -72,8 +89,8 @@ jobs:
               "MAX_IMAGE_DIMENSION": "8192",
               "MAX_IMAGE_PAGES": "8",
               "IMAGE_PROCESSING_TIMEOUT_MS": "15000",
-              "INTEGRITY_LEASE_SECONDS": "600",
-              "WORKER_DEPLOYMENT_ID": "repo-${{ github.event.pull_request.head.sha }}"
+              "INTEGRITY_LEASE_SECONDS": "${{ github.event_name == 'pull_request' && '60' || '600' }}",
+              "WORKER_DEPLOYMENT_ID": "repo-${{ github.sha }}"
             },
             "secrets": {
               "required": ["COOKIE_ENCRYPTION_KEY", "MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET"]
