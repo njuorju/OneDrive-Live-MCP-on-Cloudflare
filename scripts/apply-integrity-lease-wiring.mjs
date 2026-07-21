@@ -76,3 +76,4 @@ edit(".github/workflows/upload-integrity-resume-candidate.yml", [
 ]);
 
 console.log("Integrity lease wiring applied.");
+// One-shot trigger after workflow installation.
