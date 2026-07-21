@@ -1,6 +1,15 @@
 name: Apply integrity lease wiring
 
 on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+    paths:
+      - scripts/apply-integrity-lease-wiring.mjs
+      - .github/workflows/apply-integrity-lease-wiring.yml
+      - src/integrity-coordination.ts
+      - src/integrity-lease-tools.ts
+      - test/integrity-coordination.test.ts
   push:
     branches: [work/integrity-resume-reconciliation]
     paths:
@@ -12,6 +21,7 @@ permissions:
 
 jobs:
   apply:
+    if: github.event_name == 'push' || github.event.pull_request.head.ref == 'work/integrity-resume-reconciliation'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
