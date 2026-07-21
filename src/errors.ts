@@ -3,11 +3,17 @@ export class ConnectorError extends Error {
   readonly retryable: boolean;
   readonly status?: number;
   readonly correlationId: string;
+  readonly details?: Record<string, unknown>;
 
   constructor(
     code: string,
     message: string,
-    options: { retryable?: boolean; status?: number; correlationId?: string } = {},
+    options: {
+      retryable?: boolean;
+      status?: number;
+      correlationId?: string;
+      details?: Record<string, unknown>;
+    } = {},
   ) {
     super(message);
     this.name = "ConnectorError";
@@ -15,6 +21,7 @@ export class ConnectorError extends Error {
     this.retryable = options.retryable ?? false;
     this.status = options.status;
     this.correlationId = options.correlationId ?? crypto.randomUUID();
+    this.details = options.details;
   }
 }
 
@@ -34,7 +41,9 @@ export function safeErrorResult(error: unknown) {
         code: safe.code,
         message: safe.message,
         retryable: safe.retryable,
+        status: safe.status ?? null,
         correlationId: safe.correlationId,
+        details: safe.details ?? null,
       },
     },
     content: [
@@ -46,7 +55,9 @@ export function safeErrorResult(error: unknown) {
               code: safe.code,
               message: safe.message,
               retryable: safe.retryable,
+              status: safe.status ?? null,
               correlationId: safe.correlationId,
+              details: safe.details ?? null,
             },
           },
           null,
@@ -66,6 +77,7 @@ export function logSafeError(event: string, error: unknown, fields: Record<strin
       retryable: safe.retryable,
       status: safe.status ?? null,
       correlationId: safe.correlationId,
+      ...(safe.details ?? {}),
       ...fields,
     }),
   );
