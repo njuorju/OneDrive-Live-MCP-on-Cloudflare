@@ -73,12 +73,16 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
         env:
           NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
-      - name: Validate
+      - name: Typecheck
+        run: npm run type-check
+      - name: Full test suite
+        run: npm test
+      - name: Focused integrity tests
+        run: npx tsx --test test/integrity-free-plan.test.ts test/graph-error-classification.test.ts
+      - name: Audit
+        run: npm audit --audit-level=high
+      - name: Wrangler dry-run
         run: |
-          npm run type-check
-          npm test
-          npx tsx --test test/integrity-free-plan.test.ts test/graph-error-classification.test.ts
-          npm audit --audit-level=high
           cp wrangler.jsonc /tmp/wrangler.retry.jsonc
           sed -i 's/REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER/CI_TEST_ROOT/g' /tmp/wrangler.retry.jsonc
           sed -i 's/REPLACE_WITH_KV_NAMESPACE_ID/00000000000000000000000000000000/g' /tmp/wrangler.retry.jsonc
