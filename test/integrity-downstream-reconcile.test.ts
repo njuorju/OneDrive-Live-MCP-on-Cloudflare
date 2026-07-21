@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { findDeclaredDownstreamMove } from "../src/integrity-downstream-reconcile.js";
+import {
+  findDeclaredDownstreamMove,
+  relativePathFromParentReference,
+} from "../src/integrity-downstream-reconcile.js";
 
 const source = readFileSync(new URL("../src/integrity-downstream-reconcile.ts", import.meta.url), "utf8");
 
@@ -44,7 +47,27 @@ test("does not accept an unrelated or undeclared move", () => {
   assert.equal(findDeclaredDownstreamMove({ actions: [rename, unrelated] } as any, rename), null);
 });
 
-test("downstream reconciliation verifies stable identity, destination, filename and hash before success", () => {
+test("derives a relative path only from the configured root on the same drive", () => {
+  const root = {
+    id: "root-id",
+    name: "Работа",
+    folder: {},
+    parentReference: { driveId: "drive", path: "/drive/root:" },
+  } as any;
+  const item = {
+    id: "item-id",
+    name: "file.pdf",
+    file: {},
+    parentReference: { driveId: "drive", path: "/drive/root:/Работа/UCA/deep" },
+  } as any;
+  assert.equal(relativePathFromParentReference(root, item), "UCA/deep/file.pdf");
+  assert.equal(relativePathFromParentReference(root, { ...item, parentReference: { driveId: "other", path: item.parentReference.path } }), null);
+  assert.equal(relativePathFromParentReference(root, { ...item, parentReference: { driveId: "drive", path: "/drive/root:/Outside" } }), null);
+});
+
+test("downstream reconciliation verifies stable identity, root path, destination, filename and hash before success", () => {
+  assert.match(source, /resolveConfiguredRoot/);
+  assert.match(source, /relativePathFromParentReference/);
   assert.match(source, /verifyItemInsideRoot/);
   assert.match(source, /live\.item\.name !== action\.proposedFilename/);
   assert.match(source, /liveParent !== expectedParent/);
