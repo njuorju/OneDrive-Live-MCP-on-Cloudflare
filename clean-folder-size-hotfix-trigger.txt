@@ -1,0 +1,1 @@
+restore=src/generated/pdfjs-main.ts,src/generated/pdfjs-worker.ts
