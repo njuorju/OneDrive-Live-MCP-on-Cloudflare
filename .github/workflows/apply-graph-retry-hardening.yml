@@ -1,0 +1,93 @@
+name: Apply Graph retry hardening
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+    paths:
+      - .github/workflows/apply-graph-retry-hardening.yml
+      - test/graph-error-classification.test.ts
+
+permissions:
+  contents: write
+
+jobs:
+  harden-and-validate:
+    if: github.event.pull_request.head.ref == 'work/integrity-plan-free-budget'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: work/integrity-plan-free-budget
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
+          cache: npm
+      - name: Harden Graph retry semantics
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('src/graph-core.ts')
+          text = path.read_text()
+          old = '''function retryDelayMs(response: Response, attempt: number): number {
+            const graphMilliseconds = Number(response.headers.get("x-ms-retry-after-ms") ?? "");
+            if (Number.isFinite(graphMilliseconds) && graphMilliseconds >= 0) return Math.min(graphMilliseconds, 1_000);
+            const retryAfter = Number(response.headers.get("retry-after") ?? "");
+            if (Number.isFinite(retryAfter) && retryAfter >= 0) return Math.min(retryAfter * 1_000, 1_000);
+            return Math.min(100 * 2 ** attempt, 1_000);
+          }'''
+          new = '''function retryDelayMs(response: Response, attempt: number): number {
+            const graphHeader = response.headers.get("x-ms-retry-after-ms");
+            if (graphHeader !== null && graphHeader.trim() !== "") {
+              const graphMilliseconds = Number(graphHeader);
+              if (Number.isFinite(graphMilliseconds) && graphMilliseconds >= 0) return Math.min(graphMilliseconds, 1_000);
+            }
+            const retryHeader = response.headers.get("retry-after");
+            if (retryHeader !== null && retryHeader.trim() !== "") {
+              const retryAfter = Number(retryHeader);
+              if (Number.isFinite(retryAfter) && retryAfter >= 0) return Math.min(retryAfter * 1_000, 1_000);
+            }
+            return Math.min(100 * 2 ** attempt, 1_000);
+          }'''
+          if old not in text:
+              raise SystemExit('retryDelayMs target missing')
+          text = text.replace(old, new, 1)
+          old = '''  const token = await getGraphAccessToken(env, userId);
+            const correlationId = crypto.randomUUID();
+            const maximumAttempts = 3;'''
+          new = '''  const token = await getGraphAccessToken(env, userId);
+            const correlationId = crypto.randomUUID();
+            const method = String(init.method ?? "GET").toUpperCase();
+            const retryWithinInvocation = method === "GET" || method === "HEAD";
+            const maximumAttempts = 3;'''
+          if old not in text:
+              raise SystemExit('graphResponse setup target missing')
+          text = text.replace(old, new, 1)
+          text = text.replace('classified.retryable && attempt + 1 < maximumAttempts', 'classified.retryable && retryWithinInvocation && attempt + 1 < maximumAttempts', 1)
+          text = text.replace('if (retryable && attempt + 1 < maximumAttempts) {', 'if (retryable && retryWithinInvocation && attempt + 1 < maximumAttempts) {', 1)
+          path.write_text(text)
+          PY
+      - name: Install pinned dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+      - name: Validate
+        run: |
+          npm run type-check
+          npm test
+          npx tsx --test test/integrity-free-plan.test.ts test/graph-error-classification.test.ts
+          npm audit --audit-level=high
+          cp wrangler.jsonc /tmp/wrangler.retry.jsonc
+          sed -i 's/REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER/CI_TEST_ROOT/g' /tmp/wrangler.retry.jsonc
+          sed -i 's/REPLACE_WITH_KV_NAMESPACE_ID/00000000000000000000000000000000/g' /tmp/wrangler.retry.jsonc
+          npx wrangler deploy --dry-run --config /tmp/wrangler.retry.jsonc --outdir /tmp/dist-retry
+      - name: Commit validated hardening
+        run: |
+          rm -f .github/workflows/apply-graph-retry-hardening.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Harden Graph retries for ambiguous mutations"
+          git push origin HEAD:work/integrity-plan-free-budget
