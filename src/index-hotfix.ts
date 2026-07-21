@@ -3,14 +3,12 @@ import originalDefault, { AuthState, OneDriveMCP } from "./index";
 import {
   registerIntegratedToolsWithQuietPdfJsHotfix,
 } from "./pdfjs-final-registration";
-import {
-  continueSourceSnapshotJob,
-  registerSourceSnapshotRepairTools,
-} from "./source-snapshot-repair";
+import { registerSourceSnapshotRepairTools } from "./source-snapshot-repair";
 import { createIntegratedStateStorage } from "./version20-hotfix";
 import { registerIntegrityResumeRepairTools } from "./integrity-resume-repair";
 import { registerDownstreamRenameReconciliationTool } from "./integrity-downstream-reconcile";
 import { registerBlockedMoveReconciliationTool } from "./integrity-blocked-move-reconcile";
+import { continueSnapshotWithLease, registerIntegrityLeaseTools } from "./integrity-lease-tools";
 
 const prototype = OneDriveMCP.prototype as any;
 if (!prototype.__version20HotfixApplied) {
@@ -28,7 +26,7 @@ if (!prototype.__version20HotfixApplied) {
         { jobId: nextJobId, userId: nextUserId },
       );
     };
-    await continueSourceSnapshotJob(
+    await continueSnapshotWithLease(
       {
         env: this.env,
         userId,
@@ -68,6 +66,7 @@ if (!prototype.__version20HotfixApplied) {
     registerIntegrityResumeRepairTools(replacementServer, contextFactory, schedule);
     registerDownstreamRenameReconciliationTool(replacementServer, contextFactory);
     registerBlockedMoveReconciliationTool(replacementServer, contextFactory);
+    registerIntegrityLeaseTools(replacementServer, contextFactory, schedule);
 
     const actual = this.server as any;
     const replacement = replacementServer as any;

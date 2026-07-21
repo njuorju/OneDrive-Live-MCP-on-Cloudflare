@@ -19,7 +19,8 @@
     "MAX_IMAGE_PIXELS": "40000000",
     "MAX_IMAGE_DIMENSION": "8192",
     "MAX_IMAGE_PAGES": "8",
-    "IMAGE_PROCESSING_TIMEOUT_MS": "15000"
+    "IMAGE_PROCESSING_TIMEOUT_MS": "15000",
+    "INTEGRITY_LEASE_SECONDS": "600"
   },
   "migrations": [
     { "new_sqlite_classes": ["OneDriveMCP"], "tag": "v1" },

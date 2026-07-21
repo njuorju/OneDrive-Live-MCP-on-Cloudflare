@@ -465,7 +465,7 @@ async function finalizeDiffJob(context: HotfixContext, parent: JobRecord): Promi
   return parent;
 }
 
-async function getIntegrityJobStatus(context: HotfixContext, schedule: ScheduleSnapshot, jobId: string): Promise<JobRecord> {
+export async function getIntegrityJobStatus(context: HotfixContext, schedule: ScheduleSnapshot, jobId: string): Promise<JobRecord> {
   const job = await getJob(context.storage, jobId);
   if (job.type !== "integrity_diff") return getSnapshotJobStatus(context, schedule, jobId);
   if (["completed", "failed", "cancelled"].includes(job.status)) return job;
