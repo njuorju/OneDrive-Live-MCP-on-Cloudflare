@@ -7,8 +7,6 @@
   "scripts": {
     "dev": "wrangler dev",
     "verify-config": "node scripts/verify-config.mjs",
-    "pretype-check": "node scripts/apply-traversal-hash-budget-repair.mjs",
-    "pretest": "node scripts/apply-traversal-hash-budget-repair.mjs",
     "type-check": "tsc --noEmit",
     "test": "tsx --test test/**/*.test.ts",
     "check": "npm run type-check && npm test",
