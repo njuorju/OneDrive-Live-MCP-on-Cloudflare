@@ -162,6 +162,11 @@ test("final diff continues through a persisted resumable snapshot job", () => {
   assert.doesNotMatch(source.slice(source.indexOf("startDiffScopeBeforeAfter")), /enumerateLiveVerified/);
 });
 
+test("reconciliation batch is hard-bounded for Workers Free", () => {
+  assert.match(source, /const DEFAULT_RECONCILIATIONS = 2/);
+  assert.match(source, /const MAX_RECONCILIATIONS = 3/);
+});
+
 test("audit snapshot work is bounded below the Workers Free external-subrequest limit", () => {
   assert.match(runnerSource, /const stepItems = Math\.min/);
   assert.match(source, /boundedGraphRequestsPerContinuation: true/);

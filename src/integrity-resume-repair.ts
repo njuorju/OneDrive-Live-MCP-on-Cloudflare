@@ -42,8 +42,8 @@ import type { CompactItem } from "./types";
 
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true } as const;
 const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true } as const;
-const DEFAULT_RECONCILIATIONS = 8;
-const MAX_RECONCILIATIONS = 20;
+const DEFAULT_RECONCILIATIONS = 2;
+const MAX_RECONCILIATIONS = 3;
 const PLAN_PREFIX = "integrated:plan:";
 const OPERATION_PREFIX = "integrated:operation:";
 const RECONCILIATION_PREFIX = "integrated:reconciliation:";
