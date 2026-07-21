@@ -1,9 +1,9 @@
 name: Apply downstream rename reconciliation fix
-# Trigger after workflow registration.
 
 on:
-  push:
-    branches: [work/integrity-resume-reconciliation]
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
     paths:
       - .github/workflows/apply-downstream-rename-reconciliation.yml
 
@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   patch:
+    if: github.event.pull_request.head.ref == 'work/integrity-resume-reconciliation'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
