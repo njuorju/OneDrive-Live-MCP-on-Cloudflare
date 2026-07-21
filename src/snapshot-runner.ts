@@ -44,7 +44,7 @@ export async function continueSourceSnapshotJob(context: HotfixContext, schedule
   await persistState(storage, checkpoint, meta, job);
   const started = Date.now();
   const configured = Number((context.env as unknown as Record<string, unknown>).SNAPSHOT_STEP_ITEMS ?? 20);
-  const stepItems = Math.min(Math.max(Number.isFinite(configured) ? configured : 20, 1), 50);
+  const stepItems = Math.min(Math.max(Number.isFinite(configured) ? configured : 20, 1), 20);
   let processed = 0;
   try {
     await finishPending(storage, checkpoint, meta, job);

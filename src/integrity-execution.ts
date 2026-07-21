@@ -63,8 +63,8 @@ export function advanceDependencySkips<T extends {
 }>(plan: T): string[] {
   const completed = new Set(plan.completedActions);
   const failed = new Set(plan.failedActions.map((entry) => entry.actionId));
-  const skipped = new Set(plan.skippedDependencyActions);
-  const added: string[] = [];
+  const previous = new Set(plan.skippedDependencyActions);
+  const skipped = new Set<string>();
   let changed = true;
   while (changed) {
     changed = false;
@@ -72,13 +72,12 @@ export function advanceDependencySkips<T extends {
       if (completed.has(action.actionId) || failed.has(action.actionId) || skipped.has(action.actionId)) continue;
       if ((action.dependencies ?? []).some((dependency) => failed.has(dependency) || skipped.has(dependency))) {
         skipped.add(action.actionId);
-        added.push(action.actionId);
         changed = true;
       }
     }
   }
   plan.skippedDependencyActions = [...skipped];
-  return added;
+  return [...skipped].filter((actionId) => !previous.has(actionId));
 }
 
 export function remainingActions<T extends ProgressAction>(
