@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   findDeclaredDownstreamMove,
+  findDeclaredDownstreamMoves,
   relativePathFromParentReference,
 } from "../src/integrity-downstream-reconcile.js";
 
@@ -47,6 +48,18 @@ test("does not accept an unrelated or undeclared move", () => {
   assert.equal(findDeclaredDownstreamMove({ actions: [rename, unrelated] } as any, rename), null);
 });
 
+test("declared destination checks are capped", () => {
+  const rename = action({});
+  const moves = Array.from({ length: 5 }, (_, index) => action({
+    actionId: `MOVE_${index}`,
+    action: "MOVE",
+    destinationPath: `scope/destination-${index}`,
+    operationOrder: index + 2,
+    dependencies: ["RENAME"],
+  }));
+  assert.equal(findDeclaredDownstreamMoves({ actions: [rename, ...moves] } as any, rename).length, 3);
+});
+
 test("parent-reference helper accepts only the configured root on the same drive", () => {
   const root = {
     id: "root-id",
@@ -65,14 +78,21 @@ test("parent-reference helper accepts only the configured root on the same drive
   assert.equal(relativePathFromParentReference(root, { ...item, parentReference: { driveId: "drive", path: "/drive/root:/Outside" } }), null);
 });
 
-test("downstream reconciliation resolves the exact declared root path and requires stable ID equality", () => {
+test("downstream reconciliation uses bounded stable-ID and exact-root-path reads", () => {
   assert.match(source, /resolveConfiguredRoot/);
+  assert.match(source, /readStableItemBounded/);
+  assert.match(source, /readDeclaredDestinationBounded/);
   assert.match(source, /encodeGraphPath/);
   assert.match(source, /configuredRootPath/);
-  assert.match(source, /downstreamMove\.destinationPath/);
   assert.match(source, /item\.id !== action\.sourceItemId/);
-  assert.match(source, /identity_conflict/);
-  assert.doesNotMatch(source, /return verifyItemInsideRoot/);
+  assert.match(source, /MAX_DECLARED_DESTINATIONS = 3/);
+  assert.doesNotMatch(source, /verifyItemInsideRoot/);
+});
+
+test("only one rename candidate is examined per invocation", () => {
+  assert.match(source, /const action = candidates\[0\]/);
+  assert.match(source, /examinedActionId/);
+  assert.match(source, /reconciliationOnlyThisInvocation: true/);
 });
 
 test("downstream reconciliation verifies hash before durable success and performs no mutation", () => {
