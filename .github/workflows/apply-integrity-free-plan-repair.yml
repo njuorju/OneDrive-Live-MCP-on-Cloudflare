@@ -34,6 +34,7 @@ jobs:
         shell: bash
         run: |
           set +e
+          sed -i 's/re.subn(pattern, replacement, text/re.subn(pattern, lambda _match: replacement, text/' .repair/apply_integrity_free_plan.py
           python .repair/apply_integrity_free_plan.py > .repair/apply.log 2>&1
           code=$?
           cat .repair/apply.log
