@@ -55,8 +55,7 @@ jobs:
           sed -i 's/REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER/CI_TEST_ROOT/g' wrangler.ci.jsonc
           sed -i 's/REPLACE_WITH_KV_NAMESPACE_ID/00000000000000000000000000000000/g' wrangler.ci.jsonc
           npx wrangler deploy --dry-run --config wrangler.ci.jsonc --outdir dist
-      - name: Transfer exact branch candidate to one-time buffer
-        if: github.event_name == 'push' && github.ref_name == 'work/integrity-plan-free-budget'
+      - name: Transfer exact validated candidate to one-time buffer
         shell: bash
         run: |
           set -o pipefail
