@@ -2,11 +2,12 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { ConnectorError, safeErrorResult } from "./errors";
-import type { IntegrityPlan, PlanAction } from "./integrated-tools";
+import type { IntegrityPlan, JobRecord, PlanAction } from "./integrated-tools";
 import { remainingActions } from "./integrity-execution";
 import { executeIntegrityPlanWithBlockedMoveReconciliation, unresolvedActions } from "./integrity-blocked-move-reconcile";
 import { getIntegrityJobStatus, reconcileIntegrityPlan, refreshDependencySkips, startDiffScopeBeforeAfter } from "./integrity-resume-repair";
 import { continueSourceSnapshotJob } from "./source-snapshot-repair";
+import { resolveRelativeItem, verifyItemInsideRoot } from "./graph-core";
 import type { ScheduleSnapshot } from "./snapshot-model";
 import { openJson } from "./security";
 import type { HotfixContext } from "./version20-hotfix";
@@ -27,6 +28,7 @@ const JOB_PREFIX = "integrated:job:";
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true } as const;
 const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true } as const;
 const OWNER_TYPES = ["manual", "scheduled_task", "api", "recovery", "internal_job"] as const;
+const INTEGRITY_LEASE_TOOLS_HARDENING_V2 = true;
 
 type ExecutionInput = {
   executionToken: string;
@@ -91,6 +93,47 @@ function actionEvidence(action: PlanAction): { expectedPreconditions: Record<str
   };
 }
 
+function expectedRecoveryPath(action: PlanAction): string | null {
+  if (action.action === "MOVE" && action.destinationPath) {
+    const name = action.proposedFilename ?? action.currentFilename ?? action.sourcePath?.split("/").pop();
+    return name ? `${action.destinationPath.replace(/\/$/, "")}/${name}`.replace(/^\//, "") : null;
+  }
+  if (action.action === "RENAME" && action.sourcePath && action.proposedFilename) {
+    const parent = action.sourcePath.split("/").slice(0, -1).join("/");
+    return parent ? `${parent}/${action.proposedFilename}` : action.proposedFilename;
+  }
+  return null;
+}
+
+async function classifyReservedActionRecovery(context: HotfixContext, plan: IntegrityPlan, action: PlanAction, reservation: Record<string, unknown> | null, operation: Record<string, unknown> | undefined): Promise<string> {
+  if (operation?.state === "completed" || plan.completedActions.includes(action.actionId)) return "completed";
+  if (reservation?.state === "reserved") return "ready_for_retry";
+  if (["RENAME", "MOVE"].includes(action.action) && action.sourceItemId && action.sourcePath) {
+    const expectedPath = expectedRecoveryPath(action);
+    const source = await verifyItemInsideRoot(context.env, context.userId, action.sourceItemId).catch(() => null);
+    if (source && expectedPath && source.relativePath === expectedPath) return "completed";
+    if (!source && expectedPath) {
+      const applied = await resolveRelativeItem(context.env, context.userId, expectedPath).catch(() => null);
+      if (applied?.item.id === action.sourceItemId) return "completed";
+      return "manual_review";
+    }
+    if (source && source.relativePath === action.sourcePath && (!action.snapshotETag || source.item.eTag === action.snapshotETag)) {
+      if (!expectedPath) return "ready_for_retry";
+      const destination = await resolveRelativeItem(context.env, context.userId, expectedPath).catch(() => null);
+      if (!destination) return "ready_for_retry";
+      return destination.item.id === source.item.id ? "completed" : "manual_review";
+    }
+    return "manual_review";
+  }
+  if (operation?.state === "failed") {
+    const error = operation.error as Record<string, unknown> | undefined;
+    const ambiguous = ["graph_timeout", "graph_network_error", "graph_unreachable", "graph_server_error", "graph_subrequest_limit", "graph_rate_limited", "graph_request_failed"].includes(String(error?.code ?? ""));
+    return ambiguous ? "manual_review" : Boolean(error?.retryable) ? "ready_for_retry" : "failed_closed";
+  }
+  if (!operation && reservation?.state !== "mutation_in_progress") return "ready_for_retry";
+  return "manual_review";
+}
+
 async function recoveryResolution(context: HotfixContext, planId: string, previousActionId: string | null): Promise<Record<string, unknown>> {
   const before = await callIntegrityCoordination(context.env, context.userId, { op: "status", planId });
   const reservation = before.reservation as Record<string, unknown> | null;
@@ -98,29 +141,28 @@ async function recoveryResolution(context: HotfixContext, planId: string, previo
   const operation = actionId ? await context.storage.get<Record<string, unknown>>(`integrated:operation:${planId}:${actionId}`) : undefined;
   const reconciliation = await reconcileIntegrityPlan(context, { planId, maximumActions: 3 });
   const reconciled = Array.isArray(reconciliation.reconciledThisInvocation) ? reconciliation.reconciledThisInvocation.map(String) : [];
-  let result = "ready_for_retry";
-  if (actionId && (operation?.state === "completed" || reconciled.includes(actionId))) result = "completed";
-  else if (operation?.state === "prepared" || reservation?.state === "mutation_in_progress") result = "manual_review";
-  else if (operation?.state === "failed") {
-    const error = operation.error as Record<string, unknown> | undefined;
-    const retryable = Boolean(error?.retryable);
-    const ambiguous = ["graph_timeout", "graph_network_error", "graph_unreachable", "graph_server_error", "graph_subrequest_limit", "graph_rate_limited", "graph_request_failed"].includes(String(error?.code ?? ""));
-    result = retryable && !ambiguous ? "ready_for_retry" : ambiguous ? "manual_review" : "failed_closed";
-  }
+  const plan = await getPlan(context, planId);
+  const action = actionId ? plan.actions.find((candidate) => candidate.actionId === actionId) : undefined;
+  let result = actionId && (operation?.state === "completed" || reconciled.includes(actionId) || plan.completedActions.includes(actionId)) ? "completed" : "ready_for_retry";
+  if (action) result = await classifyReservedActionRecovery(context, plan, action, reservation, operation);
+  else if (reservation?.state === "mutation_in_progress") result = "manual_review";
   return {
     previousActionId: actionId,
     reconciliationResult: result,
     reconciledActions: reconciled,
     operationState: operation?.state ?? null,
+    identityEvidenceUsed: Boolean(action?.sourceItemId),
     recoveredAt: nowIso(),
   };
 }
 
 async function acquireExecutionLease(context: HotfixContext, planId: string, input: ExecutionInput): Promise<LeaseMetadata | Record<string, unknown>> {
   const defaults = executionDefaults(input);
+  const plan = await getPlan(context, planId);
   const request = {
     op: "acquire",
     planId,
+    scopePath: plan.scopePath,
     ...defaults,
     workerVersion: workerVersion(context.env),
     leaseDurationSeconds: leaseSeconds(context.env),
@@ -151,78 +193,88 @@ async function releaseLease(context: HotfixContext, lease: LeaseMetadata, outcom
   await callIntegrityCoordination(context.env, context.userId, { op: "release", planId: lease.planId, leaseId: lease.leaseId, fencingToken: lease.fencingToken, invocationId: lease.invocationId, outcome });
 }
 
+function leaseResponseFields(acquired: LeaseMetadata): Record<string, unknown> {
+  return { leaseAcquired: true, alreadyExecuting: false, leaseId: acquired.leaseId, fencingToken: acquired.fencingToken, leaseExpiresAt: acquired.leaseExpiresAt, retryAfterSeconds: 0, safeToRetry: true, recoveredExpiredLease: acquired.recoveredExpiredLease, recoveryMetadata: acquired.recoveryMetadata ?? null };
+}
+function planProgressFields(plan: IntegrityPlan): Record<string, unknown> {
+  const unresolved = unresolvedActions(plan);
+  const ready = remainingActions(plan.actions, plan.completedActions, plan.failedActions, plan.skippedDependencyActions);
+  return { remainingActions: unresolved.length, nextAction: plan.nextAction ?? ready[0]?.actionId ?? unresolved[0]?.actionId ?? null, nextReadyAction: ready[0]?.actionId ?? null, resumeRequired: unresolved.length > 0, auditPending: plan.auditStatus === "pending" || plan.auditStatus === "running", planComplete: unresolved.length === 0 };
+}
+
 async function executeWithLease(context: HotfixContext, input: ExecutionInput): Promise<Record<string, unknown>> {
   const token = await openJson<{ planId: string; planHash: string; expiresAt: number }>(context.env.COOKIE_ENCRYPTION_KEY, String(input.executionToken ?? "")).catch(() => null);
   if (!token || token.expiresAt <= Date.now()) throw new ConnectorError("execution_token_invalid", "The execution token is invalid or expired.");
+  const initialPlan = await getPlan(context, token.planId);
+  if (initialPlan.validationStatus !== "valid" || initialPlan.planHash !== token.planHash) throw new ConnectorError("plan_not_validated", "The integrity plan is not currently validated.");
   const acquired = await acquireExecutionLease(context, token.planId, input);
   if (!isLeaseMetadata(acquired)) return acquired;
   const lease: LeaseReference = { planId: acquired.planId, leaseId: acquired.leaseId, fencingToken: acquired.fencingToken, invocationId: acquired.invocationId };
-  let plan = await getPlan(context, token.planId);
-  const unresolved = unresolvedActions(plan);
-  const action = unresolved[0] ?? null;
-  if (!action) {
-    await releaseLease(context, acquired, { reason: "plan_complete" });
-    return {
-      planId: plan.planId,
-      executionState: "complete",
-      leaseAcquired: true,
-      alreadyExecuting: false,
-      leaseId: acquired.leaseId,
-      fencingToken: acquired.fencingToken,
-      leaseExpiresAt: acquired.leaseExpiresAt,
-      recoveredExpiredLease: acquired.recoveredExpiredLease,
-      completedThisInvocation: [],
-      reconciledThisInvocation: [],
-      failedThisInvocation: [],
-      remainingActions: 0,
-      nextAction: null,
-      currentAction: null,
-      resumeRequired: false,
-      auditPending: plan.auditStatus === "pending" || plan.auditStatus === "running",
-      planComplete: true,
-    };
-  }
-  const evidence = actionEvidence(action);
-  const reserved = await callIntegrityCoordination(context.env, context.userId, { op: "reserve", ...lease, actionId: action.actionId, ...evidence });
-  const reservation = reserved.reservation as Record<string, unknown>;
-  await callIntegrityCoordination(context.env, context.userId, { op: "mark-mutation-started", ...lease, actionId: action.actionId, progressSequence: 1, leaseDurationSeconds: leaseSeconds(context.env) });
   const fencedContext: HotfixContext = { ...context, storage: createLeaseFencedStorage(context.storage, context.env, context.userId, lease) };
-  const underlying = await executeIntegrityPlanWithBlockedMoveReconciliation(fencedContext, { executionToken: input.executionToken });
-  const completed = Array.isArray(underlying.completedThisInvocation) ? underlying.completedThisInvocation.map(String) : [];
-  const reconciled = Array.isArray(underlying.reconciledThisInvocation) ? underlying.reconciledThisInvocation.map(String) : [];
-  const failed = Array.isArray(underlying.failedThisInvocation) ? underlying.failedThisInvocation.map(String) : [];
-  let state: ReservationState = "ready_for_retry";
-  if (completed.includes(action.actionId)) state = "completed";
-  else if (reconciled.includes(action.actionId)) state = "reconciled";
-  else if (failed.includes(action.actionId)) state = "failed";
-  else if (underlying.discrepancy) state = "manual_review";
-  await callIntegrityCoordination(context.env, context.userId, { op: "finalize-action", ...lease, actionId: action.actionId, reservationState: state, outcome: { underlying, idempotencyKey: reservation.idempotencyKey } });
-  await releaseLease(context, acquired, { state, actionId: action.actionId });
-  plan = await getPlan(context, token.planId);
-  const unresolvedAfter = unresolvedActions(plan);
-  const readyAfter = remainingActions(plan.actions, plan.completedActions, plan.failedActions, plan.skippedDependencyActions);
-  return {
-    ...underlying,
-    executionState: unresolvedAfter.length === 0 ? "complete" : state === "manual_review" ? "manual_review" : "yielded",
-    leaseAcquired: true,
-    alreadyExecuting: false,
-    leaseId: acquired.leaseId,
-    fencingToken: acquired.fencingToken,
-    leaseExpiresAt: acquired.leaseExpiresAt,
-    recoveredExpiredLease: acquired.recoveredExpiredLease,
-    recoveryMetadata: acquired.recoveryMetadata ?? null,
-    currentAction: action.actionId,
-    actionReservation: { actionId: action.actionId, attempt: reservation.attempt, idempotencyKey: reservation.idempotencyKey, state },
-    completedThisInvocation: completed,
-    reconciledThisInvocation: reconciled,
-    failedThisInvocation: failed,
-    remainingActions: unresolvedAfter.length,
-    nextAction: unresolvedAfter[0]?.actionId ?? null,
-    nextReadyAction: readyAfter[0]?.actionId ?? null,
-    resumeRequired: unresolvedAfter.length > 0,
-    auditPending: plan.auditStatus === "pending" || plan.auditStatus === "running",
-    planComplete: unresolvedAfter.length === 0,
-  };
+  let reservation: Record<string, unknown> | null = null;
+  let action: PlanAction | null = null;
+  let mutationStarted = false;
+  let finalized = false;
+  let released = false;
+  try {
+    const recoveryResult = String(acquired.recoveryMetadata?.reconciliationResult ?? "");
+    if (["manual_review", "failed_closed"].includes(recoveryResult)) {
+      await releaseLease(context, acquired, { recoveryBlockedExecution: recoveryResult });
+      released = true;
+      const plan = await getPlan(context, token.planId);
+      return { planId: plan.planId, executionState: recoveryResult, ...leaseResponseFields(acquired), completedThisInvocation: [], reconciledThisInvocation: [], failedThisInvocation: recoveryResult === "failed_closed" && acquired.recoveryMetadata?.previousActionId ? [String(acquired.recoveryMetadata.previousActionId)] : [], currentAction: acquired.recoveryMetadata?.previousActionId ?? null, ...planProgressFields(plan) };
+    }
+
+    const pre = await reconcileIntegrityPlan(fencedContext, { planId: token.planId, maximumActions: 3 });
+    const preReconciled = Array.isArray(pre.reconciledThisInvocation) ? pre.reconciledThisInvocation.map(String) : [];
+    if (preReconciled.length > 0 || pre.discrepancy) {
+      await releaseLease(context, acquired, { reconciliationOnly: true, reconciled: preReconciled });
+      released = true;
+      const plan = await getPlan(context, token.planId);
+      return { ...pre, planId: plan.planId, executionState: pre.discrepancy ? "manual_review" : "reconciled", ...leaseResponseFields(acquired), completedThisInvocation: [], reconciledThisInvocation: preReconciled, failedThisInvocation: [], currentAction: null, ...planProgressFields(plan) };
+    }
+
+    let plan = await getPlan(context, token.planId);
+    const ready = remainingActions(plan.actions, plan.completedActions, plan.failedActions, plan.skippedDependencyActions);
+    const unresolved = unresolvedActions(plan);
+    action = ready[0] ?? null;
+    if (!action) {
+      await releaseLease(context, acquired, { reason: unresolved.length === 0 ? "plan_complete" : "no_ready_action" });
+      released = true;
+      return { planId: plan.planId, executionState: unresolved.length === 0 ? "complete" : "waiting", ...leaseResponseFields(acquired), completedThisInvocation: [], reconciledThisInvocation: [], failedThisInvocation: [], currentAction: null, ...planProgressFields(plan) };
+    }
+
+    const evidence = actionEvidence(action);
+    const reserved = await callIntegrityCoordination(context.env, context.userId, { op: "reserve", ...lease, actionId: action.actionId, ...evidence });
+    reservation = reserved.reservation as Record<string, unknown>;
+    await callIntegrityCoordination(context.env, context.userId, { op: "mark-mutation-started", ...lease, actionId: action.actionId, progressSequence: Number(reservation.attempt ?? 1), leaseDurationSeconds: leaseSeconds(context.env) });
+    mutationStarted = true;
+
+    const underlying = await executeIntegrityPlanWithBlockedMoveReconciliation(fencedContext, { executionToken: input.executionToken });
+    const completed = Array.isArray(underlying.completedThisInvocation) ? underlying.completedThisInvocation.map(String) : [];
+    const reconciled = Array.isArray(underlying.reconciledThisInvocation) ? underlying.reconciledThisInvocation.map(String) : [];
+    const failed = Array.isArray(underlying.failedThisInvocation) ? underlying.failedThisInvocation.map(String) : [];
+    if (completed.length > 0 && !completed.includes(action.actionId)) throw new ConnectorError("action_reservation_mismatch", "The executor attempted to complete an action other than the reserved action.", { retryable: false });
+    let state: ReservationState = "ready_for_retry";
+    if (completed.includes(action.actionId)) state = "completed";
+    else if (reconciled.includes(action.actionId)) state = "reconciled";
+    else if (failed.includes(action.actionId)) state = "failed";
+    else if (underlying.discrepancy) state = "manual_review";
+    const outcome = { completed, reconciled, failed, discrepancy: Boolean(underlying.discrepancy), idempotencyKey: reservation.idempotencyKey };
+    await callIntegrityCoordination(context.env, context.userId, { op: "finalize-action", ...lease, actionId: action.actionId, reservationState: state, outcome });
+    finalized = true;
+    mutationStarted = false;
+    await releaseLease(context, acquired, { state, actionId: action.actionId });
+    released = true;
+    plan = await getPlan(context, token.planId);
+    return { ...underlying, executionState: unresolvedActions(plan).length === 0 ? "complete" : state === "manual_review" ? "manual_review" : "yielded", ...leaseResponseFields(acquired), currentAction: action.actionId, actionReservation: { actionId: action.actionId, attempt: reservation.attempt, idempotencyKey: reservation.idempotencyKey, state }, completedThisInvocation: completed, reconciledThisInvocation: reconciled, failedThisInvocation: failed, ...planProgressFields(plan) };
+  } catch (error) {
+    if (reservation && !mutationStarted && !finalized && action) {
+      await callIntegrityCoordination(context.env, context.userId, { op: "finalize-action", ...lease, actionId: action.actionId, reservationState: "ready_for_retry", outcome: { abortedBeforeMutation: true } }).catch(() => undefined);
+    }
+    if (!mutationStarted && !released) await releaseLease(context, acquired, { abortedBeforeMutation: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 async function reconcileWithLease(context: HotfixContext, input: { planId: string; maximumActions?: number; ownerId?: string; invocationId?: string; correlationId?: string }): Promise<Record<string, unknown>> {
@@ -230,9 +282,12 @@ async function reconcileWithLease(context: HotfixContext, input: { planId: strin
   if (!isLeaseMetadata(acquired)) return acquired;
   const lease: LeaseReference = { planId: acquired.planId, leaseId: acquired.leaseId, fencingToken: acquired.fencingToken, invocationId: acquired.invocationId };
   const fencedContext: HotfixContext = { ...context, storage: createLeaseFencedStorage(context.storage, context.env, context.userId, lease) };
-  const result = await reconcileIntegrityPlan(fencedContext, { planId: input.planId, maximumActions: input.maximumActions });
-  await releaseLease(context, acquired, { reconciliationOnly: true });
-  return { ...result, executionState: "reconciled", leaseAcquired: true, alreadyExecuting: false, leaseId: acquired.leaseId, fencingToken: acquired.fencingToken, leaseExpiresAt: acquired.leaseExpiresAt, recoveredExpiredLease: acquired.recoveredExpiredLease };
+  try {
+    const result = await reconcileIntegrityPlan(fencedContext, { planId: input.planId, maximumActions: input.maximumActions });
+    return { ...result, executionState: "reconciled", ...leaseResponseFields(acquired) };
+  } finally {
+    await releaseLease(context, acquired, { reconciliationOnly: true }).catch(() => undefined);
+  }
 }
 
 async function executionState(context: HotfixContext, planId: string): Promise<Record<string, unknown>> {
@@ -249,7 +304,7 @@ async function executionState(context: HotfixContext, planId: string): Promise<R
     validationStatus: plan.validationStatus,
     executionStatus: plan.executionStatus,
     currentAction: plan.currentAction,
-    nextAction: unresolved[0]?.actionId ?? null,
+    nextAction: plan.nextAction ?? ready[0]?.actionId ?? unresolved[0]?.actionId ?? null,
     nextReadyAction: ready[0]?.actionId ?? null,
     outstandingActions: unresolved.map((action) => action.actionId),
     remainingActions: unresolved.length,
@@ -274,11 +329,11 @@ async function requestRecovery(context: HotfixContext, input: { planId: string; 
   const status = await callIntegrityCoordination(context.env, context.userId, { op: "status", planId: input.planId });
   if (status.leased === true && input.force !== true) return { recovered: false, activeLeaseStillValid: true, refusedCancellation: true, safeToRetry: true, activeLease: status.activeLease };
   if (status.leased === true && input.force === true) {
-    const reservation = status.reservation as Record<string, unknown> | null;
-    if (reservation?.state === "mutation_in_progress") return { recovered: false, refusedCancellation: true, reason: "mutation_commit_in_progress", activeLease: status.activeLease, reservation };
-    const reconciliation = await reconcileIntegrityPlan(context, { planId: input.planId, maximumActions: 3 });
     const defaults = executionDefaults({ executionToken: "", ownerType: "recovery", ownerId: input.ownerId, invocationId: input.invocationId, correlationId: input.correlationId });
-    const invalidated = await callIntegrityCoordination(context.env, context.userId, { op: "force-invalidate", planId: input.planId, ...defaults, force: true, outcome: { reconciliation } });
+    const claim = await callIntegrityCoordination(context.env, context.userId, { op: "claim-force-recovery", planId: input.planId, ...defaults, workerVersion: workerVersion(context.env), force: true });
+    if (claim.claimed !== true) return { recovered: false, refusedCancellation: true, ...claim };
+    const reconciliation = await reconcileIntegrityPlan(context, { planId: input.planId, maximumActions: 3 });
+    const invalidated = await callIntegrityCoordination(context.env, context.userId, { op: "force-invalidate", planId: input.planId, ...defaults, force: true, outcome: { reconciliationSummary: { reconciledThisInvocation: reconciliation.reconciledThisInvocation ?? [], discrepancy: reconciliation.discrepancy ?? null } } });
     return { recovered: Boolean(invalidated.invalidated), forced: true, reconciliation, ...invalidated };
   }
   const acquired = await acquireExecutionLease(context, input.planId, { executionToken: "", ownerType: "recovery", ownerId: input.ownerId, invocationId: input.invocationId, correlationId: input.correlationId });
@@ -287,8 +342,40 @@ async function requestRecovery(context: HotfixContext, input: { planId: string; 
   return { recovered: acquired.recoveredExpiredLease, previousLease: acquired.recoveryMetadata ?? null, newFencingToken: acquired.fencingToken, leaseReleased: true };
 }
 
+type LeaseProbeInput = { planId: string; mode?: "acquire" | "release" | "acquire_and_release"; ownerId?: string; invocationId?: string; correlationId?: string; leaseId?: string; fencingToken?: number; actionId?: string; simulateMutationInProgress?: boolean };
+async function probeLease(context: HotfixContext, input: LeaseProbeInput): Promise<Record<string, unknown>> {
+  const mode = input.mode ?? "acquire_and_release";
+  if (mode === "release") {
+    if (!input.leaseId || !input.invocationId || !Number.isFinite(input.fencingToken)) throw new ConnectorError("probe_release_metadata_required", "Lease ID, invocation ID, and fencing token are required to release a probe lease.");
+    return callIntegrityCoordination(context.env, context.userId, { op: "release", planId: input.planId, leaseId: input.leaseId, fencingToken: Number(input.fencingToken), invocationId: input.invocationId, outcome: { acceptanceProbe: true } });
+  }
+  const acquired = await acquireExecutionLease(context, input.planId, { executionToken: "", ownerType: "internal_job", ownerId: input.ownerId ?? "integrity-lease-acceptance-probe", invocationId: input.invocationId, correlationId: input.correlationId });
+  if (!isLeaseMetadata(acquired)) return acquired;
+  const lease: LeaseReference = { planId: acquired.planId, leaseId: acquired.leaseId, fencingToken: acquired.fencingToken, invocationId: acquired.invocationId };
+  let reservation: Record<string, unknown> | null = null;
+  if (input.actionId) {
+    const plan = await getPlan(context, input.planId);
+    const action = plan.actions.find((candidate) => candidate.actionId === input.actionId);
+    if (!action) throw new ConnectorError("probe_action_not_found", "The requested probe action does not exist in the plan.");
+    const reserved = await callIntegrityCoordination(context.env, context.userId, { op: "reserve", ...lease, actionId: action.actionId, ...actionEvidence(action) });
+    reservation = reserved.reservation as Record<string, unknown>;
+    if (input.simulateMutationInProgress === true) await callIntegrityCoordination(context.env, context.userId, { op: "mark-mutation-started", ...lease, actionId: action.actionId, progressSequence: Number(reservation.attempt ?? 1), leaseDurationSeconds: leaseSeconds(context.env) });
+  }
+  if (mode === "acquire_and_release") {
+    if (input.simulateMutationInProgress) throw new ConnectorError("probe_inflight_cannot_release", "A simulated in-flight action must be recovered after lease expiry rather than released.");
+    await releaseLease(context, acquired, { acceptanceProbe: true });
+  }
+  return { planId: input.planId, probeMode: mode, ...leaseResponseFields(acquired), invocationId: acquired.invocationId, reservation, leaseReleased: mode === "acquire_and_release", noGraphMutationPerformed: true };
+}
+
+async function executionAudit(context: HotfixContext, planId: string, cursor?: number, limit?: number): Promise<Record<string, unknown>> {
+  await getPlan(context, planId);
+  return callIntegrityCoordination(context.env, context.userId, { op: "audit-page", planId, cursor, limit });
+}
+
 async function startDiffWithCoordination(context: HotfixContext, schedule: ScheduleSnapshot, planId: string): Promise<Record<string, unknown>> {
-  const gate = await callIntegrityCoordination(context.env, context.userId, { op: "begin-plan-audit", planId, auditJobId: "pending" });
+  const plan = await getPlan(context, planId);
+  const gate = await callIntegrityCoordination(context.env, context.userId, { op: "begin-plan-audit", planId, scopePath: plan.scopePath, auditJobId: "pending" });
   if (gate.acquired !== true) return { ...gate, auditStarted: false, planId };
   try {
     const result = await startDiffScopeBeforeAfter(context, schedule, planId);
@@ -302,14 +389,36 @@ async function startDiffWithCoordination(context: HotfixContext, schedule: Sched
 }
 
 async function getJobWithCoordination(context: HotfixContext, schedule: ScheduleSnapshot, jobId: string): Promise<Record<string, unknown>> {
+  const current = await context.storage.get<JobRecord>(`${JOB_PREFIX}${jobId}`);
+  if (!current) throw new ConnectorError("job_not_found", "The integrated job does not exist or has expired.");
   const invocationId = crypto.randomUUID();
   const acquired = await callIntegrityCoordination(context.env, context.userId, { op: "job-acquire", jobId, invocationId, ownerId: "get_job_status", ownerType: "internal_job", workerVersion: workerVersion(context.env) });
-  if (acquired.acquired !== true) return { jobId, alreadyExecuting: true, safeToRetry: true, ...acquired };
+  if (acquired.acquired !== true) {
+    await schedule(jobId, context.userId, Math.min(60, Math.max(2, Number(acquired.retryAfterSeconds ?? 5))));
+    return { jobId, alreadyExecuting: true, safeToRetry: true, retryScheduled: true, ...acquired };
+  }
   const lease: JobLeaseReference = { jobId, invocationId, leaseId: String(acquired.leaseId), fencingToken: Number(acquired.fencingToken) };
   const fencedContext: HotfixContext = { ...context, storage: createJobFencedStorage(context.storage, context.env, context.userId, lease) };
+  const childStatus = async (childJobId: string): Promise<JobRecord> => {
+    const childInvocationId = crypto.randomUUID();
+    const childAcquire = await callIntegrityCoordination(context.env, context.userId, { op: "job-acquire", jobId: childJobId, invocationId: childInvocationId, ownerId: "integrity_diff_child_status", ownerType: "internal_job", workerVersion: workerVersion(context.env) });
+    if (childAcquire.acquired !== true) {
+      const snapshot = await context.storage.get<JobRecord>(`${JOB_PREFIX}${childJobId}`);
+      if (!snapshot) throw new ConnectorError("job_not_found", "The final snapshot job does not exist or has expired.");
+      return snapshot;
+    }
+    const childLease: JobLeaseReference = { jobId: childJobId, invocationId: childInvocationId, leaseId: String(childAcquire.leaseId), fencingToken: Number(childAcquire.fencingToken) };
+    try {
+      const childContext: HotfixContext = { ...context, storage: createJobFencedStorage(context.storage, context.env, context.userId, childLease) };
+      return await getIntegrityJobStatus(childContext, schedule, childJobId);
+    } finally {
+      await callIntegrityCoordination(context.env, context.userId, { op: "job-release", ...childLease }).catch(() => undefined);
+    }
+  };
   try {
-    const result = await getIntegrityJobStatus(fencedContext, schedule, jobId);
+    const result = await getIntegrityJobStatus(fencedContext, schedule, jobId, current.type === "integrity_diff" ? childStatus : undefined);
     const planId = String(result.resultReferences?.planId ?? "");
+    if (planId) await callIntegrityCoordination(context.env, context.userId, { op: "update-plan-audit", planId, auditJobId: jobId }).catch(() => undefined);
     if (planId && ["completed", "failed", "cancelled"].includes(result.status)) await callIntegrityCoordination(context.env, context.userId, { op: "end-plan-audit", planId, auditJobId: jobId, outcome: { status: result.status } });
     return result as unknown as Record<string, unknown>;
   } finally {
@@ -335,7 +444,7 @@ export function registerIntegrityLeaseTools(server: McpServer, contextFactory: (
   const originalSend = target.sendToolListChanged;
   target.sendToolListChanged = () => undefined;
   try {
-    for (const name of ["execute_integrity_plan", "reconcile_integrity_plan", "get_integrity_plan_status", "get_integrity_plan_execution_state", "request_integrity_plan_lease_recovery", "diff_scope_before_after", "get_job_status"]) delete target._registeredTools?.[name];
+    for (const name of ["execute_integrity_plan", "reconcile_integrity_plan", "get_integrity_plan_status", "get_integrity_plan_execution_state", "get_integrity_plan_execution_audit", "request_integrity_plan_lease_recovery", "probe_integrity_plan_execution_lease", "diff_scope_before_after", "get_job_status"]) delete target._registeredTools?.[name];
     server.registerTool("execute_integrity_plan", {
       title: "Resume integrity plan with a durable execution lease",
       description: "Atomically acquire a per-plan Durable Object lease, fence every mutation-state commit, reserve one action, reconcile ambiguous outcomes, execute a bounded batch, and release safely.",
@@ -366,12 +475,24 @@ export function registerIntegrityLeaseTools(server: McpServer, contextFactory: (
       inputSchema: { planId: z.string().uuid() },
       annotations: READ_ONLY,
     }, async ({ planId }) => { try { return textResult(await executionState(contextFactory(), planId)); } catch (error) { return errorResult(error); } });
+    server.registerTool("get_integrity_plan_execution_audit", {
+      title: "Get bounded integrity execution audit history",
+      description: "Return a paginated newest-first page of bounded lease, fencing, reservation, recovery, denial, and release audit records.",
+      inputSchema: { planId: z.string().uuid(), cursor: z.number().int().min(0).optional(), limit: z.number().int().min(1).max(50).optional() },
+      annotations: READ_ONLY,
+    }, async ({ planId, cursor, limit }) => { try { return textResult(await executionAudit(contextFactory(), planId, cursor, limit)); } catch (error) { return errorResult(error); } });
     server.registerTool("request_integrity_plan_lease_recovery", {
       title: "Request guarded integrity lease recovery",
       description: "Recover an expired lease normally. Active leases are refused unless force is explicit, no mutation commit is in progress, reconciliation runs first, and the fencing token is incremented.",
       inputSchema: { planId: z.string().uuid(), force: z.boolean().optional(), ownerId: z.string().max(500).optional(), invocationId: z.string().max(500).optional(), correlationId: z.string().max(500).optional() },
       annotations: DESTRUCTIVE,
     }, async (input) => { try { return textResult(await requestRecovery(contextFactory(), input)); } catch (error) { return errorResult(error); } });
+    server.registerTool("probe_integrity_plan_execution_lease", {
+      title: "Probe or hold an integrity execution lease without Graph mutation",
+      description: "Administrative acceptance tool. Atomically acquire, hold, or owner-check-release a plan lease and optionally reserve a fixture action without issuing any Microsoft Graph mutation.",
+      inputSchema: { planId: z.string().uuid(), mode: z.enum(["acquire", "release", "acquire_and_release"]).optional(), ownerId: z.string().max(500).optional(), invocationId: z.string().max(500).optional(), correlationId: z.string().max(500).optional(), leaseId: z.string().uuid().optional(), fencingToken: z.number().int().min(1).optional(), actionId: z.string().max(200).optional(), simulateMutationInProgress: z.boolean().optional() },
+      annotations: DESTRUCTIVE,
+    }, async (input) => { try { return textResult(await probeLease(contextFactory(), input)); } catch (error) { return errorResult(error); } });
     server.registerTool("diff_scope_before_after", {
       title: "Start or resume coordinated final integrity audit",
       description: "Start the resumable final diff only when no mutation lease is active. The plan audit gate prevents mutation bookkeeping races until the audit job finishes.",

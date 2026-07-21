@@ -465,12 +465,15 @@ async function finalizeDiffJob(context: HotfixContext, parent: JobRecord): Promi
   return parent;
 }
 
-export async function getIntegrityJobStatus(context: HotfixContext, schedule: ScheduleSnapshot, jobId: string): Promise<JobRecord> {
+export type SnapshotStatusReader = (jobId: string) => Promise<JobRecord>;
+
+export async function getIntegrityJobStatus(context: HotfixContext, schedule: ScheduleSnapshot, jobId: string, snapshotStatus?: SnapshotStatusReader): Promise<JobRecord> {
   const job = await getJob(context.storage, jobId);
-  if (job.type !== "integrity_diff") return getSnapshotJobStatus(context, schedule, jobId);
+  const readSnapshotStatus: SnapshotStatusReader = snapshotStatus ?? ((childJobId) => getSnapshotJobStatus(context, schedule, childJobId));
+  if (job.type !== "integrity_diff") return readSnapshotStatus(jobId);
   if (["completed", "failed", "cancelled"].includes(job.status)) return job;
   const childJobId = String(job.resultReferences.finalSnapshotJobId ?? "");
-  const child = await getSnapshotJobStatus(context, schedule, childJobId);
+  const child = await readSnapshotStatus(childJobId);
   if (child.status === "failed" || child.status === "cancelled") {
     job.status = "failed";
     job.currentStage = "final_snapshot_failed";
@@ -493,7 +496,7 @@ export async function startDiffScopeBeforeAfter(context: HotfixContext, schedule
   const plan = await getPlan(context, planId);
   const existingJobId = await context.storage.get<string>(diffJobReferenceKey(planId));
   if (existingJobId) {
-    const existing = await getIntegrityJobStatus(context, schedule, existingJobId);
+    const existing = await getJob(context.storage, existingJobId);
     return existing.status === "completed" ? (existing.resultReferences.result as Record<string, unknown>) : { jobId: existing.jobId, status: existing.status, progress: existing.progress, currentStage: existing.currentStage, resumable: true };
   }
   const originalMeta = await context.storage.get<SnapshotMeta>(snapshotMetaKey(plan.snapshotId));

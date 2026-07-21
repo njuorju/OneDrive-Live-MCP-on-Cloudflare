@@ -123,9 +123,9 @@ test("ambiguous in-flight mutation cannot be force-invalidated", async () => {
   const lease = await owned(h);
   await h.run({ op: "reserve", ...lease, actionId: "A1", expectedPreconditions: {}, intendedPostcondition: {} });
   await h.run({ op: "mark-mutation-started", ...lease, actionId: "A1", leaseDurationSeconds: 600 });
-  const forced = await h.run({ op: "force-invalidate", ...base, force: true, outcome: { reconciliationResult: "manual_review" } });
-  assert.equal(forced.invalidated, false);
-  assert.equal(forced.reason, "mutation_commit_in_progress");
+  const claim = await h.run({ op: "claim-force-recovery", ...base, invocationId: "recovery", ownerId: "recovery", force: true });
+  assert.equal(claim.claimed, false);
+  assert.equal(claim.reason, "mutation_commit_in_progress");
 });
 
 test("fencing token prevents a stale executor state commit", async () => {
@@ -217,7 +217,70 @@ test("audit history remains bounded", async () => {
   const h = new TransactionHarness();
   await h.run(acquire("owner"));
   for (let index = 0; index < MAX_INTEGRITY_AUDIT_RECORDS + 25; index += 1) await h.run({ ...acquire(`denied-${index}`), ownerId: `denied-${index}` });
-  const page = await h.run({ op: "audit-page", userId: base.userId, planId: base.planId });
-  assert.equal((page.records as unknown[]).length, MAX_INTEGRITY_AUDIT_RECORDS);
+  const page = await h.run({ op: "audit-page", userId: base.userId, planId: base.planId, limit: 50 });
+  assert.equal((page.records as unknown[]).length, 50);
+  assert.equal(page.totalRetained, MAX_INTEGRITY_AUDIT_RECORDS);
   assert.equal(page.bounded, true);
+});
+
+
+test("overlapping plan scopes are denied atomically", async () => {
+  const h = new TransactionHarness();
+  const first = await h.run({ ...acquire("one"), scopePath: "UCA/Modules" });
+  const second = await h.run({ ...acquire("two"), planId: "11111111-1111-4111-8111-111111111111", ownerId: "two", scopePath: "UCA/Modules/03_Source_Library" });
+  assert.equal(first.acquired, true);
+  assert.equal(second.alreadyExecuting, true);
+  assert.equal(second.overlapProtected, true);
+});
+
+test("non-overlapping plan scopes may lease independently", async () => {
+  const h = new TransactionHarness();
+  const first = await h.run({ ...acquire("one"), scopePath: "UCA/Modules" });
+  const second = await h.run({ ...acquire("two"), planId: "11111111-1111-4111-8111-111111111111", ownerId: "two", scopePath: "Transport" });
+  assert.equal(first.acquired, true);
+  assert.equal(second.acquired, true);
+});
+
+test("expired recovery durably resolves the old reservation before granting a new fence", async () => {
+  const h = new TransactionHarness();
+  const start = Date.parse("2026-07-21T12:00:00Z");
+  const lease = await h.run({ ...acquire("old"), scopePath: "Fixture", leaseDurationSeconds: 60 }, start);
+  const ref = { userId: base.userId, planId: base.planId, invocationId: "old", leaseId: String(lease.leaseId), fencingToken: Number(lease.fencingToken) };
+  await h.run({ op: "reserve", ...ref, actionId: "A1", expectedPreconditions: {}, intendedPostcondition: {} }, start + 1_000);
+  await h.run({ op: "mark-mutation-started", ...ref, actionId: "A1", leaseDurationSeconds: 60 }, start + 2_000);
+  await h.run({ ...acquire("new"), ownerId: "new", scopePath: "Fixture" }, start + 63_000);
+  await h.run({ ...acquire("new"), ownerId: "new", scopePath: "Fixture", recoveryResolution: { reconciliationResult: "ready_for_retry" } }, start + 64_000);
+  const status = await h.run({ op: "status", userId: base.userId, planId: base.planId }, start + 65_000);
+  assert.equal((status.reservation as any).state, "ready_for_retry");
+});
+
+test("forced recovery first fences the active owner and refuses in-progress mutation", async () => {
+  const h = new TransactionHarness();
+  const lease = await owned(h);
+  const claim = await h.run({ op: "claim-force-recovery", ...base, invocationId: "recovery", ownerId: "recovery", force: true });
+  assert.equal(claim.claimed, true);
+  await assert.rejects(() => h.run({ op: "fenced-put", ...lease, logicalKey: `integrated:plan:${base.planId}`, value: { stale: true } }));
+  const invalidated = await h.run({ op: "force-invalidate", ...base, invocationId: "recovery", ownerId: "recovery", force: true, outcome: { reconciled: true } });
+  assert.equal(invalidated.invalidated, true);
+});
+
+test("stale audit gates expire and no longer block execution", async () => {
+  const h = new TransactionHarness();
+  const start = Date.parse("2026-07-21T12:00:00Z");
+  await h.run({ op: "begin-plan-audit", userId: base.userId, planId: base.planId, scopePath: "Fixture", auditJobId: "job-1" }, start);
+  const blocked = await h.run({ ...acquire("blocked"), scopePath: "Fixture" }, start + 1_000);
+  assert.equal(blocked.alreadyExecuting, true);
+  const acquired = await h.run({ ...acquire("later"), scopePath: "Fixture" }, start + 21_601_000);
+  assert.equal(acquired.acquired, true);
+});
+
+test("execution audit is paginated newest first", async () => {
+  const h = new TransactionHarness();
+  await h.run({ ...acquire("owner"), scopePath: "Fixture" });
+  for (let index = 0; index < 8; index += 1) await h.run({ ...acquire(`denied-page-${index}`), ownerId: `denied-page-${index}`, scopePath: "Fixture" });
+  const first = await h.run({ op: "audit-page", userId: base.userId, planId: base.planId, cursor: 0, limit: 3 });
+  const second = await h.run({ op: "audit-page", userId: base.userId, planId: base.planId, cursor: first.nextCursor as number, limit: 3 });
+  assert.equal((first.records as any[]).length, 3);
+  assert.equal((second.records as any[]).length, 3);
+  assert.ok((first.records as any[])[0].sequence > (first.records as any[])[1].sequence);
 });
