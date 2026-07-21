@@ -6,6 +6,21 @@ on:
     types: [opened, reopened, synchronize]
     paths:
       - .github/workflows/upload-integrity-resume-candidate.yml
+      - src/auth-state.ts
+      - src/index-hotfix.ts
+      - src/integrity-coordination.ts
+      - src/integrity-lease-tools.ts
+      - src/integrity-resume-repair.ts
+      - src/integrity-blocked-move-reconcile.ts
+      - src/integrity-downstream-reconcile.ts
+      - src/integrity-execution.ts
+      - src/snapshot-runner.ts
+      - test/integrity-coordination.test.ts
+      - test/integrity-resume-repair.test.ts
+      - test/integrity-blocked-move-reconcile.test.ts
+      - test/integrity-downstream-reconcile.test.ts
+      - worker-configuration.d.ts
+      - wrangler.jsonc
 
 permissions:
   contents: read
@@ -56,7 +71,9 @@ jobs:
               "MAX_IMAGE_PIXELS": "40000000",
               "MAX_IMAGE_DIMENSION": "8192",
               "MAX_IMAGE_PAGES": "8",
-              "IMAGE_PROCESSING_TIMEOUT_MS": "15000"
+              "IMAGE_PROCESSING_TIMEOUT_MS": "15000",
+              "INTEGRITY_LEASE_SECONDS": "600",
+              "WORKER_DEPLOYMENT_ID": "repo-${{ github.event.pull_request.head.sha }}"
             },
             "secrets": {
               "required": ["COOKIE_ENCRYPTION_KEY", "MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET"]
