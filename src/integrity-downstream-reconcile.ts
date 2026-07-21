@@ -2,7 +2,15 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { ConnectorError, safeErrorResult } from "./errors";
-import { compactVerifiedItem, graphFetchBytes, strictRelativePath, verifyItemInsideRoot } from "./graph-core";
+import {
+  compactVerifiedItem,
+  graphFetch,
+  graphFetchBytes,
+  resolveConfiguredRoot,
+  strictRelativePath,
+  verifyItemInsideRoot,
+  type VerifiedItem,
+} from "./graph-core";
 import { INTEGRATED_LIMITS, sha256Bytes } from "./integrated-core";
 import type { IntegrityPlan, PlanAction } from "./integrated-tools";
 import { remainingActions, uniqueStrings, upsertResult } from "./integrity-execution";
@@ -11,11 +19,13 @@ import {
   refreshDependencySkips,
 } from "./integrity-resume-repair";
 import { openJson } from "./security";
+import type { GraphDriveItem } from "./types";
 import type { HotfixContext } from "./version20-hotfix";
 
 const PLAN_PREFIX = "integrated:plan:";
 const OPERATION_PREFIX = "integrated:operation:";
 const RECONCILIATION_PREFIX = "integrated:reconciliation:";
+const RECONCILIATION_ITEM_SELECT = "id,name,size,eTag,lastModifiedDateTime,file,folder,parentReference,remoteItem,deleted";
 
 function planKey(planId: string): string { return `${PLAN_PREFIX}${planId}`; }
 function operationKey(planId: string, actionId: string): string { return `${OPERATION_PREFIX}${planId}:${actionId}`; }
@@ -49,6 +59,42 @@ export function findDeclaredDownstreamMove(plan: IntegrityPlan, action: PlanActi
       && Boolean(candidate.destinationPath),
     )
     .sort((a, b) => Number(a.operationOrder ?? 0) - Number(b.operationOrder ?? 0))[0] ?? null;
+}
+
+export function relativePathFromParentReference(root: GraphDriveItem, item: GraphDriveItem): string | null {
+  const driveId = root.parentReference?.driveId;
+  const itemDriveId = item.parentReference?.driveId;
+  const rootParentPath = root.parentReference?.path;
+  const itemParentPath = item.parentReference?.path;
+  if (!driveId || !itemDriveId || driveId !== itemDriveId || !rootParentPath || !itemParentPath) return null;
+  const rootAbsolutePath = `${rootParentPath}/${root.name}`;
+  if (item.id === root.id) return "";
+  if (itemParentPath !== rootAbsolutePath && !itemParentPath.startsWith(`${rootAbsolutePath}/`)) return null;
+  const relativeParent = itemParentPath.slice(rootAbsolutePath.length).replace(/^\/+/, "");
+  return strictRelativePath(relativeParent ? `${relativeParent}/${item.name}` : item.name);
+}
+
+async function verifyItemForReconciliation(context: HotfixContext, itemId: string): Promise<VerifiedItem> {
+  const root = await resolveConfiguredRoot(context.env, context.userId);
+  const item = await graphFetch<GraphDriveItem>(
+    context.env,
+    context.userId,
+    `/me/drive/items/${encodeURIComponent(itemId)}?$select=${RECONCILIATION_ITEM_SELECT}`,
+  );
+  if (item.remoteItem || item.deleted || !item.parentReference?.driveId) {
+    throw new ConnectorError("outside_root", "Shared, remote, deleted, or ambiguous items are not allowed.");
+  }
+  const relativePath = relativePathFromParentReference(root, item);
+  if (relativePath === null) {
+    return verifyItemInsideRoot(context.env, context.userId, itemId);
+  }
+  return {
+    item,
+    root,
+    relativePath,
+    ancestorIds: item.id === root.id ? [root.id] : [item.id, root.id],
+    driveId: item.parentReference.driveId,
+  };
 }
 
 async function verifySnapshotHash(context: HotfixContext, action: PlanAction, itemId: string, itemSize: number, eTag?: string | null): Promise<void> {
@@ -85,7 +131,7 @@ async function reconcileOneDownstreamRename(
 
     let live;
     try {
-      live = await verifyItemInsideRoot(context.env, context.userId, action.sourceItemId);
+      live = await verifyItemForReconciliation(context, action.sourceItemId);
     } catch (error) {
       if (error instanceof ConnectorError && error.code === "item_not_found") continue;
       throw error;
