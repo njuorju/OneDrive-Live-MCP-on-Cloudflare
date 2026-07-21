@@ -47,6 +47,13 @@ async function getPlan(context: HotfixContext, planId: string): Promise<Integrit
   return plan;
 }
 
+export function unresolvedActions(plan: IntegrityPlan): PlanAction[] {
+  const completed = new Set(plan.completedActions);
+  return [...plan.actions]
+    .filter((action) => !completed.has(action.actionId))
+    .sort((a, b) => Number(a.operationOrder ?? 0) - Number(b.operationOrder ?? 0));
+}
+
 export function selectBlockedMove(plan: IntegrityPlan): PlanAction | null {
   const completed = new Set(plan.completedActions);
   const failed = new Set(plan.failedActions.map((entry) => entry.actionId));
@@ -140,14 +147,36 @@ async function reconcileBlockedMove(
   plan.failedActions = plan.failedActions.filter((entry) => entry.actionId !== action.actionId);
   plan.results = upsertResult(plan.results, audit);
   refreshDependencySkips(plan);
-  const remaining = remainingActions(plan.actions, plan.completedActions, plan.failedActions, plan.skippedDependencyActions);
-  plan.nextAction = remaining[0]?.actionId ?? null;
-  plan.status = remaining.length > 0 ? "running" : plan.status;
-  plan.executionStatus = remaining.length > 0 ? "running" : plan.executionStatus;
+  const ready = remainingActions(plan.actions, plan.completedActions, plan.failedActions, plan.skippedDependencyActions);
+  plan.nextAction = ready[0]?.actionId ?? null;
+  plan.status = unresolvedActions(plan).length > 0 ? "running" : plan.status;
+  plan.executionStatus = unresolvedActions(plan).length > 0 ? "running" : plan.executionStatus;
   await context.storage.put(planKey(plan.planId), plan);
   await context.storage.put(operationKey(plan.planId, action.actionId), { state: "completed", ...audit });
   await context.storage.put(reconciliationKey(plan.planId, action.actionId), audit);
   return { actionId: action.actionId };
+}
+
+function executionStatusResult(plan: IntegrityPlan, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  refreshDependencySkips(plan);
+  const unresolved = unresolvedActions(plan);
+  const ready = remainingActions(plan.actions, plan.completedActions, plan.failedActions, plan.skippedDependencyActions);
+  return {
+    planId: plan.planId,
+    status: plan.status,
+    executionStatus: plan.executionStatus,
+    completedThisInvocation: [],
+    reconciledThisInvocation: [],
+    failedThisInvocation: [],
+    remainingActions: unresolved.length,
+    nextAction: unresolved[0]?.actionId ?? null,
+    nextReadyAction: ready[0]?.actionId ?? null,
+    resumeRequired: unresolved.length > 0,
+    auditPending: plan.auditStatus === "pending" || plan.auditStatus === "running",
+    mutationPerformed: false,
+    reconciliationOnlyThisInvocation: true,
+    ...extra,
+  };
 }
 
 export async function executeIntegrityPlanWithBlockedMoveReconciliation(
@@ -160,42 +189,11 @@ export async function executeIntegrityPlanWithBlockedMoveReconciliation(
   const outcome = await reconcileBlockedMove(context, plan);
   if (outcome.actionId) {
     const updated = await getPlan(context, token.planId);
-    refreshDependencySkips(updated);
-    const remaining = remainingActions(updated.actions, updated.completedActions, updated.failedActions, updated.skippedDependencyActions);
-    await context.storage.put(planKey(updated.planId), updated);
-    return {
-      planId: updated.planId,
-      status: updated.status,
-      executionStatus: updated.executionStatus,
-      completedThisInvocation: [],
-      reconciledThisInvocation: [outcome.actionId],
-      failedThisInvocation: [],
-      remainingActions: remaining.length,
-      nextAction: updated.nextAction ?? remaining[0]?.actionId ?? null,
-      resumeRequired: remaining.length > 0,
-      auditPending: updated.auditStatus === "pending" || updated.auditStatus === "running",
-      mutationPerformed: false,
-      reconciliationOnlyThisInvocation: true,
-    };
+    const result = executionStatusResult(updated);
+    result.reconciledThisInvocation = [outcome.actionId];
+    return result;
   }
-  if (outcome.discrepancy) {
-    const remaining = remainingActions(plan.actions, plan.completedActions, plan.failedActions, plan.skippedDependencyActions);
-    return {
-      planId: plan.planId,
-      status: plan.status,
-      executionStatus: plan.executionStatus,
-      completedThisInvocation: [],
-      reconciledThisInvocation: [],
-      failedThisInvocation: [],
-      remainingActions: remaining.length,
-      nextAction: plan.nextAction ?? remaining[0]?.actionId ?? null,
-      resumeRequired: remaining.length > 0,
-      auditPending: plan.auditStatus === "pending" || plan.auditStatus === "running",
-      mutationPerformed: false,
-      reconciliationOnlyThisInvocation: true,
-      discrepancy: outcome.discrepancy,
-    };
-  }
+  if (outcome.discrepancy) return executionStatusResult(plan, { discrepancy: outcome.discrepancy });
   return executeIntegrityPlanWithDownstreamReconciliation(context, input);
 }
 
@@ -205,6 +203,7 @@ export function registerBlockedMoveReconciliationTool(server: McpServer, context
   target.sendToolListChanged = () => undefined;
   try {
     delete target._registeredTools?.execute_integrity_plan;
+    delete target._registeredTools?.get_integrity_plan_status;
     server.registerTool("execute_integrity_plan", {
       title: "Resume reconciled integrity plan",
       description: "Reconcile one failed or dependency-blocked move by exact configured-root destination and stable item ID before any mutation path.",
@@ -213,6 +212,35 @@ export function registerBlockedMoveReconciliationTool(server: McpServer, context
     }, async (input) => {
       try { return textResult(await executeIntegrityPlanWithBlockedMoveReconciliation(contextFactory(), input)); }
       catch (error) { return errorResult(error); }
+    });
+    server.registerTool("get_integrity_plan_status", {
+      title: "Get reconciled integrity plan status",
+      description: "Return all unresolved actions, including failed and dependency-blocked discrepancies, plus the next independently ready action and resumable audit state.",
+      inputSchema: { planId: z.string().uuid() },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    }, async ({ planId }) => {
+      try {
+        const plan = await getPlan(contextFactory(), planId);
+        refreshDependencySkips(plan);
+        const unresolved = unresolvedActions(plan);
+        const ready = remainingActions(plan.actions, plan.completedActions, plan.failedActions, plan.skippedDependencyActions);
+        return textResult({
+          planId,
+          planStatus: plan.status,
+          validationStatus: plan.validationStatus,
+          executionStatus: plan.executionStatus,
+          currentAction: plan.currentAction,
+          nextAction: unresolved[0]?.actionId ?? null,
+          nextReadyAction: ready[0]?.actionId ?? null,
+          resumeRequired: unresolved.length > 0,
+          remainingActions: unresolved.length,
+          completedActions: plan.completedActions,
+          failedActions: plan.failedActions,
+          skippedDependencyActions: plan.skippedDependencyActions,
+          auditStatus: plan.auditStatus ?? "not_requested",
+          finalFilesystemDiffReference: plan.finalFilesystemDiffReference,
+        });
+      } catch (error) { return errorResult(error); }
     });
   } finally {
     target.sendToolListChanged = originalSend;
