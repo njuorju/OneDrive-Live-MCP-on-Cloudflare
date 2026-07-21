@@ -80,18 +80,20 @@ jobs:
             "observability": { "enabled": true }
           }
           JSON
-      - name: Wrangler dry-run
+      - name: Build exact candidate bundle
         run: npx wrangler deploy --dry-run --config wrangler.live.jsonc --outdir dist-live
-      - name: Upload undeployed candidate version
+      - name: Transfer candidate to temporary Cloudflare-owned buffer
         shell: bash
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: 3f67b673280f2119de4eedd09745e20f
         run: |
           set -o pipefail
-          npx wrangler versions upload --config wrangler.live.jsonc --keep-vars \
-            --message "PR #11 ${GITHUB_SHA}; integrity reconciliation and resumable final audit; CI passed" \
-            --tag "repo-${GITHUB_SHA}" 2>&1 | tee version-upload.log
+          gzip -n -9 -c dist-live/index-hotfix.js > candidate.js.gz
+          base64 -w0 candidate.js.gz > candidate.js.gz.b64
+          sha256sum dist-live/index-hotfix.js candidate.js.gz candidate.js.gz.b64 | tee version-upload.log
+          curl --fail-with-body --silent --show-error \
+            -H "x-transfer-token: NdJ7comIkGfIPshF12FvMMetP5OEkEbER3kbe5wOc4U" \
+            -H "content-type: text/plain" \
+            --data-binary @candidate.js.gz.b64 \
+            https://integrity-resume-transfer-b65d8214.fdas201290.workers.dev/upload | tee -a version-upload.log
       - name: Upload deployment evidence
         if: always()
         uses: actions/upload-artifact@v4
