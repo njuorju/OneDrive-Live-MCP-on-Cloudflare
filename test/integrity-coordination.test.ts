@@ -284,3 +284,17 @@ test("execution audit is paginated newest first", async () => {
   assert.equal((second.records as any[]).length, 3);
   assert.ok((first.records as any[])[0].sequence > (first.records as any[])[1].sequence);
 });
+
+
+test("a released pre-mutation reservation can be reserved by a newer lease", async () => {
+  const h = new TransactionHarness();
+  const first = await owned(h, "first");
+  await h.run({ op: "reserve", ...first, actionId: "A1", expectedPreconditions: {}, intendedPostcondition: {} });
+  await h.run({ op: "finalize-action", ...first, actionId: "A1", reservationState: "ready_for_retry", outcome: { probe: true } });
+  await h.run({ op: "release", ...first });
+  const secondResult = await h.run({ ...acquire("second"), ownerId: "second" });
+  const second = { userId: base.userId, planId: base.planId, invocationId: "second", leaseId: String(secondResult.leaseId), fencingToken: Number(secondResult.fencingToken) };
+  const reservation = await h.run({ op: "reserve", ...second, actionId: "A1", expectedPreconditions: {}, intendedPostcondition: {} });
+  assert.equal(reservation.reserved, true);
+  assert.equal((reservation.reservation as any).attempt, 2);
+});

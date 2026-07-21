@@ -363,6 +363,16 @@ async function probeLease(context: HotfixContext, input: LeaseProbeInput): Promi
   }
   if (mode === "acquire_and_release") {
     if (input.simulateMutationInProgress) throw new ConnectorError("probe_inflight_cannot_release", "A simulated in-flight action must be recovered after lease expiry rather than released.");
+    if (reservation && input.actionId) {
+      await callIntegrityCoordination(context.env, context.userId, {
+        op: "finalize-action",
+        ...lease,
+        actionId: input.actionId,
+        reservationState: "ready_for_retry",
+        outcome: { acceptanceProbeReleasedBeforeMutation: true },
+      });
+      reservation = { ...reservation, state: "ready_for_retry" };
+    }
     await releaseLease(context, acquired, { acceptanceProbe: true });
   }
   return { planId: input.planId, probeMode: mode, ...leaseResponseFields(acquired), invocationId: acquired.invocationId, reservation, leaseReleased: mode === "acquire_and_release", noGraphMutationPerformed: true };
@@ -429,7 +439,10 @@ async function getJobWithCoordination(context: HotfixContext, schedule: Schedule
 export async function continueSnapshotWithLease(context: HotfixContext, schedule: ScheduleSnapshot, jobId: string): Promise<Record<string, unknown>> {
   const invocationId = crypto.randomUUID();
   const acquired = await callIntegrityCoordination(context.env, context.userId, { op: "job-acquire", jobId, invocationId, ownerId: "scheduled_snapshot_continuation", ownerType: "internal_job", workerVersion: workerVersion(context.env) });
-  if (acquired.acquired !== true) return { jobId, alreadyExecuting: true, safeToRetry: true, ...acquired };
+  if (acquired.acquired !== true) {
+    await schedule(jobId, context.userId, Math.min(60, Math.max(2, Number(acquired.retryAfterSeconds ?? 5))));
+    return { jobId, alreadyExecuting: true, safeToRetry: true, retryScheduled: true, ...acquired };
+  }
   const lease: JobLeaseReference = { jobId, invocationId, leaseId: String(acquired.leaseId), fencingToken: Number(acquired.fencingToken) };
   try {
     await continueSourceSnapshotJob({ ...context, storage: createJobFencedStorage(context.storage, context.env, context.userId, lease) }, schedule, jobId);
