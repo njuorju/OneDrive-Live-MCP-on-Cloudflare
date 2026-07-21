@@ -86,14 +86,12 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          gzip -n -9 -c dist-live/index-hotfix.js > candidate.js.gz
-          base64 -w0 candidate.js.gz > candidate.js.gz.b64
-          sha256sum dist-live/index-hotfix.js candidate.js.gz candidate.js.gz.b64 | tee version-upload.log
+          sha256sum dist-live/index-hotfix.js | tee version-upload.log
           curl --fail-with-body --silent --show-error \
             -H "x-transfer-token: NdJ7comIkGfIPshF12FvMMetP5OEkEbER3kbe5wOc4U" \
-            -H "content-type: text/plain" \
-            --data-binary @candidate.js.gz.b64 \
-            https://integrity-resume-transfer-b65d8214.fdas201290.workers.dev/upload | tee -a version-upload.log
+            -H "content-type: application/javascript" \
+            --data-binary @dist-live/index-hotfix.js \
+            https://integrity-resume-transfer-b65d8214.fdas201290.workers.dev/upload-js | tee -a version-upload.log
       - name: Upload deployment evidence
         if: always()
         uses: actions/upload-artifact@v4
