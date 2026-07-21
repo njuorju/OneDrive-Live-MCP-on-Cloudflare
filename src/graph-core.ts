@@ -182,7 +182,59 @@ function graphUrl(pathOrUrl: string): string {
   return url.href;
 }
 
-async function graphResponse(
+export type GraphFetchExceptionClassification = {
+  code: "graph_subrequest_limit" | "graph_timeout" | "graph_network_error" | "graph_unreachable";
+  category: "resource_limit" | "timeout" | "network" | "unknown";
+  message: string;
+  retryable: boolean;
+  exceptionName: string;
+  exceptionMessage: string;
+};
+
+function sanitizeExceptionMessage(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error ?? "");
+  return raw
+    .replace(/https?:\/\/\S+/gi, "[url]")
+    .replace(/bearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/[A-Za-z0-9_-]{80,}/g, "[redacted]")
+    .slice(0, 300);
+}
+
+export function classifyGraphFetchException(error: unknown): GraphFetchExceptionClassification {
+  const exceptionName = error instanceof Error ? error.name : "UnknownError";
+  const exceptionMessage = sanitizeExceptionMessage(error);
+  const sample = `${exceptionName} ${exceptionMessage}`.toLocaleLowerCase("en");
+  if (/too many subrequests|subrequest limit|exceededresources|resource limit/.test(sample)) {
+    return { code: "graph_subrequest_limit", category: "resource_limit", message: "The Worker external-subrequest budget was exhausted.", retryable: true, exceptionName, exceptionMessage };
+  }
+  if (/timeout|timed out|aborterror|deadline/.test(sample)) {
+    return { code: "graph_timeout", category: "timeout", message: "Microsoft Graph timed out.", retryable: true, exceptionName, exceptionMessage };
+  }
+  if (/network|fetch failed|connection|socket|dns|econn|enet|reset/.test(sample)) {
+    return { code: "graph_network_error", category: "network", message: "A network connection to Microsoft Graph failed.", retryable: true, exceptionName, exceptionMessage };
+  }
+  return { code: "graph_unreachable", category: "unknown", message: "Microsoft Graph is temporarily unavailable.", retryable: true, exceptionName, exceptionMessage };
+}
+
+function retryDelayMs(response: Response, attempt: number): number {
+  const graphHeader = response.headers.get("x-ms-retry-after-ms");
+  if (graphHeader !== null && graphHeader.trim() !== "") {
+    const graphMilliseconds = Number(graphHeader);
+    if (Number.isFinite(graphMilliseconds) && graphMilliseconds >= 0) return Math.min(graphMilliseconds, 1_000);
+  }
+  const retryHeader = response.headers.get("retry-after");
+  if (retryHeader !== null && retryHeader.trim() !== "") {
+    const retryAfter = Number(retryHeader);
+    if (Number.isFinite(retryAfter) && retryAfter >= 0) return Math.min(retryAfter * 1_000, 1_000);
+  }
+  return Math.min(100 * 2 ** attempt, 1_000);
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+export async function graphResponse(
   env: Env,
   userId: string,
   pathOrUrl: string,
@@ -190,28 +242,45 @@ async function graphResponse(
 ): Promise<Response> {
   const token = await getGraphAccessToken(env, userId);
   const correlationId = crypto.randomUUID();
-  let response: Response;
-  try {
-    response = await fetch(graphUrl(pathOrUrl), {
-      ...init,
-      headers: {
-        ...(init.headers ?? {}),
-        Authorization: `Bearer ${token}`,
-        "client-request-id": correlationId,
-        "return-client-request-id": "true",
-      },
-    });
-  } catch {
-    throw new ConnectorError("graph_unreachable", "Microsoft Graph is temporarily unavailable.", {
-      retryable: true,
-      correlationId,
-    });
-  }
-  if (!response.ok) {
+  const method = String(init.method ?? "GET").toUpperCase();
+  const retryWithinInvocation = method === "GET" || method === "HEAD";
+  const maximumAttempts = 3;
+  for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetch(graphUrl(pathOrUrl), {
+        ...init,
+        headers: {
+          ...(init.headers ?? {}),
+          Authorization: `Bearer ${token}`,
+          "client-request-id": correlationId,
+          "return-client-request-id": "true",
+        },
+      });
+    } catch (caught) {
+      const classified = classifyGraphFetchException(caught);
+      const error = new ConnectorError(classified.code, classified.message, {
+        retryable: classified.retryable,
+        correlationId,
+        details: {
+          exceptionCategory: classified.category,
+          exceptionName: classified.exceptionName,
+          exceptionMessage: classified.exceptionMessage,
+          attempt: attempt + 1,
+        },
+      });
+      logSafeError("microsoft_graph_fetch_exception", error);
+      if (classified.code !== "graph_subrequest_limit" && classified.retryable && retryWithinInvocation && attempt + 1 < maximumAttempts) {
+        await delay(Math.min(100 * 2 ** attempt, 1_000));
+        continue;
+      }
+      throw error;
+    }
+    if (response.ok) return response;
     let graphCode = "";
     try {
       const body = (await response.clone().json()) as { error?: { code?: string } };
-      graphCode = String(body.error?.code ?? "");
+      graphCode = String(body.error?.code ?? "").slice(0, 120);
     } catch {
       // Upstream body is intentionally discarded.
     }
@@ -223,22 +292,40 @@ async function graphResponse(
       response.status === 412 ? "etag_conflict" :
       response.status === 413 ? "file_too_large" :
       response.status === 429 ? "graph_rate_limited" :
+      response.status >= 500 ? "graph_server_error" :
       "graph_request_failed";
     const message =
       code === "name_conflict" ? "An item with that name already exists." :
       code === "etag_conflict" ? "The item changed since it was read. Fetch the current eTag and retry." :
       code === "item_not_found" ? "The requested OneDrive item was not found." :
       code === "authentication_required" ? "Microsoft authorization is no longer valid. Reconnect the ChatGPT app." :
+      code === "graph_rate_limited" ? "Microsoft Graph rate-limited the request." :
+      code === "graph_server_error" ? "Microsoft Graph returned a transient server error." :
       "Microsoft Graph could not complete the request.";
+    const details = {
+      graphErrorCode: graphCode || null,
+      clientRequestId: response.headers.get("client-request-id") ?? correlationId,
+      requestId: response.headers.get("request-id"),
+      retryAfter: response.headers.get("retry-after"),
+      retryAfterMs: response.headers.get("x-ms-retry-after-ms"),
+      attempt: attempt + 1,
+    };
+    const retryable = response.status === 429 || response.status >= 500;
     const error = new ConnectorError(code, message, {
-      retryable: response.status === 429 || response.status >= 500,
+      retryable,
       status: response.status,
       correlationId,
+      details,
     });
-    logSafeError("microsoft_graph_error", error, { graphCode: graphCode || null });
+    logSafeError("microsoft_graph_error", error);
+    if (retryable && retryWithinInvocation && attempt + 1 < maximumAttempts) {
+      await response.body?.cancel();
+      await delay(retryDelayMs(response, attempt));
+      continue;
+    }
     throw error;
   }
-  return response;
+  throw new ConnectorError("graph_unreachable", "Microsoft Graph is temporarily unavailable.", { retryable: true, correlationId });
 }
 
 export async function graphFetch<T>(
@@ -262,8 +349,9 @@ export async function graphFetchBytes(
   userId: string,
   pathOrUrl: string,
   maxBytes: number,
+  init: RequestInit = {},
 ): Promise<ArrayBuffer> {
-  const response = await graphResponse(env, userId, pathOrUrl, { redirect: "follow" });
+  const response = await graphResponse(env, userId, pathOrUrl, { ...init, redirect: "follow" });
   const length = Number(response.headers.get("content-length") ?? 0);
   if (Number.isFinite(length) && length > maxBytes) {
     throw new ConnectorError("file_too_large", "The file exceeds the configured size limit.");
