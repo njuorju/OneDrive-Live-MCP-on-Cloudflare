@@ -1,0 +1,93 @@
+name: Apply integrity resume repair
+
+on:
+  push:
+    branches:
+      - work/integrity-resume-reconciliation
+    paths:
+      - .github/workflows/apply-integrity-resume-repair.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: work/integrity-resume-reconciliation
+      - name: Patch registration, dependency refresh, and audit step bound
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          index = Path('src/index-hotfix.ts')
+          text = index.read_text()
+          anchor = 'import { createIntegratedStateStorage } from "./version20-hotfix";\n'
+          addition = 'import { registerIntegrityResumeRepairTools } from "./integrity-resume-repair";\n'
+          if addition not in text:
+              if anchor not in text:
+                  raise SystemExit('index import anchor missing')
+              text = text.replace(anchor, anchor + addition)
+          call_anchor = '    registerSourceSnapshotRepairTools(replacementServer, contextFactory, schedule);\n'
+          call = '    registerIntegrityResumeRepairTools(replacementServer, contextFactory, schedule);\n'
+          if call not in text:
+              if call_anchor not in text:
+                  raise SystemExit('registration anchor missing')
+              text = text.replace(call_anchor, call_anchor + call)
+          index.write_text(text)
+
+          execution = Path('src/integrity-execution.ts')
+          text = execution.read_text()
+          pattern = re.compile(r'export function advanceDependencySkips<[\s\S]*?\n}\n\nexport function remainingActions', re.M)
+          replacement = '''export function advanceDependencySkips<T extends {
+            actions: ProgressAction[];
+            completedActions: string[];
+            failedActions: ProgressFailure[];
+            skippedDependencyActions: string[];
+          }>(plan: T): string[] {
+            const completed = new Set(plan.completedActions);
+            const failed = new Set(plan.failedActions.map((entry) => entry.actionId));
+            const previous = new Set(plan.skippedDependencyActions);
+            const skipped = new Set<string>();
+            let changed = true;
+            while (changed) {
+              changed = false;
+              for (const action of orderedActions(plan.actions)) {
+                if (completed.has(action.actionId) || failed.has(action.actionId) || skipped.has(action.actionId)) continue;
+                if ((action.dependencies ?? []).some((dependency) => failed.has(dependency) || skipped.has(dependency))) {
+                  skipped.add(action.actionId);
+                  changed = true;
+                }
+              }
+            }
+            plan.skippedDependencyActions = [...skipped];
+            return [...skipped].filter((actionId) => !previous.has(actionId));
+          }
+
+          export function remainingActions'''
+          updated, count = pattern.subn(replacement, text, count=1)
+          if count != 1:
+              raise SystemExit(f'dependency function replacement count={count}')
+          execution.write_text(updated)
+
+          runner = Path('src/snapshot-runner.ts')
+          text = runner.read_text()
+          old = 'const stepItems = Math.min(Math.max(Number.isFinite(configured) ? configured : 20, 1), 50);'
+          new = 'const stepItems = Math.min(Math.max(Number.isFinite(configured) ? configured : 20, 1), 20);'
+          if old not in text and new not in text:
+              raise SystemExit('snapshot step bound anchor missing')
+          runner.write_text(text.replace(old, new))
+          PY
+      - name: Remove one-shot workflow and commit repair
+        shell: bash
+        run: |
+          rm .github/workflows/apply-integrity-resume-repair.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/index-hotfix.ts src/integrity-execution.ts src/snapshot-runner.ts .github/workflows/apply-integrity-resume-repair.yml
+          git commit -m "Wire resumable integrity reconciliation repair"
+          git push origin HEAD:work/integrity-resume-reconciliation
