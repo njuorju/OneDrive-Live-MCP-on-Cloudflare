@@ -328,6 +328,29 @@ async function shaForItem(context: IntegratedContext, itemId: string): Promise<{
   return { sha256: await sha256Bytes(buffer), byteSize: buffer.byteLength, eTag: verified.item.eTag ?? null, verified, buffer };
 }
 
+export async function shaForTraversedItem(
+  context: IntegratedContext,
+  verified: VerifiedItem,
+): Promise<{ sha256: string; byteSize: number; eTag: string | null; verified: VerifiedItem; buffer: ArrayBuffer }> {
+  const item = verified.item;
+  const rootDriveId = verified.root.parentReference?.driveId;
+  if (item.folder) throw new ConnectorError("folder_not_file", "The requested item is a folder, not a file.");
+  if (item.remoteItem || item.deleted || !item.parentReference?.driveId || !rootDriveId || item.parentReference.driveId !== verified.driveId || rootDriveId !== verified.driveId) {
+    throw new ConnectorError("outside_root", "The traversed item is no longer proven inside the configured root.");
+  }
+  const limit = INTEGRATED_LIMITS.fileBytesMax;
+  if ((item.size ?? 0) > limit) throw new ConnectorError("file_too_large", "The file exceeds the configured size limit.");
+  const headers = item.eTag ? { "If-Match": item.eTag } : undefined;
+  const buffer = await graphFetchBytes(
+    context.env,
+    context.userId,
+    `/me/drive/items/${encodeURIComponent(item.id)}/content`,
+    limit,
+    headers ? { headers } : {},
+  );
+  return { sha256: await sha256Bytes(buffer), byteSize: buffer.byteLength, eTag: item.eTag ?? null, verified, buffer };
+}
+
 async function readAllExtractedText(context: IntegratedContext, itemId: string): Promise<{ text: string; truncated: boolean; metadata: CompactItem }> {
   let start = 0;
   let text = "";
@@ -835,10 +858,21 @@ async function querySourceSnapshot(context: IntegratedContext, input: Record<str
   };
 }
 
-async function enumerateLive(context: IntegratedContext, scopePath: string, maximumItems: number = INTEGRATED_LIMITS.snapshotItemsMax, recursive = true): Promise<SnapshotRecord[]> {
+type EnumeratedLiveResult = {
+  records: SnapshotRecord[];
+  verifiedById: Map<string, VerifiedItem>;
+};
+
+async function enumerateLiveVerified(
+  context: IntegratedContext,
+  scopePath: string,
+  maximumItems: number = INTEGRATED_LIMITS.snapshotItemsMax,
+  recursive = true,
+): Promise<EnumeratedLiveResult> {
   const root = await resolveRelativeFolder(context.env, context.userId, scopePath);
   const queue: VerifiedItem[] = [root];
   const records: SnapshotRecord[] = [];
+  const verifiedById = new Map<string, VerifiedItem>();
   while (queue.length > 0 && records.length < maximumItems) {
     const folder = queue.shift();
     if (!folder) break;
@@ -861,12 +895,17 @@ async function enumerateLive(context: IntegratedContext, scopePath: string, maxi
           documentMetadata: null,
           error: null,
         });
+        verifiedById.set(child.item.id, child);
         if (child.item.folder && recursive) queue.push(child);
         if (records.length >= maximumItems) break;
       }
     } while (nextUrl && records.length < maximumItems);
   }
-  return records;
+  return { records, verifiedById };
+}
+
+async function enumerateLive(context: IntegratedContext, scopePath: string, maximumItems: number = INTEGRATED_LIMITS.snapshotItemsMax, recursive = true): Promise<SnapshotRecord[]> {
+  return (await enumerateLiveVerified(context, scopePath, maximumItems, recursive)).records;
 }
 
 export function snapshotRecordSizeChanged(
@@ -879,7 +918,8 @@ export function snapshotRecordSizeChanged(
 async function compareSnapshotToLive(context: IntegratedContext, snapshotId: string): Promise<Record<string, unknown>> {
   const meta = await getSnapshotMeta(context, snapshotId);
   const snapshot = await listSnapshotRecords(context, snapshotId);
-  const live = await enumerateLive(context, meta.scopePath, Math.max(meta.totalRecords + 1_000, INTEGRATED_LIMITS.snapshotItemsDefault));
+  const enumerated = await enumerateLiveVerified(context, meta.scopePath, Math.max(meta.totalRecords + 1_000, INTEGRATED_LIMITS.snapshotItemsDefault));
+  const live = enumerated.records;
   const snapshotById = new Map(snapshot.map((record) => [record.itemId, record]));
   const liveById = new Map(live.map((record) => [record.itemId, record]));
   const added = live.filter((record) => !snapshotById.has(record.itemId));
@@ -895,7 +935,9 @@ async function compareSnapshotToLive(context: IntegratedContext, snapshotId: str
     if (before.eTag !== after.eTag) changedETags.push({ itemId: before.itemId, path: after.relativePath, before: before.eTag, after: after.eTag });
     if (snapshotRecordSizeChanged(before, after)) changedSizes.push({ itemId: before.itemId, path: after.relativePath, before: before.byteSize, after: after.byteSize });
     if (before.sha256 && before.eTag !== after.eTag && after.type === "file") {
-      const currentHash = (await shaForItem(context, after.itemId)).sha256;
+      const traversed = enumerated.verifiedById.get(after.itemId);
+      if (!traversed) throw new ConnectorError("live_item_unverified", "The changed live item was not retained from the verified traversal.");
+      const currentHash = (await shaForTraversedItem(context, traversed)).sha256;
       if (currentHash !== before.sha256) changedSha256.push({ itemId: before.itemId, path: after.relativePath, before: before.sha256, after: currentHash });
     }
   }

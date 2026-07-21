@@ -349,8 +349,9 @@ export async function graphFetchBytes(
   userId: string,
   pathOrUrl: string,
   maxBytes: number,
+  init: RequestInit = {},
 ): Promise<ArrayBuffer> {
-  const response = await graphResponse(env, userId, pathOrUrl, { redirect: "follow" });
+  const response = await graphResponse(env, userId, pathOrUrl, { ...init, redirect: "follow" });
   const length = Number(response.headers.get("content-length") ?? 0);
   if (Number.isFinite(length) && length > maxBytes) {
     throw new ConnectorError("file_too_large", "The file exceeds the configured size limit.");

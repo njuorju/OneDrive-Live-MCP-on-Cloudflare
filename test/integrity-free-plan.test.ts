@@ -13,7 +13,7 @@ import {
   upsertResult,
 } from "../src/integrity-execution.js";
 import type { VerifiedItem } from "../src/graph-core.js";
-import { auditDuplicateHashGroups, reconstructAuditLiveRecords } from "../src/integrated-tools.js";
+import { auditDuplicateHashGroups, reconstructAuditLiveRecords, shaForTraversedItem } from "../src/integrated-tools.js";
 
 function item(id: string, name: string, parentId: string, eTag: string, folder = false) {
   return {
@@ -129,4 +129,38 @@ test("audit reconstruction avoids a second live traversal and reuses snapshot ha
   assert.equal(duplicates.totalFileCount, 2);
   assert.equal(duplicates.groups.length, 1);
   assert.deepEqual(duplicates.groups[0].members.map((record) => record.itemId).sort(), ["a", "b"]);
+});
+
+
+test("changed-file audit hashing reuses traversal proof and stays below 50", async () => {
+  const root = item("root", "Работа", "drive-root", '"root",1', true);
+  const key = "test-cookie-key-at-least-32-bytes-long";
+  const sealed = await sealJson(key, { accessToken: "token", refreshToken: "refresh", expiresAt: Date.now() + 3_600_000, scope: "Files.ReadWrite" });
+  const env = {
+    COOKIE_ENCRYPTION_KEY: key,
+    AUTH_STATE: {
+      idFromName: () => ({}) as DurableObjectId,
+      get: () => ({ fetch: async () => Response.json({ ok: true, found: true, expired: false, value: sealed }) }) as unknown as DurableObjectStub,
+    } as DurableObjectNamespace,
+  } as Env;
+  let externalFetches = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    externalFetches += 1;
+    assert.match(String(url), /\/content$/);
+    assert.equal(new Headers(init?.headers).get("If-Match"), '"file",2');
+    return new Response("0123456789", { status: 200, headers: { "content-length": "10" } });
+  }) as typeof fetch;
+  try {
+    for (let index = 0; index < 3; index += 1) {
+      const live = verified(item(`file-${index}`, `file-${index}.txt`, "parent", '"file",2'), root, `scope/file-${index}.txt`, [`file-${index}`, "parent", "root"]);
+      const result = await shaForTraversedItem({ env, userId: "user", storage: {} as any }, live);
+      assert.equal(result.byteSize, 10);
+      assert.equal(result.sha256.length, 64);
+    }
+    assert.equal(externalFetches, 3);
+    assert.ok(externalFetches < WORKERS_FREE_EXTERNAL_SUBREQUEST_LIMIT);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
