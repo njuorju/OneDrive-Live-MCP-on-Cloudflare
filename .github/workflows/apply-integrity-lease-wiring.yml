@@ -6,6 +6,7 @@ on:
     types: [opened, reopened, synchronize]
     paths:
       - scripts/apply-integrity-lease-wiring.mjs
+      - scripts/fix-integrity-hardening-tests.mjs
       - .github/workflows/apply-integrity-lease-wiring.yml
       - src/integrity-coordination.ts
       - src/integrity-lease-tools.ts
@@ -34,7 +35,9 @@ jobs:
           node-version: "22.18.0"
           cache: npm
       - name: Apply deterministic hardening
-        run: node scripts/apply-integrity-lease-wiring.mjs
+        run: |
+          node scripts/apply-integrity-lease-wiring.mjs
+          node scripts/fix-integrity-hardening-tests.mjs
       - name: Install pinned dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Validate hardening
