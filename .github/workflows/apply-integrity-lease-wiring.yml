@@ -38,9 +38,21 @@ jobs:
       - name: Install pinned dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Validate hardening
+        shell: bash
         run: |
-          npm run type-check
-          npm test
+          set -o pipefail
+          npm run type-check 2>&1 | tee lease-hardening-typecheck.log
+          npm test 2>&1 | tee lease-hardening-tests.log
+      - name: Upload hardening diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integrity-lease-hardening-diagnostics
+          path: |
+            lease-hardening-typecheck.log
+            lease-hardening-tests.log
+          if-no-files-found: ignore
+          retention-days: 1
       - name: Commit generated hardening
         run: |
           git config user.name "github-actions[bot]"
