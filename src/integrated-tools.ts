@@ -849,6 +849,13 @@ async function enumerateLive(context: IntegratedContext, scopePath: string, maxi
   return records;
 }
 
+export function snapshotRecordSizeChanged(
+  before: Pick<SnapshotRecord, "type" | "byteSize">,
+  after: Pick<SnapshotRecord, "type" | "byteSize">,
+): boolean {
+  return before.type === "file" && after.type === "file" && before.byteSize !== after.byteSize;
+}
+
 async function compareSnapshotToLive(context: IntegratedContext, snapshotId: string): Promise<Record<string, unknown>> {
   const meta = await getSnapshotMeta(context, snapshotId);
   const snapshot = await listSnapshotRecords(context, snapshotId);
@@ -866,7 +873,7 @@ async function compareSnapshotToLive(context: IntegratedContext, snapshotId: str
     if (!after) continue;
     if (before.relativePath !== after.relativePath || before.filename !== after.filename) movedOrRenamed.push({ itemId: before.itemId, before: before.relativePath, after: after.relativePath });
     if (before.eTag !== after.eTag) changedETags.push({ itemId: before.itemId, path: after.relativePath, before: before.eTag, after: after.eTag });
-    if (before.byteSize !== after.byteSize) changedSizes.push({ itemId: before.itemId, path: after.relativePath, before: before.byteSize, after: after.byteSize });
+    if (snapshotRecordSizeChanged(before, after)) changedSizes.push({ itemId: before.itemId, path: after.relativePath, before: before.byteSize, after: after.byteSize });
     if (before.sha256 && before.eTag !== after.eTag && after.type === "file") {
       const currentHash = (await shaForItem(context, after.itemId)).sha256;
       if (currentHash !== before.sha256) changedSha256.push({ itemId: before.itemId, path: after.relativePath, before: before.sha256, after: currentHash });
