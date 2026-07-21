@@ -47,7 +47,7 @@ test("does not accept an unrelated or undeclared move", () => {
   assert.equal(findDeclaredDownstreamMove({ actions: [rename, unrelated] } as any, rename), null);
 });
 
-test("derives a relative path only from the configured root on the same drive", () => {
+test("parent-reference helper accepts only the configured root on the same drive", () => {
   const root = {
     id: "root-id",
     name: "Работа",
@@ -65,13 +65,19 @@ test("derives a relative path only from the configured root on the same drive", 
   assert.equal(relativePathFromParentReference(root, { ...item, parentReference: { driveId: "drive", path: "/drive/root:/Outside" } }), null);
 });
 
-test("downstream reconciliation verifies stable identity, root path, destination, filename and hash before success", () => {
+test("downstream reconciliation resolves the exact declared root path and requires stable ID equality", () => {
   assert.match(source, /resolveConfiguredRoot/);
-  assert.match(source, /relativePathFromParentReference/);
-  assert.match(source, /verifyItemInsideRoot/);
-  assert.match(source, /live\.item\.name !== action\.proposedFilename/);
-  assert.match(source, /liveParent !== expectedParent/);
+  assert.match(source, /encodeGraphPath/);
+  assert.match(source, /configuredRootPath/);
+  assert.match(source, /downstreamMove\.destinationPath/);
+  assert.match(source, /item\.id !== action\.sourceItemId/);
+  assert.match(source, /identity_conflict/);
+  assert.doesNotMatch(source, /return verifyItemInsideRoot/);
+});
+
+test("downstream reconciliation verifies hash before durable success and performs no mutation", () => {
   assert.match(source, /verifySnapshotHash/);
+  assert.match(source, /snapshotSha256/);
   assert.match(source, /mutationPerformed: false/);
 });
 
