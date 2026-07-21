@@ -1,3 +1,4 @@
+# One-shot workflow; remove after the validated repair commit lands.
 name: Patch audit Free-plan budget
 
 on:
