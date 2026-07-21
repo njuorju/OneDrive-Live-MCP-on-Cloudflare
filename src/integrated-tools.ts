@@ -1947,6 +1947,60 @@ export async function executeIntegrityPlan(context: IntegratedContext, input: Re
   }
 }
 
+export function reconstructAuditLiveRecords(snapshot: SnapshotRecord[], comparison: Record<string, unknown>): SnapshotRecord[] {
+  const removedIds = new Set(((comparison.removedItems ?? []) as SnapshotRecord[]).map((record) => record.itemId));
+  const movedPaths = new Map(((comparison.movedOrRenamedItems ?? []) as Array<{ itemId: string; after: string }>).map((entry) => [entry.itemId, entry.after]));
+  const changedETags = new Map(((comparison.changedETags ?? []) as Array<{ itemId: string; after: string | null }>).map((entry) => [entry.itemId, entry.after]));
+  const changedSizes = new Map(((comparison.changedSizes ?? []) as Array<{ itemId: string; after: number | null }>).map((entry) => [entry.itemId, entry.after]));
+  const records = snapshot.filter((record) => !removedIds.has(record.itemId)).map((record) => {
+    const relativePath = movedPaths.get(record.itemId) ?? record.relativePath;
+    return {
+      ...record,
+      relativePath,
+      filename: relativePath.split("/").pop() ?? record.filename,
+      eTag: changedETags.has(record.itemId) ? changedETags.get(record.itemId) ?? null : record.eTag,
+      byteSize: changedSizes.has(record.itemId) ? changedSizes.get(record.itemId) ?? null : record.byteSize,
+    };
+  });
+  const seen = new Set(records.map((record) => record.itemId));
+  for (const added of (comparison.addedItems ?? []) as SnapshotRecord[]) {
+    if (!seen.has(added.itemId)) {
+      records.push(added);
+      seen.add(added.itemId);
+    }
+  }
+  const folderIdByPath = new Map(records.filter((record) => record.type === "folder").map((record) => [record.relativePath, record.itemId]));
+  return records.map((record) => {
+    const parentPath = record.relativePath.split("/").slice(0, -1).join("/");
+    return { ...record, parentItemId: folderIdByPath.get(parentPath) ?? record.parentItemId };
+  });
+}
+
+export function auditDuplicateHashGroups(
+  snapshot: SnapshotRecord[],
+  live: SnapshotRecord[],
+  comparison: Record<string, unknown>,
+): { groups: Array<{ hash: string; members: SnapshotRecord[] }>; knownHashCount: number; totalFileCount: number } {
+  const snapshotById = new Map(snapshot.map((record) => [record.itemId, record]));
+  const changedHashes = new Map(((comparison.changedSha256 ?? []) as Array<{ itemId: string; after: string }>).map((entry) => [entry.itemId, entry.after]));
+  const byHash = new Map<string, SnapshotRecord[]>();
+  let knownHashCount = 0;
+  const files = live.filter((record) => record.type === "file");
+  for (const record of files) {
+    const hash = changedHashes.get(record.itemId) ?? snapshotById.get(record.itemId)?.sha256 ?? record.sha256;
+    if (!hash) continue;
+    knownHashCount += 1;
+    const group = byHash.get(hash) ?? [];
+    group.push(record);
+    byHash.set(hash, group);
+  }
+  return {
+    groups: [...byHash.entries()].filter(([, members]) => members.length > 1).map(([hash, members]) => ({ hash, members })),
+    knownHashCount,
+    totalFileCount: files.length,
+  };
+}
+
 async function diffScopeBeforeAfter(context: IntegratedContext, planId: string): Promise<Record<string, unknown>> {
   const plan = await getPlan(context, planId);
   const comparison = await compareSnapshotToLive(context, plan.snapshotId);
@@ -1957,29 +2011,24 @@ async function diffScopeBeforeAfter(context: IntegratedContext, planId: string):
     const after = record.after as CompactItem | undefined;
     return (before && !scopeContains(plan.scopePath, before.relativePath)) || (after && !scopeContains(plan.scopePath, after.relativePath));
   });
-  const live = await enumerateLive(context, plan.scopePath, INTEGRATED_LIMITS.snapshotItemsMax);
+  const snapshotRecords = await listSnapshotRecords(context, plan.snapshotId);
+  const live = reconstructAuditLiveRecords(snapshotRecords, comparison);
   const parentCounts = new Map<string, number>();
   for (const record of live) if (record.parentItemId) parentCounts.set(record.parentItemId, (parentCounts.get(record.parentItemId) ?? 0) + 1);
-  const duplicateHashes = new Map<string, SnapshotRecord[]>();
-  for (const record of live.filter((entry) => entry.type === "file")) {
-    try {
-      const hash = (await shaForItem(context, record.itemId)).sha256;
-      const group = duplicateHashes.get(hash) ?? [];
-      group.push(record);
-      duplicateHashes.set(hash, group);
-    } catch { /* individual read errors remain isolated */ }
-  }
+  const duplicateHashEvidence = auditDuplicateHashGroups(snapshotRecords, live, comparison);
   const classification = classifyAdministrative(live, ADMIN_DEFAULT_PATTERNS, ["_Catalogue"]);
+  const removedItems = comparison.removedItems as SnapshotRecord[];
+  const changedETags = comparison.changedETags as Array<Record<string, unknown>>;
   return {
     planId,
     scopePath: plan.scopePath,
     expectedChanges: plan.actions.filter((action) => !["KEEP", "METADATA_ONLY", "CATALOGUE_ONLY"].includes(action.action)),
     unexpectedChanges: {
       addedItems: comparison.addedItems,
-      removedItems: (comparison.removedItems as SnapshotRecord[]).filter((record) => !plan.actions.some((action) => action.sourceItemId === record.itemId && actionIsDestructive(action))),
-      changedETags: (comparison.changedETags as Array<Record<string, unknown>>).filter((change) => !plan.actions.some((action) => action.sourceItemId === change.itemId)),
+      removedItems: removedItems.filter((record) => !plan.actions.some((action) => action.sourceItemId === record.itemId && actionIsDestructive(action))),
+      changedETags: changedETags.filter((change) => !plan.actions.some((action) => action.sourceItemId === change.itemId)),
     },
-    unchangedItems: (await listSnapshotRecords(context, plan.snapshotId)).length - Number((comparison.removedItems as unknown[]).length) - Number((comparison.changedETags as unknown[]).length),
+    unchangedItems: snapshotRecords.length - removedItems.length - changedETags.length,
     additions: comparison.addedItems,
     removals: comparison.removedItems,
     renamesAndMoves: comparison.movedOrRenamedItems,
@@ -1989,13 +2038,21 @@ async function diffScopeBeforeAfter(context: IntegratedContext, planId: string):
     administrativeFiles: classification.administrative,
     substantiveFiles: classification.substantive,
     emptyFolders: live.filter((record) => record.type === "folder" && !parentCounts.has(record.itemId)),
-    duplicateHashes: [...duplicateHashes.entries()].filter(([, members]) => members.length > 1).map(([hash, members]) => ({ hash, members })),
+    duplicateHashes: duplicateHashEvidence.groups,
+    duplicateHashCoverage: {
+      knownHashCount: duplicateHashEvidence.knownHashCount,
+      totalFileCount: duplicateHashEvidence.totalFileCount,
+      complete: duplicateHashEvidence.knownHashCount === duplicateHashEvidence.totalFileCount,
+      source: "snapshot_and_changed-file_comparison",
+    },
     changesOutsideScope: outsideScopeOperations,
     proof: {
       allMutationOperationsRecorded: plan.completedActions.every((actionId) => plan.results.some((result) => result.actionId === actionId)),
       outsideScopeOperationCount: outsideScopeOperations.length,
       rootAncestryRevalidatedPerOperation: true,
       operationLogCount: operationLogs.size,
+      liveEnumerationCount: 1,
+      secondLiveTraversalAvoided: true,
     },
   };
 }

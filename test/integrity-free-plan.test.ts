@@ -13,6 +13,7 @@ import {
   upsertResult,
 } from "../src/integrity-execution.js";
 import type { VerifiedItem } from "../src/graph-core.js";
+import { auditDuplicateHashGroups, reconstructAuditLiveRecords } from "../src/integrated-tools.js";
 
 function item(id: string, name: string, parentId: string, eTag: string, folder = false) {
   return {
@@ -108,4 +109,24 @@ test("failure and dependency-skip records are upserted rather than duplicated", 
   assert.equal(plan.failedActions.length, 1);
   assert.equal(plan.failedActions[0].message, "second");
   assert.deepEqual(plan.skippedDependencyActions, ["B"]);
+});
+
+
+test("audit reconstruction avoids a second live traversal and reuses snapshot hashes", () => {
+  const folderFrom = { itemId: "from", filename: "from", relativePath: "scope/from", type: "folder", parentItemId: "scope", sha256: null, eTag: '"from",1', byteSize: null } as any;
+  const folderTo = { itemId: "to", filename: "to", relativePath: "scope/to", type: "folder", parentItemId: "scope", sha256: null, eTag: '"to",1', byteSize: null } as any;
+  const first = { itemId: "a", filename: "a.txt", relativePath: "scope/from/a.txt", type: "file", parentItemId: "from", sha256: "same", eTag: '"a",1', byteSize: 10 } as any;
+  const second = { itemId: "b", filename: "b.txt", relativePath: "scope/from/b.txt", type: "file", parentItemId: "from", sha256: "same", eTag: '"b",1', byteSize: 10 } as any;
+  const snapshot = [folderFrom, folderTo, first, second];
+  const comparison = { addedItems: [], removedItems: [], changedSizes: [], changedSha256: [], movedOrRenamedItems: [{ itemId: "a", before: "scope/from/a.txt", after: "scope/to/a.txt" }], changedETags: [{ itemId: "a", before: '"a",1', after: '"a",2' }] };
+  const live = reconstructAuditLiveRecords(snapshot, comparison);
+  const moved = live.find((record) => record.itemId === "a")!;
+  assert.equal(moved.relativePath, "scope/to/a.txt");
+  assert.equal(moved.parentItemId, "to");
+  assert.equal(moved.eTag, '"a",2');
+  const duplicates = auditDuplicateHashGroups(snapshot, live, comparison);
+  assert.equal(duplicates.knownHashCount, 2);
+  assert.equal(duplicates.totalFileCount, 2);
+  assert.equal(duplicates.groups.length, 1);
+  assert.deepEqual(duplicates.groups[0].members.map((record) => record.itemId).sort(), ["a", "b"]);
 });
