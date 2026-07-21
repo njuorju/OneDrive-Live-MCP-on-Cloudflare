@@ -1,0 +1,55 @@
+name: Apply integrity Free-plan repair
+
+on:
+  push:
+    branches:
+      - work/integrity-plan-free-budget
+    paths:
+      - .repair/apply_integrity_free_plan.py
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: work/integrity-plan-free-budget
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
+          cache: npm
+      - name: Apply source-controlled repair
+        run: python .repair/apply_integrity_free_plan.py
+      - name: Install pinned dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+      - name: Typecheck
+        run: npm run type-check
+      - name: Full test suite
+        run: npm test
+      - name: Focused integrity-plan tests
+        run: npx tsx --test test/integrity-free-plan.test.ts test/graph-error-classification.test.ts
+      - name: Audit
+        run: npm audit --audit-level=high
+      - name: Wrangler dry-run
+        run: |
+          cp wrangler.jsonc wrangler.repair.jsonc
+          sed -i 's/REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER/CI_TEST_ROOT/g' wrangler.repair.jsonc
+          sed -i 's/REPLACE_WITH_KV_NAMESPACE_ID/00000000000000000000000000000000/g' wrangler.repair.jsonc
+          npx wrangler deploy --dry-run --config wrangler.repair.jsonc --outdir dist-repair
+          rm -f wrangler.repair.jsonc
+      - name: Commit validated repair
+        run: |
+          rm -f .repair/apply_integrity_free_plan.py .github/workflows/apply-integrity-free-plan-repair.yml
+          rmdir .repair 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Repair resumable integrity execution for Workers Free"
+          git push origin HEAD:work/integrity-plan-free-budget
