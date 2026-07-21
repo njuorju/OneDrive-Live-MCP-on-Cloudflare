@@ -10,18 +10,17 @@ on:
       - src/integrity-coordination.ts
       - src/integrity-lease-tools.ts
       - test/integrity-coordination.test.ts
-  push:
-    branches: [work/integrity-resume-reconciliation]
-    paths:
-      - scripts/apply-integrity-lease-wiring.mjs
-      - .github/workflows/apply-integrity-lease-wiring.yml
 
 permissions:
   contents: write
 
+concurrency:
+  group: integrity-lease-wiring-pr-11
+  cancel-in-progress: true
+
 jobs:
   apply:
-    if: github.event_name == 'push' || github.event.pull_request.head.ref == 'work/integrity-resume-reconciliation'
+    if: github.event.pull_request.head.ref == 'work/integrity-resume-reconciliation'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -47,5 +46,6 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/auth-state.ts src/index-hotfix.ts src/integrity-resume-repair.ts worker-configuration.d.ts wrangler.jsonc .github/workflows/upload-integrity-resume-candidate.yml
           git commit -m "Wire transactional integrity execution leases" || exit 0
-          git pull --rebase origin work/integrity-resume-reconciliation
+          git fetch origin work/integrity-resume-reconciliation
+          git rebase origin/work/integrity-resume-reconciliation
           git push origin HEAD:work/integrity-resume-reconciliation
