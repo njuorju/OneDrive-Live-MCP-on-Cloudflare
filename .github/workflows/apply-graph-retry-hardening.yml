@@ -83,10 +83,11 @@ jobs:
         run: npm audit --audit-level=high
       - name: Wrangler dry-run
         run: |
-          cp wrangler.jsonc /tmp/wrangler.retry.jsonc
-          sed -i 's/REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER/CI_TEST_ROOT/g' /tmp/wrangler.retry.jsonc
-          sed -i 's/REPLACE_WITH_KV_NAMESPACE_ID/00000000000000000000000000000000/g' /tmp/wrangler.retry.jsonc
-          npx wrangler deploy --dry-run --config /tmp/wrangler.retry.jsonc --outdir /tmp/dist-retry
+          cp wrangler.jsonc wrangler.retry.jsonc
+          sed -i 's/REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER/CI_TEST_ROOT/g' wrangler.retry.jsonc
+          sed -i 's/REPLACE_WITH_KV_NAMESPACE_ID/00000000000000000000000000000000/g' wrangler.retry.jsonc
+          npx wrangler deploy --dry-run --config wrangler.retry.jsonc --outdir /tmp/dist-retry
+          rm -f wrangler.retry.jsonc
       - name: Commit validated hardening
         run: |
           rm -f .github/workflows/apply-graph-retry-hardening.yml
