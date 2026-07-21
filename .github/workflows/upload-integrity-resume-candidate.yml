@@ -1,0 +1,102 @@
+name: Upload integrity resume candidate
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+    paths:
+      - .github/workflows/upload-integrity-resume-candidate.yml
+
+permissions:
+  contents: read
+
+jobs:
+  upload-candidate:
+    if: github.event.pull_request.head.ref == 'work/integrity-resume-reconciliation'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: work/integrity-resume-reconciliation
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
+          cache: npm
+      - name: Install pinned dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+      - name: Validate exact candidate
+        run: |
+          npm run type-check
+          npm test
+          npm audit --audit-level=high
+      - name: Generate exact live upload configuration
+        run: |
+          cat > wrangler.live.jsonc <<'JSON'
+          {
+            "$schema": "node_modules/wrangler/config-schema.json",
+            "name": "nikolay-onedrive-mcp",
+            "main": "src/index-hotfix.ts",
+            "compatibility_date": "2026-07-13",
+            "compatibility_flags": ["nodejs_compat"],
+            "keep_vars": true,
+            "build": { "command": "node scripts/prepare-pdfjs.mjs" },
+            "vars": {
+              "CONNECTOR_NAME": "OneDrive Live MCP",
+              "ONEDRIVE_ROOT": "Работа",
+              "OWNER_MICROSOFT_ID": "ecb0593363f23423",
+              "MAX_FILE_MB": "20",
+              "MAX_ORIGINAL_FILE_MB": "25",
+              "MAX_TEXT_WRITE_KB": "512",
+              "MAX_READ_CHARS": "50000",
+              "CACHE_TTL_SECONDS": "604800",
+              "MAX_IMAGE_INPUT_MB": "15",
+              "MAX_IMAGE_PIXELS": "40000000",
+              "MAX_IMAGE_DIMENSION": "8192",
+              "MAX_IMAGE_PAGES": "8",
+              "IMAGE_PROCESSING_TIMEOUT_MS": "15000"
+            },
+            "secrets": {
+              "required": ["COOKIE_ENCRYPTION_KEY", "MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET"]
+            },
+            "migrations": [
+              { "new_sqlite_classes": ["OneDriveMCP"], "tag": "v1" },
+              { "new_sqlite_classes": ["AuthState"], "tag": "v2" }
+            ],
+            "durable_objects": {
+              "bindings": [
+                { "class_name": "OneDriveMCP", "name": "MCP_OBJECT" },
+                { "class_name": "AuthState", "name": "AUTH_STATE" }
+              ]
+            },
+            "kv_namespaces": [
+              { "binding": "OAUTH_KV", "id": "a3ead543dad24b8596ab9193b10f1b9f" }
+            ],
+            "ai": { "binding": "AI" },
+            "images": { "binding": "IMAGES" },
+            "browser": { "binding": "BROWSER" },
+            "observability": { "enabled": true }
+          }
+          JSON
+      - name: Wrangler dry-run
+        run: npx wrangler deploy --dry-run --config wrangler.live.jsonc --outdir dist-live
+      - name: Upload undeployed candidate version
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 3f67b673280f2119de4eedd09745e20f
+        run: |
+          set -o pipefail
+          npx wrangler versions upload --config wrangler.live.jsonc --keep-vars \
+            --message "PR #11 ${GITHUB_SHA}; integrity reconciliation and resumable final audit; CI passed" \
+            --tag "repo-${GITHUB_SHA}" 2>&1 | tee version-upload.log
+      - name: Upload deployment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integrity-resume-candidate-upload
+          path: version-upload.log
+          if-no-files-found: ignore
+          retention-days: 1
