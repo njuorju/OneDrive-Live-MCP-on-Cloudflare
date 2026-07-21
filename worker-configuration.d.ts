@@ -21,4 +21,7 @@ interface Env {
   MAX_IMAGE_DIMENSION: string;
   MAX_IMAGE_PAGES: string;
   IMAGE_PROCESSING_TIMEOUT_MS: string;
+  INTEGRITY_LEASE_SECONDS?: string;
+  WORKER_DEPLOYMENT_ID?: string;
+  WORKER_VERSION?: string;
 }

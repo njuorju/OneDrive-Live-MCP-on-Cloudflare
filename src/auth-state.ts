@@ -7,6 +7,7 @@ import {
   type AuthStateOpResult,
   type StoredEnvelope,
 } from "./auth-store";
+import { processIntegrityCoordination, type CoordinationRequest } from "./integrity-coordination";
 
 type RenderCacheEntry = {
   bytes: ArrayBuffer;
@@ -41,6 +42,10 @@ export class AuthState extends DurableObject {
     }
     if (url.pathname === "/render-cache-delete") {
       return this.deleteRenderCache(request);
+    }
+
+    if (url.pathname === "/integrity-coordinate") {
+      return this.coordinateIntegrity(request);
     }
 
     if (url.pathname === "/ready") {
@@ -84,6 +89,22 @@ export class AuthState extends DurableObject {
           { ok: false, found: false, expired: false, stage: "not_found" },
           { status: 404 },
         );
+    }
+  }
+
+  private async coordinateIntegrity(request: Request): Promise<Response> {
+    let body: CoordinationRequest;
+    try {
+      body = await request.json() as CoordinationRequest;
+    } catch {
+      return Response.json({ ok: false, code: "coordination_invalid_json", message: "The integrity coordination request is invalid." }, { status: 400 });
+    }
+    try {
+      const result = await this.ctx.storage.transaction((transaction) => processIntegrityCoordination(transaction, body));
+      return Response.json({ ok: true, result });
+    } catch (error) {
+      const value = error as { code?: string; message?: string; retryable?: boolean };
+      return Response.json({ ok: false, code: value.code ?? "coordination_failed", message: value.message ?? "Integrity coordination failed.", retryable: Boolean(value.retryable) }, { status: value.retryable ? 503 : 409 });
     }
   }
 
