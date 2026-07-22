@@ -3,6 +3,7 @@ import test from "node:test";
 import { processIntegrityCoordination, type CoordinationRequest } from "../src/integrity-coordination";
 import { registerIntegrityLeaseTools } from "../src/integrity-lease-tools";
 
+// Non-mutating fixture for caller ownership, idempotency, contention, and generated MCP schema acceptance.
 class MemoryTransaction {
   readonly values = new Map<string, unknown>();
   async get<T>(key: string): Promise<T | undefined> { return this.values.get(key) as T | undefined; }
