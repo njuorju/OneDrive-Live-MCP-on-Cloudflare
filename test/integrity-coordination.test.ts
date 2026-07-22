@@ -62,12 +62,13 @@ test("manual execution collides safely with a scheduled owner", async () => {
   assert.equal(manual.activeOwnerType, "scheduled_task");
 });
 
-test("same invocation retries acquisition idempotently", async () => {
+test("same active invocation is an idempotent safe no-op", async () => {
   const h = new TransactionHarness();
   const first = await h.run(acquire("same"));
   const second = await h.run(acquire("same"));
-  assert.equal(second.acquired, true);
-  assert.equal(second.idempotentRetry, true);
+  assert.equal(second.acquired, false);
+  assert.equal(second.alreadyExecuting, true);
+  assert.equal(second.idempotentInvocation, true);
   assert.equal(second.leaseId, first.leaseId);
   assert.equal(second.fencingToken, first.fencingToken);
 });

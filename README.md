@@ -159,3 +159,10 @@ Tokens are encrypted in `AuthState`. Logs exclude tokens, authorization headers,
 ## License
 
 MIT
+
+
+## Scheduled integrity execution contract
+
+`execute_integrity_plan` requires `executionToken`, `ownerType` (`interactive`, `scheduled_task`, or `system_recovery`), a bounded `ownerId`, a caller-generated UUID `invocationId`, and a bounded `correlationId`. The supplied identifiers are persisted in the lease, invocation record, action reservation, audit records, structured logs, and response. Reusing an invocation ID with identical metadata is idempotent; conflicting reuse fails closed.
+
+`get_integrity_plan_execution_state` is the canonical read-only state tool. `get_integrity_plan_status` is a compatibility alias backed by the same implementation and response contract.
