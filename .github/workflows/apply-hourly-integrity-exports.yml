@@ -34,9 +34,29 @@ jobs:
           cache: npm
       - name: Apply deterministic exports
         run: node scripts/apply-hourly-integrity-exports.mjs
+      - name: Commit generated export wiring
+        id: generated
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/integrity-lease-tools.ts
+          if git diff --cached --quiet; then
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "Export bounded scheduler execution helpers"
+            git fetch origin work/hourly-integrity-scheduler
+            git rebase origin/work/hourly-integrity-scheduler
+            git push origin HEAD:work/hourly-integrity-scheduler
+            echo "committed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Stop after generated commit
+        if: steps.generated.outputs.committed == 'true'
+        run: echo "A synchronize event will validate the committed source."
       - name: Install pinned dependencies
+        if: steps.generated.outputs.committed != 'true'
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Validate scheduler
+        if: steps.generated.outputs.committed != 'true'
         run: |
           npm run type-check
           npm test
@@ -46,18 +66,10 @@ jobs:
           sed -i 's/REPLACE_WITH_KV_NAMESPACE_ID/00000000000000000000000000000000/g' wrangler.ci.jsonc
           npx wrangler deploy --dry-run --config wrangler.ci.jsonc --outdir dist-check
       - name: Upload validated Worker bundle
+        if: steps.generated.outputs.committed != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: hourly-integrity-worker-${{ github.sha }}
           path: dist-check
           if-no-files-found: error
           retention-days: 2
-      - name: Commit generated export wiring
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/integrity-lease-tools.ts
-          git commit -m "Export bounded scheduler execution helpers" || exit 0
-          git fetch origin work/hourly-integrity-scheduler
-          git rebase origin/work/hourly-integrity-scheduler
-          git push origin HEAD:work/hourly-integrity-scheduler
