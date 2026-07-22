@@ -1,17 +1,19 @@
 name: Apply scheduled execution contract repair v2
 
 on:
-  push:
-    branches: [work/scheduled-execution-schema]
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
     paths:
       - .github/workflows/apply-scheduled-execution-contract-v2.yml
+      - scripts/apply-scheduled-execution-contract.py
 
 permissions:
   contents: write
 
 jobs:
   repair:
-    if: github.actor != 'github-actions[bot]'
+    if: github.event.pull_request.head.ref == 'work/scheduled-execution-schema' && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
