@@ -1,0 +1,185 @@
+name: Deploy hourly integrity scheduler once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/deploy-hourly-integrity-once.yml
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: deploy-hourly-integrity-once
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: ${{ !contains(github.event.head_commit.message, 'Remove one-shot hourly integrity deploy workflow') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || secrets.CF_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      WORKER_NAME: nikolay-onedrive-mcp
+      EXPECTED_SOURCE_SHA: 39bea4fdf9d52b25e6007710f1092692f27703d4
+      CURRENT_VERSION_ID: c28ac71e-cbfd-4ac5-9d2d-7ef586117929
+      DEPLOY_TAG: repo-39bea4fdf9d52b25e6007710f1092692f27703d4
+      WORKER_URL: https://nikolay-onedrive-mcp.fdas201290.workers.dev
+    steps:
+      - name: Check out exact validated source
+        uses: actions/checkout@v4
+        with:
+          ref: 39bea4fdf9d52b25e6007710f1092692f27703d4
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
+          cache: npm
+
+      - name: Validate, upload, deploy and health-check
+        id: deployment
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          : > /tmp/deploy.log
+          exec > >(tee -a /tmp/deploy.log) 2>&1
+
+          if [[ -z "${CLOUDFLARE_API_TOKEN:-}" || -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]]; then
+            echo "Cloudflare deployment credentials are not configured in repository secrets."
+            exit 20
+          fi
+
+          actual_sha="$(git rev-parse HEAD)"
+          [[ "$actual_sha" == "$EXPECTED_SOURCE_SHA" ]] || { echo "Exact source SHA mismatch."; exit 21; }
+
+          npm ci --ignore-scripts --no-audit --no-fund
+          node scripts/prepare-pdfjs.mjs
+          npm run type-check
+          npm test
+          npm audit --audit-level=high
+
+          mkdir -p .deploy
+          printf '{"name":"%s"}\n' "$WORKER_NAME" > .deploy/lookup.json
+          npx wrangler deployments status --name "$WORKER_NAME" --config .deploy/lookup.json --json > .deploy/status.json
+          grep -q "$CURRENT_VERSION_ID" .deploy/status.json || { echo "Production version changed; refusing a racing deployment."; exit 22; }
+
+          npx wrangler versions view "$CURRENT_VERSION_ID" --name "$WORKER_NAME" --config .deploy/lookup.json --json > .deploy/current-version.json
+
+          node <<'NODE'
+          import fs from 'node:fs';
+          const version = JSON.parse(fs.readFileSync('.deploy/current-version.json', 'utf8'));
+          const bindings = version?.resources?.bindings;
+          if (!Array.isArray(bindings)) throw new Error('Current version bindings were not returned.');
+          const find = (type, name) => bindings.find((b) => b?.type === type && b?.name === name);
+          const kv = find('kv_namespace', 'OAUTH_KV');
+          if (!kv?.namespace_id) throw new Error('OAUTH_KV namespace ID is unavailable.');
+          const required = [
+            ['ai', 'AI'],
+            ['browser', 'BROWSER'],
+            ['images', 'IMAGES'],
+            ['durable_object_namespace', 'MCP_OBJECT'],
+            ['durable_object_namespace', 'AUTH_STATE'],
+            ['secret_text', 'MICROSOFT_CLIENT_ID'],
+            ['secret_text', 'MICROSOFT_CLIENT_SECRET'],
+            ['secret_text', 'COOKIE_ENCRYPTION_KEY'],
+            ['plain_text', 'ONEDRIVE_ROOT'],
+            ['plain_text', 'OWNER_MICROSOFT_ID'],
+          ];
+          for (const [type, name] of required) {
+            if (!find(type, name)) throw new Error(`Required live binding missing: ${type}:${name}`);
+          }
+          const config = {
+            $schema: '../node_modules/wrangler/config-schema.json',
+            name: process.env.WORKER_NAME,
+            main: '../src/index-hotfix.ts',
+            compatibility_date: '2026-07-13',
+            compatibility_flags: ['nodejs_compat'],
+            keep_vars: true,
+            migrations: [
+              { new_sqlite_classes: ['OneDriveMCP'], tag: 'v1' },
+              { new_sqlite_classes: ['AuthState'], tag: 'v2' },
+            ],
+            durable_objects: { bindings: [
+              { class_name: 'OneDriveMCP', name: 'MCP_OBJECT' },
+              { class_name: 'AuthState', name: 'AUTH_STATE' },
+            ] },
+            kv_namespaces: [{ binding: 'OAUTH_KV', id: kv.namespace_id }],
+            ai: { binding: 'AI' },
+            images: { binding: 'IMAGES' },
+            browser: { binding: 'BROWSER' },
+            observability: { enabled: true },
+          };
+          fs.writeFileSync('.deploy/wrangler.deploy.json', JSON.stringify(config, null, 2));
+          NODE
+
+          npx wrangler versions upload --config .deploy/wrangler.deploy.json --keep-vars --strict --tag "$DEPLOY_TAG" --message "Bounded hourly integrity scheduler ($EXPECTED_SOURCE_SHA)"
+          npx wrangler versions list --name "$WORKER_NAME" --config .deploy/lookup.json --json > .deploy/versions.json
+          new_version_id="$(node <<'NODE'
+          import fs from 'node:fs';
+          const versions = JSON.parse(fs.readFileSync('.deploy/versions.json', 'utf8'));
+          const tag = process.env.DEPLOY_TAG;
+          const found = versions.find((v) => v?.annotations?.['workers/tag'] === tag);
+          if (!found?.id) process.exit(2);
+          process.stdout.write(found.id);
+          NODE
+          )"
+          [[ "$new_version_id" =~ ^[0-9a-f-]{36}$ ]] || { echo "Could not resolve uploaded Worker version."; exit 23; }
+
+          npx wrangler versions deploy "$new_version_id@100%" --name "$WORKER_NAME" --config .deploy/lookup.json --message "Deploy bounded hourly integrity scheduler from $EXPECTED_SOURCE_SHA" -y
+
+          rollback() {
+            npx wrangler versions deploy "$CURRENT_VERSION_ID@100%" --name "$WORKER_NAME" --config .deploy/lookup.json --message "Automatic rollback after hourly-integrity health failure" -y || true
+          }
+          health_ok=false
+          for attempt in 1 2 3 4 5; do
+            if curl --fail --silent --show-error --max-time 20 "$WORKER_URL/health" > .deploy/health.json && node -e "const x=require('./.deploy/health.json'); process.exit(x.ok===true?0:1)"; then
+              health_ok=true
+              break
+            fi
+            sleep 6
+          done
+          if [[ "$health_ok" != true ]]; then rollback; exit 24; fi
+
+          npx wrangler deployments status --name "$WORKER_NAME" --config .deploy/lookup.json --json > .deploy/final-status.json
+          grep -q "$new_version_id" .deploy/final-status.json || { rollback; exit 25; }
+          printf '%s' "$new_version_id" > /tmp/new-version-id
+
+      - name: Report deployment to PR
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STEP_OUTCOME: ${{ steps.deployment.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f /tmp/new-version-id ]]; then
+            version_id="$(cat /tmp/new-version-id)"
+            body="## Hourly integrity scheduler deployed\n\n- Source commit: \`$EXPECTED_SOURCE_SHA\`\n- Worker version: \`$version_id\`\n- Traffic: 100%\n- Health: PASS\n- Durable Object migrations unchanged (v1/v2)."
+          else
+            body="## Hourly integrity scheduler deployment did not complete\n\n- Source commit: \`$EXPECTED_SOURCE_SHA\`\n- Outcome: \`$STEP_OUTCOME\`\n- Production remained on, or was rolled back to, \`$CURRENT_VERSION_ID\`."
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/issues/14/comments" -f body="$body"
+
+      - name: Remove one-shot workflow
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git switch -C main origin/main
+          rm -f .github/workflows/deploy-hourly-integrity-once.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/deploy-hourly-integrity-once.yml
+          if ! git diff --cached --quiet; then
+            git commit -m "Remove one-shot hourly integrity deploy workflow"
+            git push origin main
+          fi
+
+      - name: Fail workflow when deployment failed
+        if: steps.deployment.outcome != 'success'
+        run: exit 1
