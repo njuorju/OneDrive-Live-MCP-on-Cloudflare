@@ -9,6 +9,12 @@ import { registerIntegrityResumeRepairTools } from "./integrity-resume-repair";
 import { registerDownstreamRenameReconciliationTool } from "./integrity-downstream-reconcile";
 import { registerBlockedMoveReconciliationTool } from "./integrity-blocked-move-reconcile";
 import { continueSnapshotWithLease, registerIntegrityLeaseTools } from "./integrity-lease-tools";
+import type { ScheduleSnapshot } from "./snapshot-model";
+import {
+  DEFAULT_SOURCE_INTEGRITY_PLAN_ID,
+  SOURCE_INTEGRITY_OWNER_ID,
+  runScheduledIntegrityContinuation,
+} from "./scheduled-integrity";
 
 const prototype = OneDriveMCP.prototype as any;
 if (!prototype.__version20HotfixApplied) {
@@ -46,7 +52,7 @@ if (!prototype.__version20HotfixApplied) {
 
     const replacementServer = new McpServer({
       name: "Nikolay OneDrive Live integrated hotfix",
-      version: "0.4.3",
+      version: "0.4.4",
     });
     const contextFactory = () => ({
       env: this.env,
@@ -88,5 +94,75 @@ if (!prototype.__version20HotfixApplied) {
   });
 }
 
+type SchedulerEnv = Env & {
+  SOURCE_INTEGRITY_PLAN_ID?: string;
+  SCHEDULE_ADMIN_TOKEN?: string;
+};
+
+function timestampedCorrelationId(): string {
+  return `uca-source-hourly-${new Date().toISOString().replace(/[^0-9TZ]/g, "")}`.slice(0, 200);
+}
+
+async function invokeSourceIntegritySchedule(env: SchedulerEnv, ctx: ExecutionContext): Promise<Record<string, unknown>> {
+  const userId = String(env.OWNER_MICROSOFT_ID ?? "");
+  if (!userId) throw new Error("OWNER_MICROSOFT_ID is not configured.");
+  const planId = String(env.SOURCE_INTEGRITY_PLAN_ID ?? DEFAULT_SOURCE_INTEGRITY_PLAN_ID);
+  const invocationId = crypto.randomUUID();
+  const correlationId = timestampedCorrelationId();
+  const schedule: ScheduleSnapshot = async (jobId, scheduledUserId, delaySeconds = 1) => {
+    console.log(JSON.stringify({
+      component: "source_integrity_scheduler",
+      event: "continuation_deferred_to_next_cron",
+      jobId,
+      scheduledUserId,
+      delaySeconds,
+      invocationId,
+      correlationId,
+    }));
+  };
+  return runScheduledIntegrityContinuation(
+    {
+      env,
+      userId,
+      storage: createIntegratedStateStorage(env, userId),
+      waitUntil: (promise) => ctx.waitUntil(promise),
+    },
+    schedule,
+    {
+      planId,
+      ownerId: SOURCE_INTEGRITY_OWNER_ID,
+      invocationId,
+      correlationId,
+    },
+  );
+}
+
+const provider = originalDefault as any;
+const worker: ExportedHandler<SchedulerEnv> = {
+  async fetch(request, env, ctx): Promise<Response> {
+    const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname === "/internal/scheduled-integrity-once") {
+      const expected = String(env.SCHEDULE_ADMIN_TOKEN ?? "");
+      const supplied = String(request.headers.get("x-schedule-admin-token") ?? "");
+      if (!expected || supplied !== expected) return new Response("Not found", { status: 404 });
+      try {
+        return Response.json(await invokeSourceIntegritySchedule(env, ctx));
+      } catch (error) {
+        console.error(JSON.stringify({ component: "source_integrity_scheduler", event: "manual_invoke_failed", message: error instanceof Error ? error.message : String(error) }));
+        return Response.json({ ok: false, error: "scheduled_integrity_failed" }, { status: 500 });
+      }
+    }
+    return provider.fetch(request, env, ctx);
+  },
+
+  scheduled(_controller, env, ctx): void {
+    ctx.waitUntil(
+      invokeSourceIntegritySchedule(env, ctx)
+        .then((result) => console.log(JSON.stringify({ component: "source_integrity_scheduler", event: "completed", result })))
+        .catch((error) => console.error(JSON.stringify({ component: "source_integrity_scheduler", event: "failed", message: error instanceof Error ? error.message : String(error) }))),
+    );
+  },
+};
+
 export { AuthState, OneDriveMCP };
-export default originalDefault;
+export default worker;

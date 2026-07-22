@@ -213,7 +213,7 @@ function planProgressFields(plan: IntegrityPlan): Record<string, unknown> {
   return { remainingActions: unresolved.length, nextAction: plan.nextAction ?? ready[0]?.actionId ?? unresolved[0]?.actionId ?? null, nextReadyAction: ready[0]?.actionId ?? null, resumeRequired: unresolved.length > 0, auditStatus: plan.auditStatus ?? "not_requested", auditPending: plan.auditStatus === "pending" || plan.auditStatus === "running", planComplete: unresolved.length === 0 };
 }
 
-async function executeWithLease(context: HotfixContext, input: ExecutionInput): Promise<Record<string, unknown>> {
+export async function executeWithLease(context: HotfixContext, input: ExecutionInput): Promise<Record<string, unknown>> {
   const token = await openJson<{ planId: string; planHash: string; expiresAt: number }>(context.env.COOKIE_ENCRYPTION_KEY, String(input.executionToken ?? "")).catch(() => null);
   if (!token || token.expiresAt <= Date.now()) throw new ConnectorError("execution_token_invalid", "The execution token is invalid or expired.");
   const initialPlan = await getPlan(context, token.planId);
@@ -302,7 +302,7 @@ async function reconcileWithLease(context: HotfixContext, input: { planId: strin
   }
 }
 
-async function executionState(context: HotfixContext, planId: string): Promise<Record<string, unknown>> {
+export async function executionState(context: HotfixContext, planId: string): Promise<Record<string, unknown>> {
   const plan = await getPlan(context, planId);
   const coordination = await callIntegrityCoordination(context.env, context.userId, { op: "status", planId });
   const unresolved = unresolvedActions(plan);
@@ -418,7 +418,7 @@ async function executionAudit(context: HotfixContext, planId: string, cursor?: n
   return callIntegrityCoordination(context.env, context.userId, { op: "audit-page", planId, cursor, limit });
 }
 
-async function startDiffWithCoordination(context: HotfixContext, schedule: ScheduleSnapshot, planId: string): Promise<Record<string, unknown>> {
+export async function startDiffWithCoordination(context: HotfixContext, schedule: ScheduleSnapshot, planId: string): Promise<Record<string, unknown>> {
   const plan = await getPlan(context, planId);
   const gate = await callIntegrityCoordination(context.env, context.userId, { op: "begin-plan-audit", planId, scopePath: plan.scopePath, auditJobId: "pending" });
   if (gate.acquired !== true) return { ...gate, auditStarted: false, planId };
@@ -433,7 +433,7 @@ async function startDiffWithCoordination(context: HotfixContext, schedule: Sched
   }
 }
 
-async function getJobWithCoordination(context: HotfixContext, schedule: ScheduleSnapshot, jobId: string): Promise<Record<string, unknown>> {
+export async function getJobWithCoordination(context: HotfixContext, schedule: ScheduleSnapshot, jobId: string): Promise<Record<string, unknown>> {
   const current = await context.storage.get<JobRecord>(`${JOB_PREFIX}${jobId}`);
   if (!current) throw new ConnectorError("job_not_found", "The integrated job does not exist or has expired.");
   const invocationId = crypto.randomUUID();
