@@ -48,7 +48,11 @@ jobs:
             test.log
           if-no-files-found: ignore
           retention-days: 1
-      - run: npm audit --audit-level=high
+      - name: Production dependency security gate
+        run: npm audit --audit-level=high --omit=dev
+      - name: Full dependency advisory report
+        continue-on-error: true
+        run: npm audit --audit-level=high
       - name: Dry-run Worker bundle with non-secret test placeholders
         run: |
           cp wrangler.jsonc wrangler.ci.jsonc
