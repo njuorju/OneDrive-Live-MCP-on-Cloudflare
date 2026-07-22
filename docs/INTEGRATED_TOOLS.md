@@ -96,13 +96,29 @@ Rejects out-of-scope operations, duplicate destinations, collisions, circular mo
 
 ### `execute_integrity_plan`
 
-Runs serially under an overlap-aware scope lock. Before every action it revalidates root ancestry, item ID/path/eTag, destructive SHA, and destination availability. `RECYCLE`/`RECYCLE_FOLDER` use Microsoft Graph delete semantics to move approved items into the OneDrive recycle bin. Permanent deletion and recycle-bin emptying are absent.
+Required inputs are:
 
-Failures stop dependent actions, preserve successful unrelated actions, and return exact recovery state. No speculative automatic rollback is claimed.
+- `executionToken`: validated signed token, 1–50,000 characters;
+- `ownerType`: `interactive`, `scheduled_task`, or `system_recovery`;
+- `ownerId`: caller-supplied identifier, 1–200 characters;
+- `invocationId`: caller-generated UUID;
+- `correlationId`: caller-supplied identifier, 1–200 characters.
 
-### `get_integrity_plan_status` and `diff_scope_before_after`
+The caller-supplied ownership values are preserved in the Durable Object lease, invocation record, action reservation, bounded audit records, structured logs, and serialized result. The server does not replace a valid caller UUID. Reusing an invocation ID with identical metadata is idempotent; conflicting metadata fails closed with `invocation_metadata_conflict`.
 
-Return plan/validation/execution status, completed/failed/skipped actions, operation-log evidence, expected/unexpected changes, final live additions/removals/moves/recycles/hash changes, administrative/substantive counts, empty folders, duplicates, and evidence of any operation outside scope.
+Execution is serial and overlap-aware. Before every action it revalidates root ancestry, item ID/path/eTag, destructive SHA, and destination availability. A competing active lease returns a successful non-mutating `alreadyExecuting` result with the active owner, invocation, lease, fencing token, expiry, current action, and retry guidance. `RECYCLE`/`RECYCLE_FOLDER` use Microsoft Graph delete semantics to move approved items into the OneDrive recycle bin. Permanent deletion and recycle-bin emptying are absent.
+
+Failures stop dependent actions, preserve successful unrelated actions, and return exact recovery state. Persisted reservations prevent blind retries after ambiguous mutation outcomes. Expired leases are reconciled from postconditions before a new owner can continue. Stale or superseded fencing tokens cannot write.
+
+### `get_integrity_plan_execution_state`
+
+This is the canonical read-only execution-state tool. Input is the plan UUID. It returns plan and execution state, current/next action, remaining count, active lease and ownership metadata, fencing token, acquisition/expiry times, contention/retry guidance, recovery state, persisted reservation, audit state, active continuation jobs, resume requirement, and completion state.
+
+`get_integrity_plan_status` remains only as a backward-compatible alias. It calls the same implementation and returns the same response contract; no divergent status implementation exists.
+
+### `diff_scope_before_after`
+
+Returns plan/validation/execution status, completed/failed/skipped actions, operation-log evidence, expected/unexpected changes, final live additions/removals/moves/recycles/hash changes, administrative/substantive counts, empty folders, duplicates, and evidence of any operation outside scope.
 
 ## Catalogues
 
