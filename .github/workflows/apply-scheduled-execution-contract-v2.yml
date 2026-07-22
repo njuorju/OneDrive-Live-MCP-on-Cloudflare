@@ -1,0 +1,46 @@
+name: Apply scheduled execution contract repair v2
+
+on:
+  push:
+    branches: [work/scheduled-execution-schema]
+    paths:
+      - .github/workflows/apply-scheduled-execution-contract-v2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: work/scheduled-execution-schema
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.18.0'
+          cache: npm
+      - name: Install pinned dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Apply focused repair
+        run: python scripts/apply-scheduled-execution-contract.py
+      - name: Validate exact candidate
+        run: |
+          npm run type-check
+          npm test
+          npm audit --audit-level=high
+          npx wrangler deploy --dry-run --outdir dist-scheduled-contract
+      - name: Commit validated repair
+        shell: bash
+        run: |
+          rm -f .github/workflows/apply-scheduled-execution-contract.yml
+          rm -f .github/workflows/apply-scheduled-execution-contract-v2.yml
+          rm -f scripts/apply-scheduled-execution-contract.py
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "Complete scheduled integrity execution ownership contract"
+          git push origin HEAD:work/scheduled-execution-schema
