@@ -1,0 +1,68 @@
+name: Publish validated Worker bundle once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/publish-worker-bundle-once.yml
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: publish-worker-bundle-once
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: ${{ !contains(github.event.head_commit.message, 'Remove one-shot Worker bundle publisher') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ARTIFACT_ID: "8518772794"
+      BUNDLE_BRANCH: deploy/bundle-39bea4f
+      EXPECTED_SHA256: 9325b90e1536354560af23b0449840376d3c81f9695e62cb34a993c3e0deed8f
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download and verify validated bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" > /tmp/worker-bundle.zip
+          mkdir -p /tmp/worker-bundle
+          unzip -q /tmp/worker-bundle.zip -d /tmp/worker-bundle
+          test -f /tmp/worker-bundle/index-hotfix.js
+          echo "${EXPECTED_SHA256}  /tmp/worker-bundle/index-hotfix.js" | sha256sum -c -
+
+      - name: Publish temporary public bundle branch
+        run: |
+          set -euo pipefail
+          git switch -C "$BUNDLE_BRANCH" 39bea4fdf9d52b25e6007710f1092692f27703d4
+          mkdir -p deployment
+          cp /tmp/worker-bundle/index-hotfix.js deployment/index-hotfix.js
+          printf '%s\n' "$EXPECTED_SHA256" > deployment/index-hotfix.js.sha256
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add deployment/index-hotfix.js deployment/index-hotfix.js.sha256
+          git commit -m "Publish validated Worker bundle for bounded deployment"
+          git push --force origin "HEAD:${BUNDLE_BRANCH}"
+
+      - name: Remove one-shot publisher from main
+        if: always()
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git switch -C main origin/main
+          rm -f .github/workflows/publish-worker-bundle-once.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/publish-worker-bundle-once.yml
+          if ! git diff --cached --quiet; then
+            git commit -m "Remove one-shot Worker bundle publisher"
+            git push origin main
+          fi
