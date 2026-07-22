@@ -60,7 +60,9 @@ export async function runScheduledIntegrityContinuation(
 
   const remaining = Number(before.remainingActions ?? 0);
   if (remaining > 0) {
-    const validation = await validateIntegrityPlan(context, input.planId);
+    // HotfixContext intentionally exposes the same storage methods used by
+    // IntegratedContext, but with a narrower delete signature.
+    const validation = await validateIntegrityPlan(context as any, input.planId);
     if (validation.valid !== true || typeof validation.executionToken !== "string") {
       return {
         scheduled: true,
