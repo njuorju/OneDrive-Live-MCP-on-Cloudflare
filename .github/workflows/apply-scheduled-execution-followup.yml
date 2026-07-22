@@ -28,12 +28,14 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Apply final contract follow-up
         run: python scripts/apply-scheduled-execution-followup.py
-      - name: Validate exact candidate
-        run: |
-          npm run type-check
-          npm test
-          npm audit --audit-level=high
-          npx wrangler deploy --dry-run --outdir /tmp/dist-scheduled-followup
+      - name: Typecheck
+        run: npm run type-check
+      - name: Complete automated test suite
+        run: npm test
+      - name: Security audit
+        run: npm audit --audit-level=high
+      - name: Wrangler dry-run
+        run: npx wrangler deploy --dry-run --outdir /tmp/dist-scheduled-followup
       - name: Commit validated follow-up
         shell: bash
         run: |
