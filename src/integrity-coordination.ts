@@ -256,7 +256,7 @@ const key = leaseKey(request.userId, planId);
     if (other.planId === planId || Date.parse(other.expiresAt) <= nowMs) continue;
     if (scopesOverlap(scopePath, normalizeScope(other.scopePath))) {
       await appendAudit(storage, request, "lease_denied_scope_overlap", nowMs, { activeOwnerType: other.ownerType, activePlanId: other.planId, activeScopePath: other.scopePath ?? null });
-      return { acquired: false, alreadyExecuting: true, planId, activeOwnerType: other.ownerType, activeOwnerId: other.ownerId, activeInvocationId: other.currentInvocationId, activeSince: other.acquiredAt, leaseExpiresAt: other.expiresAt, currentActionId: other.currentActionId, retryAfterSeconds: retryAfter(other, nowMs), safeToRetry: true, resumeRequired: true, overlapProtected: true };
+      return { acquired: false, alreadyExecuting: true, planId, leaseId: other.leaseId, fencingToken: other.fencingToken, correlationId: other.correlationId, activeOwnerType: other.ownerType, activeOwnerId: other.ownerId, activeInvocationId: other.currentInvocationId, activeSince: other.acquiredAt, leaseExpiresAt: other.expiresAt, currentActionId: other.currentActionId, retryAfterSeconds: retryAfter(other, nowMs), safeToRetry: true, resumeRequired: true, overlapProtected: true };
     }
   }
 
@@ -265,18 +265,18 @@ const key = leaseKey(request.userId, planId);
       return { acquired: false, alreadyExecuting: true, idempotentInvocation: true, invocationActive: true, planId, leaseId: existing.leaseId, fencingToken: existing.fencingToken, leaseExpiresAt: existing.expiresAt, recoveredExpiredLease: Boolean(existing.recoveryOfLeaseId), currentActionId: existing.currentActionId, activeOwnerType: existing.ownerType, activeOwnerId: existing.ownerId, activeInvocationId: existing.currentInvocationId, correlationId: existing.correlationId, retryAfterSeconds: retryAfter(existing, nowMs), safeToRetry: true };
     }
     await appendAudit(storage, { ...request, leaseId: existing.leaseId, fencingToken: existing.fencingToken, currentActionId: existing.currentActionId }, "lease_denied", nowMs, { activeOwnerType: existing.ownerType });
-    return { acquired: false, alreadyExecuting: true, planId, activeOwnerType: existing.ownerType, activeOwnerId: existing.ownerId, activeInvocationId: existing.currentInvocationId, activeSince: existing.acquiredAt, leaseExpiresAt: existing.expiresAt, currentActionId: existing.currentActionId, retryAfterSeconds: retryAfter(existing, nowMs), safeToRetry: true, resumeRequired: true };
+    return { acquired: false, alreadyExecuting: true, planId, leaseId: existing.leaseId, fencingToken: existing.fencingToken, correlationId: existing.correlationId, activeOwnerType: existing.ownerType, activeOwnerId: existing.ownerId, activeInvocationId: existing.currentInvocationId, activeSince: existing.acquiredAt, leaseExpiresAt: existing.expiresAt, currentActionId: existing.currentActionId, retryAfterSeconds: retryAfter(existing, nowMs), safeToRetry: true, resumeRequired: true };
   }
   if (existing) {
     const recoveringByCaller = existing.status === "recovering" && existing.currentInvocationId === invocationId && existing.ownerId === ownerId;
     if (existing.status === "recovering" && Date.parse(existing.expiresAt) > nowMs && !recoveringByCaller) {
-      return { acquired: false, alreadyExecuting: true, recoveryInProgress: true, planId, activeOwnerType: "recovery", activeSince: existing.acquiredAt, leaseExpiresAt: existing.expiresAt, currentActionId: existing.currentActionId, retryAfterSeconds: retryAfter(existing, nowMs), safeToRetry: true, resumeRequired: true };
+      return { acquired: false, alreadyExecuting: true, recoveryInProgress: true, planId, leaseId: existing.leaseId, fencingToken: existing.fencingToken, correlationId: existing.correlationId, activeOwnerType: existing.ownerType, activeOwnerId: existing.ownerId, activeInvocationId: existing.currentInvocationId, activeSince: existing.acquiredAt, leaseExpiresAt: existing.expiresAt, currentActionId: existing.currentActionId, retryAfterSeconds: retryAfter(existing, nowMs), safeToRetry: true, resumeRequired: true };
     }
     if (!request.recoveryResolution) {
       const recovering: IntegrityLease = {
         ...existing,
         ownerId,
-        ownerType: "recovery",
+        ownerType,
         currentInvocationId: invocationId,
         correlationId: request.correlationId ?? null,
         workerVersion: String(request.workerVersion ?? "unknown"),
@@ -340,7 +340,7 @@ await storage.put(generationKey(request.userId, planId), generation);
 await storage.put(invocationStorageKey, invocationRecord);
 await storage.put(key, lease);
   await appendAudit(storage, { ...request, leaseId: lease.leaseId, fencingToken: generation }, "lease_acquired", nowMs, { recoveredExpiredLease: Boolean(previousLeaseId), scopePath });
-  return { acquired: true, alreadyExecuting: false, planId, leaseId: lease.leaseId, fencingToken: generation, leaseExpiresAt: lease.expiresAt, recoveredExpiredLease: Boolean(previousLeaseId), previousLeaseId, newLeaseId: lease.leaseId, newFencingToken: generation };
+  return { acquired: true, alreadyExecuting: false, planId, leaseId: lease.leaseId, ownerType: lease.ownerType, ownerId: lease.ownerId, invocationId: lease.currentInvocationId, correlationId: lease.correlationId, fencingToken: generation, leaseExpiresAt: lease.expiresAt, recoveredExpiredLease: Boolean(previousLeaseId), previousLeaseId, newLeaseId: lease.leaseId, newFencingToken: generation };
 }
 
 async function renew(storage: CoordinationStorage, request: CoordinationRequest, nowMs: number): Promise<Record<string, unknown>> {
@@ -359,7 +359,7 @@ async function renew(storage: CoordinationStorage, request: CoordinationRequest,
     lease.lastProgressAt = iso(nowMs);
   }
   await storage.put(leaseKey(request.userId, lease.planId), lease);
-  await appendAudit(storage, { ...request, ownerType: lease.ownerType }, "lease_renewed", nowMs, { progressed });
+  await appendAudit(storage, { ...request, ownerType: lease.ownerType, ownerId: lease.ownerId, correlationId: lease.correlationId }, "lease_renewed", nowMs, { progressed });
   return { renewed: true, leaseId: lease.leaseId, fencingToken: lease.fencingToken, leaseExpiresAt: lease.expiresAt, lastHeartbeatAt: lease.lastHeartbeatAt };
 }
 
@@ -399,7 +399,7 @@ async function reserve(storage: CoordinationStorage, request: CoordinationReques
   await storage.put(attemptsKey, attempt);
   await storage.put(key, reservation);
   await storage.put(leaseKey(request.userId, lease.planId), lease);
-  await appendAudit(storage, { ...request, ownerType: lease.ownerType }, "action_reserved", nowMs, { attempt, idempotencyKey: reservation.idempotencyKey });
+  await appendAudit(storage, { ...request, ownerType: lease.ownerType, ownerId: lease.ownerId, correlationId: lease.correlationId }, "action_reserved", nowMs, { attempt, idempotencyKey: reservation.idempotencyKey });
   return { reserved: true, reservation };
 }
 
@@ -414,7 +414,7 @@ async function markMutationStarted(storage: CoordinationStorage, request: Coordi
   lease.expiresAt = iso(nowMs + clampLease(request.leaseDurationSeconds) * 1_000);
   await storage.put(key, reservation);
   await storage.put(leaseKey(request.userId, lease.planId), lease);
-  await appendAudit(storage, { ...request, ownerType: lease.ownerType }, "mutation_attempt_started", nowMs, { idempotencyKey: reservation.idempotencyKey });
+  await appendAudit(storage, { ...request, ownerType: lease.ownerType, ownerId: lease.ownerId, correlationId: lease.correlationId }, "mutation_attempt_started", nowMs, { idempotencyKey: reservation.idempotencyKey });
   return { started: true, reservation, leaseExpiresAt: lease.expiresAt };
 }
 
@@ -433,7 +433,7 @@ async function finalizeAction(storage: CoordinationStorage, request: Coordinatio
   lease.lastProgressAt = iso(nowMs);
   await storage.put(key, reservation);
   await storage.put(leaseKey(request.userId, lease.planId), lease);
-  await appendAudit(storage, { ...request, actionId: reservation.actionId, ownerType: lease.ownerType }, state === "reconciled" ? "reconciliation_result" : "action_finalized", nowMs, request.outcome);
+  await appendAudit(storage, { ...request, actionId: reservation.actionId, ownerType: lease.ownerType, ownerId: lease.ownerId, correlationId: lease.correlationId }, state === "reconciled" ? "reconciliation_result" : "action_finalized", nowMs, request.outcome);
   return { finalized: true, reservation };
 }
 
@@ -506,7 +506,7 @@ async function claimForceRecovery(storage: CoordinationStorage, request: Coordin
     await storage.put(reservationKey(request.userId, planId), reservation);
   }
   lease.ownerId = String(request.ownerId ?? "recovery");
-  lease.ownerType = "recovery";
+  lease.ownerType = request.ownerType ?? "system_recovery";
   lease.currentInvocationId = String(request.invocationId ?? "");
   lease.correlationId = request.correlationId ?? null;
   lease.workerVersion = String(request.workerVersion ?? lease.workerVersion);
@@ -514,7 +514,7 @@ async function claimForceRecovery(storage: CoordinationStorage, request: Coordin
   lease.lastHeartbeatAt = iso(nowMs);
   lease.expiresAt = iso(nowMs + 120_000);
   await storage.put(leaseKey(request.userId, planId), lease);
-  await appendAudit(storage, { ...request, leaseId: lease.leaseId, fencingToken: lease.fencingToken, currentActionId: lease.currentActionId, ownerType: "recovery" }, "lease_force_recovery_claimed", nowMs, { previousOwnerType, previousInvocationId });
+  await appendAudit(storage, { ...request, leaseId: lease.leaseId, fencingToken: lease.fencingToken, currentActionId: lease.currentActionId, ownerType: lease.ownerType, ownerId: lease.ownerId, correlationId: lease.correlationId }, "lease_force_recovery_claimed", nowMs, { previousOwnerType, previousInvocationId });
   return { claimed: true, planId, leaseId: lease.leaseId, fencingToken: lease.fencingToken, recoveryClaimExpiresAt: lease.expiresAt, previousOwnerType, previousActionId: lease.currentActionId };
 }
 
@@ -528,7 +528,7 @@ async function forceInvalidate(storage: CoordinationStorage, request: Coordinati
   if (reservation?.leaseId === lease.leaseId && reservation.state === "mutation_in_progress") return { invalidated: false, reason: "mutation_commit_in_progress", activeLease: lease, reservation };
   const generation = Math.max(Number(await storage.get<number>(generationKey(request.userId, planId)) ?? 0), lease.fencingToken) + 1;
   await storage.put(generationKey(request.userId, planId), generation);
-  await appendAudit(storage, { ...request, leaseId: lease.leaseId, fencingToken: lease.fencingToken, currentActionId: lease.currentActionId, ownerType: lease.ownerType }, "lease_force_invalidated", nowMs, request.outcome);
+  await appendAudit(storage, { ...request, leaseId: lease.leaseId, fencingToken: lease.fencingToken, currentActionId: lease.currentActionId, ownerType: lease.ownerType, ownerId: lease.ownerId, correlationId: lease.correlationId }, "lease_force_invalidated", nowMs, request.outcome);
   await storage.delete(leaseKey(request.userId, planId));
   return { invalidated: true, previousLeaseId: lease.leaseId, previousFencingToken: lease.fencingToken, newFencingToken: generation };
 }

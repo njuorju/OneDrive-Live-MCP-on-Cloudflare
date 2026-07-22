@@ -50,6 +50,9 @@ test("overlapping scheduled invocations return one owner and one safe no-op", as
   assert.equal(second.activeOwnerType, "scheduled_task");
   assert.equal(second.activeOwnerId, "uca-source-library-hourly");
   assert.equal(second.activeInvocationId, base.invocationId);
+  assert.equal(second.leaseId, first.leaseId);
+  assert.equal(second.fencingToken, first.fencingToken);
+  assert.equal(second.correlationId, base.correlationId);
 });
 
 test("MCP schema requires complete scheduled ownership metadata and exposes canonical execution state", () => {
@@ -64,6 +67,8 @@ test("MCP schema requires complete scheduled ownership metadata and exposes cano
   assert.equal(execute.invocationId.safeParse("not-a-uuid").success, false);
   assert.equal(execute.invocationId.safeParse("44444444-4444-4444-8444-444444444444").success, true);
   assert.equal(execute.correlationId.safeParse(undefined).success, false);
+  assert.equal(execute.ownerId.safeParse("x".repeat(201)).success, false);
+  assert.equal(execute.correlationId.safeParse("x".repeat(201)).success, false);
   assert.ok(registered.has("get_integrity_plan_execution_state"));
   assert.ok(registered.has("get_integrity_plan_status"));
 });

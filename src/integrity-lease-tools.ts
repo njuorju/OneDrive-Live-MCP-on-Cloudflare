@@ -210,7 +210,7 @@ function leaseResponseFields(acquired: LeaseMetadata): Record<string, unknown> {
 function planProgressFields(plan: IntegrityPlan): Record<string, unknown> {
   const unresolved = unresolvedActions(plan);
   const ready = remainingActions(plan.actions, plan.completedActions, plan.failedActions, plan.skippedDependencyActions);
-  return { remainingActions: unresolved.length, nextAction: plan.nextAction ?? ready[0]?.actionId ?? unresolved[0]?.actionId ?? null, nextReadyAction: ready[0]?.actionId ?? null, resumeRequired: unresolved.length > 0, auditPending: plan.auditStatus === "pending" || plan.auditStatus === "running", planComplete: unresolved.length === 0 };
+  return { remainingActions: unresolved.length, nextAction: plan.nextAction ?? ready[0]?.actionId ?? unresolved[0]?.actionId ?? null, nextReadyAction: ready[0]?.actionId ?? null, resumeRequired: unresolved.length > 0, auditStatus: plan.auditStatus ?? "not_requested", auditPending: plan.auditStatus === "pending" || plan.auditStatus === "running", planComplete: unresolved.length === 0 };
 }
 
 async function executeWithLease(context: HotfixContext, input: ExecutionInput): Promise<Record<string, unknown>> {
