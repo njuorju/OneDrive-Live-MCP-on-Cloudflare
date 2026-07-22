@@ -1,1 +1,0 @@
-This folder contains the built output assets for the worker "onedrive-live-mcp" generated at 2026-07-22T01:18:16.255Z.
