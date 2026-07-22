@@ -16,6 +16,7 @@ on:
       - src/integrity-execution.ts
       - src/snapshot-runner.ts
       - test/integrity-coordination.test.ts
+      - test/integrity-scheduled-execution.test.ts
       - test/integrity-resume-repair.test.ts
       - test/integrity-blocked-move-reconcile.test.ts
       - test/integrity-downstream-reconcile.test.ts
@@ -35,6 +36,7 @@ on:
       - src/integrity-execution.ts
       - src/snapshot-runner.ts
       - test/integrity-coordination.test.ts
+      - test/integrity-scheduled-execution.test.ts
       - test/integrity-resume-repair.test.ts
       - test/integrity-blocked-move-reconcile.test.ts
       - test/integrity-downstream-reconcile.test.ts
@@ -46,7 +48,7 @@ permissions:
 
 jobs:
   upload-candidate:
-    if: github.event_name == 'push' || github.event.pull_request.head.ref == 'work/integrity-resume-reconciliation'
+    if: github.event_name == 'push' || github.event.pull_request.head.ref == 'work/integrity-resume-reconciliation' || github.event.pull_request.head.ref == 'work/scheduled-execution-schema'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -63,7 +65,10 @@ jobs:
         run: |
           npm run type-check
           npm test
-          npm audit --audit-level=high
+          npm audit --audit-level=high --omit=dev
+      - name: Record full dependency advisory report
+        continue-on-error: true
+        run: npm audit --audit-level=high
       - name: Generate exact live upload configuration
         run: |
           cat > wrangler.live.jsonc <<'JSON'

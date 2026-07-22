@@ -27,15 +27,15 @@ const DIFF_JOB_PREFIX = "integrated:diff-job:";
 const JOB_PREFIX = "integrated:job:";
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true } as const;
 const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true } as const;
-const OWNER_TYPES = ["manual", "scheduled_task", "api", "recovery", "internal_job"] as const;
+const OWNER_TYPES = ["interactive", "scheduled_task", "system_recovery"] as const;
 const INTEGRITY_LEASE_TOOLS_HARDENING_V2 = true;
 
 type ExecutionInput = {
   executionToken: string;
-  ownerType?: IntegrityOwnerType;
-  ownerId?: string;
-  invocationId?: string;
-  correlationId?: string;
+  ownerType: IntegrityOwnerType;
+  ownerId: string;
+  invocationId: string;
+  correlationId: string;
 };
 
 type LeaseMetadata = {
@@ -43,6 +43,10 @@ type LeaseMetadata = {
   leaseId: string;
   fencingToken: number;
   invocationId: string;
+  ownerType: IntegrityOwnerType;
+  ownerId: string;
+  correlationId: string;
+  leaseAcquired: true;
   leaseExpiresAt: string;
   recoveredExpiredLease: boolean;
   recoveryMetadata?: Record<string, unknown>;
@@ -65,14 +69,16 @@ async function getPlan(context: HotfixContext, planId: string): Promise<Integrit
   return plan;
 }
 
-function executionDefaults(input: ExecutionInput): Required<Pick<ExecutionInput, "ownerType" | "ownerId" | "invocationId">> & { correlationId: string | null } {
-  const ownerType = input.ownerType ?? "manual";
-  return {
-    ownerType,
-    ownerId: String(input.ownerId ?? `${ownerType}:server-generated`).slice(0, 500),
-    invocationId: String(input.invocationId ?? crypto.randomUUID()).slice(0, 500),
-    correlationId: input.correlationId ? String(input.correlationId).slice(0, 500) : null,
-  };
+function executionDefaults(input: ExecutionInput): Pick<ExecutionInput, "ownerType" | "ownerId" | "invocationId" | "correlationId"> {
+  return { ownerType: input.ownerType, ownerId: input.ownerId, invocationId: input.invocationId, correlationId: input.correlationId };
+}
+
+function internalExecutionInput(planId: string, ownerType: IntegrityOwnerType, ownerId: string, invocationId?: string, correlationId?: string): ExecutionInput {
+  return { executionToken: "", ownerType, ownerId, invocationId: invocationId ?? crypto.randomUUID(), correlationId: correlationId ?? `${ownerType}:${planId}` };
+}
+
+function logExecution(event: string, ownership: Pick<ExecutionInput, "ownerType" | "ownerId" | "invocationId" | "correlationId">, details: Record<string, unknown> = {}): void {
+  console.log(JSON.stringify({ component: "integrity_plan_executor", event, ...ownership, ...details }));
 }
 
 function actionEvidence(action: PlanAction): { expectedPreconditions: Record<string, unknown>; intendedPostcondition: Record<string, unknown> } {
@@ -173,12 +179,16 @@ async function acquireExecutionLease(context: HotfixContext, planId: string, inp
     recoveryMetadata = await recoveryResolution(context, planId, String(result.previousActionId ?? "") || null);
     result = await callIntegrityCoordination(context.env, context.userId, { ...request, recoveryResolution: recoveryMetadata });
   }
-  if (result.acquired !== true) return { ...result, executionState: "already_executing", leaseAcquired: false, alreadyExecuting: true, completedThisInvocation: [], reconciledThisInvocation: [], failedThisInvocation: [], resumeRequired: true, planComplete: false };
+  if (result.acquired !== true) return { ...result, executionState: result.idempotentInvocation === true && result.alreadyExecuting !== true ? "idempotent_completed" : "already_executing", leaseAcquired: false, alreadyExecuting: Boolean(result.alreadyExecuting), ownerType: result.activeOwnerType ?? defaults.ownerType, ownerId: result.activeOwnerId ?? defaults.ownerId, invocationId: result.activeInvocationId ?? defaults.invocationId, correlationId: result.correlationId ?? defaults.correlationId, completedThisInvocation: [], reconciledThisInvocation: [], failedThisInvocation: [], resumeRequired: result.idempotentInvocation === true && result.alreadyExecuting !== true ? false : true, planComplete: false };
   return {
     planId,
     leaseId: String(result.leaseId),
     fencingToken: Number(result.fencingToken),
     invocationId: defaults.invocationId,
+    ownerType: defaults.ownerType,
+    ownerId: defaults.ownerId,
+    correlationId: defaults.correlationId,
+    leaseAcquired: true,
     leaseExpiresAt: String(result.leaseExpiresAt),
     recoveredExpiredLease: Boolean(result.recoveredExpiredLease),
     recoveryMetadata,
@@ -186,20 +196,21 @@ async function acquireExecutionLease(context: HotfixContext, planId: string, inp
 }
 
 function isLeaseMetadata(value: LeaseMetadata | Record<string, unknown>): value is LeaseMetadata {
-  return typeof (value as LeaseMetadata).leaseId === "string" && typeof (value as LeaseMetadata).fencingToken === "number";
+  return (value as LeaseMetadata).leaseAcquired === true && typeof (value as LeaseMetadata).leaseId === "string" && typeof (value as LeaseMetadata).fencingToken === "number";
 }
 
 async function releaseLease(context: HotfixContext, lease: LeaseMetadata, outcome: unknown): Promise<void> {
-  await callIntegrityCoordination(context.env, context.userId, { op: "release", planId: lease.planId, leaseId: lease.leaseId, fencingToken: lease.fencingToken, invocationId: lease.invocationId, outcome });
+  logExecution("lease_release", lease, { planId: lease.planId, leaseId: lease.leaseId, fencingToken: lease.fencingToken });
+  await callIntegrityCoordination(context.env, context.userId, { op: "release", planId: lease.planId, leaseId: lease.leaseId, fencingToken: lease.fencingToken, invocationId: lease.invocationId, ownerType: lease.ownerType, ownerId: lease.ownerId, correlationId: lease.correlationId, outcome });
 }
 
 function leaseResponseFields(acquired: LeaseMetadata): Record<string, unknown> {
-  return { leaseAcquired: true, alreadyExecuting: false, leaseId: acquired.leaseId, fencingToken: acquired.fencingToken, leaseExpiresAt: acquired.leaseExpiresAt, retryAfterSeconds: 0, safeToRetry: true, recoveredExpiredLease: acquired.recoveredExpiredLease, recoveryMetadata: acquired.recoveryMetadata ?? null };
+  return { leaseAcquired: true, alreadyExecuting: false, leaseId: acquired.leaseId, ownerType: acquired.ownerType, ownerId: acquired.ownerId, invocationId: acquired.invocationId, correlationId: acquired.correlationId, fencingToken: acquired.fencingToken, leaseExpiresAt: acquired.leaseExpiresAt, retryAfterSeconds: 0, safeToRetry: true, recoveredExpiredLease: acquired.recoveredExpiredLease, recoveryMetadata: acquired.recoveryMetadata ?? null };
 }
 function planProgressFields(plan: IntegrityPlan): Record<string, unknown> {
   const unresolved = unresolvedActions(plan);
   const ready = remainingActions(plan.actions, plan.completedActions, plan.failedActions, plan.skippedDependencyActions);
-  return { remainingActions: unresolved.length, nextAction: plan.nextAction ?? ready[0]?.actionId ?? unresolved[0]?.actionId ?? null, nextReadyAction: ready[0]?.actionId ?? null, resumeRequired: unresolved.length > 0, auditPending: plan.auditStatus === "pending" || plan.auditStatus === "running", planComplete: unresolved.length === 0 };
+  return { remainingActions: unresolved.length, nextAction: plan.nextAction ?? ready[0]?.actionId ?? unresolved[0]?.actionId ?? null, nextReadyAction: ready[0]?.actionId ?? null, resumeRequired: unresolved.length > 0, auditStatus: plan.auditStatus ?? "not_requested", auditPending: plan.auditStatus === "pending" || plan.auditStatus === "running", planComplete: unresolved.length === 0 };
 }
 
 async function executeWithLease(context: HotfixContext, input: ExecutionInput): Promise<Record<string, unknown>> {
@@ -207,8 +218,9 @@ async function executeWithLease(context: HotfixContext, input: ExecutionInput): 
   if (!token || token.expiresAt <= Date.now()) throw new ConnectorError("execution_token_invalid", "The execution token is invalid or expired.");
   const initialPlan = await getPlan(context, token.planId);
   if (initialPlan.validationStatus !== "valid" || initialPlan.planHash !== token.planHash) throw new ConnectorError("plan_not_validated", "The integrity plan is not currently validated.");
+  logExecution("invocation_started", input, { planId: token.planId });
   const acquired = await acquireExecutionLease(context, token.planId, input);
-  if (!isLeaseMetadata(acquired)) return acquired;
+  if (!isLeaseMetadata(acquired)) { logExecution("invocation_noop", input, { planId: token.planId, alreadyExecuting: acquired.alreadyExecuting ?? false, executionState: acquired.executionState ?? null }); return acquired; }
   const lease: LeaseReference = { planId: acquired.planId, leaseId: acquired.leaseId, fencingToken: acquired.fencingToken, invocationId: acquired.invocationId };
   const fencedContext: HotfixContext = { ...context, storage: createLeaseFencedStorage(context.storage, context.env, context.userId, lease) };
   let reservation: Record<string, unknown> | null = null;
@@ -278,7 +290,7 @@ async function executeWithLease(context: HotfixContext, input: ExecutionInput): 
 }
 
 async function reconcileWithLease(context: HotfixContext, input: { planId: string; maximumActions?: number; ownerId?: string; invocationId?: string; correlationId?: string }): Promise<Record<string, unknown>> {
-  const acquired = await acquireExecutionLease(context, input.planId, { executionToken: "", ownerType: "internal_job", ownerId: input.ownerId, invocationId: input.invocationId, correlationId: input.correlationId });
+  const acquired = await acquireExecutionLease(context, input.planId, internalExecutionInput(input.planId, "internal_job", input.ownerId ?? "reconcile_integrity_plan", input.invocationId, input.correlationId));
   if (!isLeaseMetadata(acquired)) return acquired;
   const lease: LeaseReference = { planId: acquired.planId, leaseId: acquired.leaseId, fencingToken: acquired.fencingToken, invocationId: acquired.invocationId };
   const fencedContext: HotfixContext = { ...context, storage: createLeaseFencedStorage(context.storage, context.env, context.userId, lease) };
@@ -298,9 +310,13 @@ async function executionState(context: HotfixContext, planId: string): Promise<R
   const diffJobId = await context.storage.get<string>(`${DIFF_JOB_PREFIX}${planId}`);
   const diffJob = diffJobId ? await context.storage.get<Record<string, unknown>>(`${JOB_PREFIX}${diffJobId}`) : null;
   const recommended = coordination.recoveryRequired ? "request_integrity_plan_lease_recovery" : coordination.leased ? "wait_and_retry" : unresolved.length > 0 ? "validate_then_execute_integrity_plan" : plan.auditStatus === "pending" ? "diff_scope_before_after" : "none";
+  const activeLease = coordination.activeLease as Record<string, unknown> | null;
+  const retryAfterSeconds = activeLease?.expiresAt ? Math.max(0, Math.ceil((Date.parse(String(activeLease.expiresAt)) - Date.now()) / 1_000)) : 0;
+  const executionStateValue = coordination.recoveryRequired ? "recovery_required" : coordination.leased ? "executing" : String((coordination.reservation as Record<string, unknown> | null)?.state ?? plan.executionStatus ?? plan.status);
   return {
     planId,
     planStatus: plan.status,
+    executionState: executionStateValue,
     validationStatus: plan.validationStatus,
     executionStatus: plan.executionStatus,
     currentAction: plan.currentAction,
@@ -315,8 +331,27 @@ async function executionState(context: HotfixContext, planId: string): Promise<R
     finalFilesystemDiffReference: plan.finalFilesystemDiffReference,
     activeJobs: diffJob ? [{ jobId: diffJobId, status: diffJob.status, currentStage: diffJob.currentStage }] : [],
     recoveryState: { required: Boolean(coordination.recoveryRequired), reservation: coordination.reservation ?? null },
-    activeLease: coordination.activeLease ?? null,
-    currentlyLeased: Boolean(coordination.leased),
+
+activeLease: coordination.activeLease ?? null,
+activeLeaseStatus: activeLease?.status ?? "none",
+leaseId: activeLease?.leaseId ?? null,
+ownerType: activeLease?.ownerType ?? null,
+ownerId: activeLease?.ownerId ?? null,
+invocationId: activeLease?.invocationId ?? null,
+correlationId: activeLease?.correlationId ?? null,
+fencingToken: activeLease?.fencingToken ?? null,
+leaseAcquiredAt: activeLease?.acquiredAt ?? null,
+leaseExpiresAt: activeLease?.expiresAt ?? null,
+alreadyExecuting: Boolean(coordination.leased),
+retryAfterSeconds,
+safeToRetry: !coordination.leased,
+safeRetryGuidance: coordination.recoveryRequired ? "Use the normal executor so expired-lease reconciliation can run; do not force-invalidate." : coordination.leased ? "Retry after the reported lease expiry; contention is a successful no-op." : "Validate the plan and execute with a new caller-supplied invocation ID.",
+recoveryRequired: Boolean(coordination.recoveryRequired),
+persistedReservation: coordination.reservation ?? null,
+activeContinuationJobs: diffJob ? [{ jobId: diffJobId, status: diffJob.status, currentStage: diffJob.currentStage }] : [],
+anotherResumeRequired: unresolved.length > 0,
+complete: unresolved.length === 0,
+currentlyLeased: Boolean(coordination.leased),
     leaseExpired: Boolean(coordination.leaseExpired),
     auditInProgress: Boolean(coordination.auditInProgress),
     recommendedNextOperation: recommended,
@@ -329,14 +364,14 @@ async function requestRecovery(context: HotfixContext, input: { planId: string; 
   const status = await callIntegrityCoordination(context.env, context.userId, { op: "status", planId: input.planId });
   if (status.leased === true && input.force !== true) return { recovered: false, activeLeaseStillValid: true, refusedCancellation: true, safeToRetry: true, activeLease: status.activeLease };
   if (status.leased === true && input.force === true) {
-    const defaults = executionDefaults({ executionToken: "", ownerType: "recovery", ownerId: input.ownerId, invocationId: input.invocationId, correlationId: input.correlationId });
+    const defaults = executionDefaults(internalExecutionInput(input.planId, "system_recovery", input.ownerId ?? "integrity_plan_recovery", input.invocationId, input.correlationId));
     const claim = await callIntegrityCoordination(context.env, context.userId, { op: "claim-force-recovery", planId: input.planId, ...defaults, workerVersion: workerVersion(context.env), force: true });
     if (claim.claimed !== true) return { recovered: false, refusedCancellation: true, ...claim };
     const reconciliation = await reconcileIntegrityPlan(context, { planId: input.planId, maximumActions: 3 });
     const invalidated = await callIntegrityCoordination(context.env, context.userId, { op: "force-invalidate", planId: input.planId, ...defaults, force: true, outcome: { reconciliationSummary: { reconciledThisInvocation: reconciliation.reconciledThisInvocation ?? [], discrepancy: reconciliation.discrepancy ?? null } } });
     return { recovered: Boolean(invalidated.invalidated), forced: true, reconciliation, ...invalidated };
   }
-  const acquired = await acquireExecutionLease(context, input.planId, { executionToken: "", ownerType: "recovery", ownerId: input.ownerId, invocationId: input.invocationId, correlationId: input.correlationId });
+  const acquired = await acquireExecutionLease(context, input.planId, internalExecutionInput(input.planId, "system_recovery", input.ownerId ?? "integrity_plan_recovery", input.invocationId, input.correlationId));
   if (!isLeaseMetadata(acquired)) return acquired;
   await releaseLease(context, acquired, { recoveryOnly: true });
   return { recovered: acquired.recoveredExpiredLease, previousLease: acquired.recoveryMetadata ?? null, newFencingToken: acquired.fencingToken, leaseReleased: true };
@@ -349,7 +384,7 @@ async function probeLease(context: HotfixContext, input: LeaseProbeInput): Promi
     if (!input.leaseId || !input.invocationId || !Number.isFinite(input.fencingToken)) throw new ConnectorError("probe_release_metadata_required", "Lease ID, invocation ID, and fencing token are required to release a probe lease.");
     return callIntegrityCoordination(context.env, context.userId, { op: "release", planId: input.planId, leaseId: input.leaseId, fencingToken: Number(input.fencingToken), invocationId: input.invocationId, outcome: { acceptanceProbe: true } });
   }
-  const acquired = await acquireExecutionLease(context, input.planId, { executionToken: "", ownerType: "internal_job", ownerId: input.ownerId ?? "integrity-lease-acceptance-probe", invocationId: input.invocationId, correlationId: input.correlationId });
+  const acquired = await acquireExecutionLease(context, input.planId, internalExecutionInput(input.planId, "internal_job", input.ownerId ?? "integrity-lease-acceptance-probe", input.invocationId, input.correlationId));
   if (!isLeaseMetadata(acquired)) return acquired;
   const lease: LeaseReference = { planId: acquired.planId, leaseId: acquired.leaseId, fencingToken: acquired.fencingToken, invocationId: acquired.invocationId };
   let reservation: Record<string, unknown> | null = null;
@@ -463,10 +498,10 @@ export function registerIntegrityLeaseTools(server: McpServer, contextFactory: (
       description: "Atomically acquire a per-plan Durable Object lease, fence every mutation-state commit, reserve one action, reconcile ambiguous outcomes, execute a bounded batch, and release safely.",
       inputSchema: {
         executionToken: z.string().min(1).max(50_000),
-        ownerType: z.enum(OWNER_TYPES).optional(),
-        ownerId: z.string().min(1).max(500).optional(),
-        invocationId: z.string().min(1).max(500).optional(),
-        correlationId: z.string().min(1).max(500).optional(),
+        ownerType: z.enum(OWNER_TYPES),
+        ownerId: z.string().min(1).max(200),
+        invocationId: z.string().uuid(),
+        correlationId: z.string().min(1).max(200),
       },
       annotations: DESTRUCTIVE,
     }, async (input) => { try { return textResult(await executeWithLease(contextFactory(), input as ExecutionInput)); } catch (error) { return errorResult(error); } });
@@ -478,7 +513,7 @@ export function registerIntegrityLeaseTools(server: McpServer, contextFactory: (
     }, async (input) => { try { return textResult(await reconcileWithLease(contextFactory(), input)); } catch (error) { return errorResult(error); } });
     server.registerTool("get_integrity_plan_execution_state", {
       title: "Get integrity plan execution state",
-      description: "Return plan progress, active lease summary, fencing token, reservation, recovery state, active audit jobs, and the recommended next operation without exposing sensitive owner data.",
+      description: "Return plan progress, active lease summary, fencing token, reservation, recovery state, active audit jobs, and the recommended next operation including bounded caller-supplied ownership metadata and safe retry guidance.",
       inputSchema: { planId: z.string().uuid() },
       annotations: READ_ONLY,
     }, async ({ planId }) => { try { return textResult(await executionState(contextFactory(), planId)); } catch (error) { return errorResult(error); } });
