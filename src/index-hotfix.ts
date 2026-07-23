@@ -81,7 +81,12 @@ if (!prototype.__version20HotfixApplied) {
     registerDownstreamRenameReconciliationTool(replacementServer, contextFactory);
     registerBlockedMoveReconciliationTool(replacementServer, contextFactory);
     registerIntegrityLeaseTools(replacementServer, contextFactory, schedule);
+
+    const repairedSnapshotHandler = (replacementServer as any)._registeredTools?.create_source_snapshot?.handler;
     registerPaidArchitectureTools(replacementServer, contextFactory);
+    if (repairedSnapshotHandler && (replacementServer as any)._registeredTools?.create_source_snapshot) {
+      (replacementServer as any)._registeredTools.create_source_snapshot.handler = repairedSnapshotHandler;
+    }
 
     const actual = this.server as any;
     const replacement = replacementServer as any;
@@ -168,7 +173,13 @@ const worker: ExportedHandler<SchedulerEnv> = {
   },
 
   async queue(batch: MessageBatch<unknown>, env): Promise<void> {
-    await processPaidQueueBatch(batch as MessageBatch<PaidJobMessage>, env);
+    const paidEnv = new Proxy(env, {
+      get(target, property, receiver) {
+        if (property === "MAX_FILE_MB") return String(target.PAID_VISUAL_PARSE_MB ?? target.MAX_FILE_MB);
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    await processPaidQueueBatch(batch as MessageBatch<PaidJobMessage>, paidEnv);
   },
 
   scheduled(_controller, env, ctx): void {
