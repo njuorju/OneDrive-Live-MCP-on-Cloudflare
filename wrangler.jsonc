@@ -22,7 +22,7 @@
     "IMAGE_PROCESSING_TIMEOUT_MS": "15000",
     "INTEGRITY_LEASE_SECONDS": "600",
     "PAID_MAX_SOURCE_MB": "500",
-    "PAID_VISUAL_PARSE_MB": "100",
+    "PAID_VISUAL_PARSE_MB": "40",
     "PAID_RENDER_ORIGIN": "https://nikolay-onedrive-mcp.fdas201290.workers.dev"
   },
   "migrations": [
