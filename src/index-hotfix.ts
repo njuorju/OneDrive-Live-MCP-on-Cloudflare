@@ -167,8 +167,8 @@ const worker: ExportedHandler<SchedulerEnv> = {
     return provider.fetch(request, env, ctx);
   },
 
-  async queue(batch: MessageBatch<PaidJobMessage>, env): Promise<void> {
-    await processPaidQueueBatch(batch, env);
+  async queue(batch: MessageBatch<unknown>, env): Promise<void> {
+    await processPaidQueueBatch(batch as MessageBatch<PaidJobMessage>, env);
   },
 
   scheduled(_controller, env, ctx): void {
