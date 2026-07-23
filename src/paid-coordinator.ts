@@ -68,6 +68,15 @@ type VisualRow = {
   created_at: string;
 };
 
+type AuditRow = {
+  sequence: number;
+  entity_type: string;
+  entity_id: string;
+  event: string;
+  payload_json: string;
+  created_at: string;
+};
+
 function first<T>(cursor: Iterable<T>): T | undefined {
   for (const row of cursor) return row;
   return undefined;
@@ -464,15 +473,18 @@ export class PaidCoordinator extends DurableObject<Env> {
     const entityType = String(body.entityType ?? "");
     const entityId = String(body.entityId ?? "");
     const limit = Math.min(Math.max(Number(body.limit ?? 100), 1), 500);
-    return [...this.ctx.storage.sql.exec<JsonObject>(
+    return [...this.ctx.storage.sql.exec<AuditRow>(
       "SELECT sequence, entity_type, entity_id, event, payload_json, created_at FROM paid_audit WHERE entity_type = ? AND entity_id = ? ORDER BY sequence DESC LIMIT ?",
       entityType,
       entityId,
       limit,
     )].map((row) => ({
-      ...row,
-      payload: parseJsonText(String(row.payload_json ?? "{}"), {}),
-      payload_json: undefined,
+      sequence: row.sequence,
+      entity_type: row.entity_type,
+      entity_id: row.entity_id,
+      event: row.event,
+      created_at: row.created_at,
+      payload: parseJsonText(row.payload_json, {}),
     }));
   }
 
