@@ -18,6 +18,8 @@ test("wrangler config declares the complete paid architecture", () => {
   assert.ok(config.workflows.some((entry: { class_name: string }) => entry.class_name === "PaidConnectorWorkflow"));
   assert.ok(config.durable_objects.bindings.some((entry: { class_name: string }) => entry.class_name === "PaidCoordinator"));
   assert.ok(config.migrations.some((entry: { tag: string }) => entry.tag === "v3"));
+  assert.equal(config.vars.MAX_FILE_MB, "20");
+  assert.equal(config.vars.PAID_VISUAL_PARSE_MB, "40");
 });
 
 test("durable plan creation persists exact artifacts and payload bytes", () => {
@@ -41,6 +43,14 @@ test("paid work is detached from MCP response lifetime", () => {
   assert.match(jobs, /ARTIFACTS\.put|putArtifact/);
   assert.match(jobs, /cloudflare_browser_rendering_r2_pdfjs/);
   assert.doesNotMatch(jobs, /waitUntil\(/);
+});
+
+test("validated resumable snapshots remain outside the generic queue wrapper", () => {
+  const source = readFileSync(new URL("../src/index-hotfix.ts", import.meta.url), "utf8");
+  assert.match(source, /const repairedSnapshotHandler/);
+  assert.match(source, /create_source_snapshot\.handler = repairedSnapshotHandler/);
+  assert.match(source, /property === "MAX_FILE_MB"/);
+  assert.match(source, /PAID_VISUAL_PARSE_MB/);
 });
 
 test("new paid modules never reference protected UCA visual-library paths", () => {
