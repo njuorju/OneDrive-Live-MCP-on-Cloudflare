@@ -47,7 +47,7 @@ Abandon and supersede operations first refuse active leases, reservations or exe
 
 Expensive read-only tool calls are admitted synchronously, assigned a durable job ID, and started through a Workflow instance. The Workflow records admission and places one message on `onedrive-live-mcp-jobs`. The queue consumer runs independently of the MCP connection and writes the exact MCP tool result to private R2.
 
-Queued tools include snapshot creation, hashing, source and visual duplicate analysis, document inspection, document-visual enumeration and page rendering. Hash jobs persist cursor chunks and continue until complete. Existing resumable snapshot/job behavior is preserved behind the queue boundary.
+Queued tools include hashing, source and visual duplicate analysis, document inspection, document-visual enumeration and page rendering. Hash jobs persist cursor chunks and continue until complete. The existing resumable source-snapshot runner remains unchanged and continues using its validated Durable Object scheduling, checkpointing and lease implementation rather than being replaced by the generic queue wrapper.
 
 Use `await_paid_job` for one bounded long-poll rather than repeatedly invoking `get_job_status`, then `get_paid_job_result` for the exact stored result.
 
@@ -58,7 +58,8 @@ Large PDF or Microsoft Office render sources are streamed directly from Microsof
 Defaults:
 
 - paid render source limit: 500 MB;
-- in-memory visual-structure parsing limit: 100 MB;
+- queue-side in-memory document parsing limit: 40 MB;
+- ordinary synchronous MCP document limit: unchanged at 20 MB;
 - queue batch size: 1;
 - queue concurrency: 3;
 - queue retries: 5 with a dead-letter queue.
