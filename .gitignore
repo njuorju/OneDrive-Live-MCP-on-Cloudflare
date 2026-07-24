@@ -1,5 +1,6 @@
 node_modules/
 dist/
+dist-production/
 coverage/
 .wrangler/
 .dev.vars
@@ -12,6 +13,8 @@ coverage/
 *.bak
 .DS_Store
 Thumbs.db
+.wrangler.production.generated.jsonc
+wrangler.ci.jsonc
 
 # Never commit OAuth state, generated tokens, downloaded OneDrive content, or private fixtures.
 local-state/
