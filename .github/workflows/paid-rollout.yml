@@ -1,9 +1,6 @@
-name: Paid Workers production rollout
+name: Paid Workers bundle staging
 
 on:
-  push:
-    branches:
-      - ops/paid-rollout-4cf02eb
   pull_request:
     branches:
       - main
@@ -13,56 +10,26 @@ permissions:
   actions: read
 
 concurrency:
-  group: paid-workers-production-rollout
+  group: paid-workers-bundle-staging
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  stage:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 10
     env:
       TARGET_SHA: 4cf02eb8abdb3d494f254da4d701204193a4d669
       CI_RUN_ID: "30010817910"
       BUNDLE_ARTIFACT: worker-bundle-4a81a3d2d3df9a286b7f4cc5750464ede5e46aea
       EXPECTED_BUNDLE_SHA256: 4f3f768c108cc12633c9d218c04010da8b1c55e571d89895130c613b37cd85ba
-      CLOUDFLARE_ACCOUNT_ID: 3f67b673280f2119de4eedd09745e20f
+      UPLOAD_URL: https://onedrive-paid-rollout-uploader.fdas201290.workers.dev/upload-4cf02eb8
 
     steps:
-      - name: Select Cloudflare credential
-        env:
-          TOKEN_PRIMARY: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          TOKEN_ALT: ${{ secrets.CF_API_TOKEN }}
-          TOKEN_LEGACY: ${{ secrets.CLOUDFLARE_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -n "${TOKEN_PRIMARY:-}" ]]; then
-            token="$TOKEN_PRIMARY"
-          elif [[ -n "${TOKEN_ALT:-}" ]]; then
-            token="$TOKEN_ALT"
-          elif [[ -n "${TOKEN_LEGACY:-}" ]]; then
-            token="$TOKEN_LEGACY"
-          else
-            echo "::error::No supported Cloudflare API token secret is configured."
-            exit 1
-          fi
-          echo "::add-mask::$token"
-          printf 'CLOUDFLARE_API_TOKEN=%s\n' "$token" >> "$GITHUB_ENV"
-
       - name: Check out immutable source head
         uses: actions/checkout@v4
         with:
           ref: ${{ env.TARGET_SHA }}
           persist-credentials: false
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22.18.0
-          cache: npm
-
-      - name: Install pinned deployment tooling
-        run: npm ci
 
       - name: Download CI-validated Worker bundle
         uses: actions/download-artifact@v4
@@ -81,104 +48,18 @@ jobs:
           grep -q 'PaidCoordinator' worker-bundle/index-hotfix.js
           grep -q 'PaidConnectorWorkflow' worker-bundle/index-hotfix.js
 
-      - name: Write production rollout configuration
+      - name: Upload exact bundle to private R2 staging
         shell: bash
         run: |
-          cat > wrangler.rollout.jsonc <<'JSON'
-          {
-            "$schema": "node_modules/wrangler/config-schema.json",
-            "name": "nikolay-onedrive-mcp",
-            "main": "worker-bundle/index-hotfix.js",
-            "compatibility_date": "2026-07-23",
-            "compatibility_flags": ["nodejs_compat"],
-            "keep_vars": true,
-            "vars": {
-              "WORKER_DEPLOYMENT_ID": "repo-4cf02eb8abdb3d494f254da4d701204193a4d669",
-              "PAID_MAX_SOURCE_MB": "500",
-              "PAID_VISUAL_PARSE_MB": "40",
-              "PAID_RENDER_ORIGIN": "https://nikolay-onedrive-mcp.fdas201290.workers.dev"
-            },
-            "migrations": [
-              { "new_sqlite_classes": ["OneDriveMCP"], "tag": "v1" },
-              { "new_sqlite_classes": ["AuthState"], "tag": "v2" },
-              { "new_sqlite_classes": ["PaidCoordinator"], "tag": "v3" }
-            ],
-            "durable_objects": {
-              "bindings": [
-                { "class_name": "OneDriveMCP", "name": "MCP_OBJECT" },
-                { "class_name": "AuthState", "name": "AUTH_STATE" },
-                { "class_name": "PaidCoordinator", "name": "PAID_COORDINATOR" }
-              ]
-            },
-            "kv_namespaces": [
-              { "binding": "OAUTH_KV", "id": "a3ead543dad24b8596ab9193b10f1b9f" }
-            ],
-            "r2_buckets": [
-              { "binding": "ARTIFACTS", "bucket_name": "onedrive-live-mcp-artifacts" }
-            ],
-            "queues": {
-              "producers": [
-                { "binding": "PAID_JOBS", "queue": "onedrive-live-mcp-jobs" }
-              ],
-              "consumers": [
-                {
-                  "queue": "onedrive-live-mcp-jobs",
-                  "max_batch_size": 1,
-                  "max_batch_timeout": 5,
-                  "max_retries": 5,
-                  "dead_letter_queue": "onedrive-live-mcp-jobs-dlq",
-                  "max_concurrency": 3,
-                  "retry_delay": 10
-                }
-              ]
-            },
-            "workflows": [
-              {
-                "name": "onedrive-live-mcp-durable-jobs",
-                "binding": "PAID_WORKFLOW",
-                "class_name": "PaidConnectorWorkflow",
-                "limits": { "steps": 10000 }
-              }
-            ],
-            "ai": { "binding": "AI" },
-            "images": { "binding": "IMAGES" },
-            "browser": { "binding": "BROWSER" },
-            "observability": {
-              "enabled": true,
-              "logs": {
-                "enabled": true,
-                "head_sampling_rate": 1,
-                "invocation_logs": true
-              },
-              "traces": {
-                "enabled": true,
-                "head_sampling_rate": 0.1
-              }
-            }
-          }
-          JSON
+          set -euo pipefail
+          curl --fail-with-body --retry 2 --request PUT \
+            --header 'Content-Type: application/javascript' \
+            --data-binary @worker-bundle/index-hotfix.js \
+            "$UPLOAD_URL" | tee upload-result.json
 
-      - name: Validate production bundle and bindings
-        run: npx wrangler deploy --config wrangler.rollout.jsonc --dry-run --outdir production-dry-run --keep-vars
-
-      - name: Deploy exact validated bundle
-        shell: bash
-        run: |
-          set -o pipefail
-          npx wrangler deploy \
-            --config wrangler.rollout.jsonc \
-            --keep-vars \
-            --message "Paid Workers architecture rollout from exact validated head 4cf02eb8abdb3d494f254da4d701204193a4d669" \
-            --tag "repo-4cf02eb8abdb3d494f254da4d701204193a4d669" \
-            2>&1 | tee deployment-output.txt
-
-      - name: Preserve non-secret deployment evidence
-        if: always()
+      - name: Preserve upload evidence
         uses: actions/upload-artifact@v4
         with:
-          name: paid-rollout-evidence-${{ github.run_id }}
-          path: |
-            deployment-output.txt
-            wrangler.rollout.jsonc
-          if-no-files-found: warn
+          name: paid-bundle-staging-${{ github.run_id }}
+          path: upload-result.json
           retention-days: 1
