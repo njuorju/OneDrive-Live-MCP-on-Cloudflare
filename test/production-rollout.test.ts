@@ -46,7 +46,7 @@ test("production runbook requires forward recovery and plugin refresh", () => {
   assert.match(runbook, /--keep-vars/);
   assert.match(runbook, /Plugin → OneDriveLive → Refresh/);
   assert.match(runbook, /Deleting and recreating the plugin is not the normal update method/);
-  assert.doesNotMatch(runbook, /create replacement production resources/i);
+  assert.match(runbook, /Never create replacement production resources/);
 });
 
 test("no deployment workflow was added", () => {
