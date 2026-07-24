@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - ops/paid-rollout-4cf02eb
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: read
