@@ -12,6 +12,10 @@
     "check": "npm run type-check && npm test",
     "predeploy": "npm run verify-config && npm run check",
     "deploy": "wrangler deploy",
+    "prod:config": "node scripts/materialize-production-wrangler.mjs",
+    "prod:dry-run": "npm run prod:config && wrangler deploy --dry-run --config .wrangler.production.generated.jsonc --keep-vars --outdir dist-production",
+    "prod:deploy": "npm run prod:config && wrangler deploy --config .wrangler.production.generated.jsonc --keep-vars",
+    "smoke:paid": "node scripts/smoke-paid-architecture.mjs",
     "tail": "wrangler tail",
     "cf-typegen": "wrangler types"
   },
