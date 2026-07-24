@@ -1,9 +1,14 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "onedrive-live-mcp",
-  "main": "src/index-hotfix.ts",
+  "main": "src/index-closeout.ts",
   "compatibility_date": "2026-07-23",
   "compatibility_flags": ["nodejs_compat"],
+  "keep_vars": true,
+  "workers_dev": true,
+  "preview_urls": false,
+  "routes": [],
+  "send_metrics": false,
   "build": {
     "command": "node scripts/prepare-pdfjs.mjs"
   },
