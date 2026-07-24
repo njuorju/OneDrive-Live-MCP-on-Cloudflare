@@ -2,6 +2,10 @@ interface Env {
   OAUTH_KV: KVNamespace;
   MCP_OBJECT: DurableObjectNamespace;
   AUTH_STATE: DurableObjectNamespace;
+  PAID_COORDINATOR: DurableObjectNamespace;
+  PAID_WORKFLOW: Workflow;
+  PAID_JOBS: Queue<import("./src/paid-core").PaidJobMessage>;
+  ARTIFACTS: R2Bucket;
   AI: Ai;
   IMAGES: ImagesBinding;
   BROWSER: BrowserRun;
@@ -22,6 +26,9 @@ interface Env {
   MAX_IMAGE_PAGES: string;
   IMAGE_PROCESSING_TIMEOUT_MS: string;
   INTEGRITY_LEASE_SECONDS?: string;
+  PAID_MAX_SOURCE_MB?: string;
+  PAID_VISUAL_PARSE_MB?: string;
+  PAID_RENDER_ORIGIN?: string;
   WORKER_DEPLOYMENT_ID?: string;
   WORKER_VERSION?: string;
 }

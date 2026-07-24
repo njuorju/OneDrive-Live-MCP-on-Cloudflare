@@ -15,6 +15,14 @@ import {
   SOURCE_INTEGRITY_OWNER_ID,
   runScheduledIntegrityContinuation,
 } from "./scheduled-integrity";
+import { PaidCoordinator } from "./paid-coordinator";
+import {
+  PaidConnectorWorkflow,
+  handlePaidRenderRoute,
+  processPaidQueueBatch,
+} from "./paid-jobs";
+import { registerPaidArchitectureTools } from "./paid-tools";
+import type { PaidJobMessage } from "./paid-core";
 
 const prototype = OneDriveMCP.prototype as any;
 if (!prototype.__version20HotfixApplied) {
@@ -51,8 +59,8 @@ if (!prototype.__version20HotfixApplied) {
     if (!userId) throw new Error("No authorized Microsoft user is attached.");
 
     const replacementServer = new McpServer({
-      name: "Nikolay OneDrive Live integrated hotfix",
-      version: "0.4.4",
+      name: "Nikolay OneDrive Live paid architecture",
+      version: "0.5.0",
     });
     const contextFactory = () => ({
       env: this.env,
@@ -73,6 +81,12 @@ if (!prototype.__version20HotfixApplied) {
     registerDownstreamRenameReconciliationTool(replacementServer, contextFactory);
     registerBlockedMoveReconciliationTool(replacementServer, contextFactory);
     registerIntegrityLeaseTools(replacementServer, contextFactory, schedule);
+
+    const repairedSnapshotHandler = (replacementServer as any)._registeredTools?.create_source_snapshot?.handler;
+    registerPaidArchitectureTools(replacementServer, contextFactory);
+    if (repairedSnapshotHandler && (replacementServer as any)._registeredTools?.create_source_snapshot) {
+      (replacementServer as any)._registeredTools.create_source_snapshot.handler = repairedSnapshotHandler;
+    }
 
     const actual = this.server as any;
     const replacement = replacementServer as any;
@@ -140,6 +154,9 @@ async function invokeSourceIntegritySchedule(env: SchedulerEnv, ctx: ExecutionCo
 const provider = originalDefault as any;
 const worker: ExportedHandler<SchedulerEnv> = {
   async fetch(request, env, ctx): Promise<Response> {
+    const paidRender = await handlePaidRenderRoute(request, env);
+    if (paidRender) return paidRender;
+
     const url = new URL(request.url);
     if (request.method === "POST" && url.pathname === "/internal/scheduled-integrity-once") {
       const expected = String(env.SCHEDULE_ADMIN_TOKEN ?? "");
@@ -155,6 +172,16 @@ const worker: ExportedHandler<SchedulerEnv> = {
     return provider.fetch(request, env, ctx);
   },
 
+  async queue(batch: MessageBatch<unknown>, env): Promise<void> {
+    const paidEnv = new Proxy(env, {
+      get(target, property, receiver) {
+        if (property === "MAX_FILE_MB") return String(target.PAID_VISUAL_PARSE_MB ?? target.MAX_FILE_MB);
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    await processPaidQueueBatch(batch as MessageBatch<PaidJobMessage>, paidEnv);
+  },
+
   scheduled(_controller, env, ctx): void {
     ctx.waitUntil(
       invokeSourceIntegritySchedule(env, ctx)
@@ -164,5 +191,5 @@ const worker: ExportedHandler<SchedulerEnv> = {
   },
 };
 
-export { AuthState, OneDriveMCP };
+export { AuthState, OneDriveMCP, PaidCoordinator, PaidConnectorWorkflow };
 export default worker;
