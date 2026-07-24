@@ -48,12 +48,16 @@ export function assertCondition(condition, message, details = undefined) {
 
 export async function withTimeout(operation, timeoutMs, label = "operation") {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error(`${label} timed out after ${timeoutMs} ms`)), timeoutMs);
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(`${label} timed out after ${timeoutMs} ms`);
+      controller.abort(error);
+      reject(error);
+    }, timeoutMs);
+  });
   try {
-    return await operation(controller.signal);
-  } catch (error) {
-    if (controller.signal.aborted) throw new Error(`${label} timed out after ${timeoutMs} ms`);
-    throw error;
+    return await Promise.race([Promise.resolve().then(() => operation(controller.signal)), timeout]);
   } finally {
     clearTimeout(timer);
   }
