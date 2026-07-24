@@ -12,6 +12,10 @@ test("canonical JSON and paid request hashes are order independent", async () =>
 
 test("wrangler config declares the complete paid architecture", () => {
   const config = JSON.parse(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
+  assert.equal(config.main, "src/index-closeout.ts");
+  assert.equal(config.keep_vars, true);
+  assert.equal(config.workers_dev, true);
+  assert.deepEqual(config.routes, []);
   assert.ok(config.r2_buckets.some((entry: { binding: string }) => entry.binding === "ARTIFACTS"));
   assert.ok(config.queues.producers.some((entry: { binding: string }) => entry.binding === "PAID_JOBS"));
   assert.ok(config.queues.consumers.some((entry: { dead_letter_queue?: string }) => entry.dead_letter_queue === "onedrive-live-mcp-jobs-dlq"));
@@ -53,8 +57,8 @@ test("validated resumable snapshots remain outside the generic queue wrapper", (
   assert.match(source, /PAID_VISUAL_PARSE_MB/);
 });
 
-test("new paid modules never reference protected UCA visual-library paths", () => {
-  const files = ["paid-core.ts", "paid-coordinator.ts", "paid-jobs.ts", "paid-tools.ts"];
+test("new paid modules never reference protected UCA visual-library paths or plan execution", () => {
+  const files = ["paid-core.ts", "paid-coordinator.ts", "paid-jobs.ts", "paid-tools.ts", "structured-catalogue.ts", "structured-preparation-store.ts", "structured-preparation.ts", "index-closeout.ts"];
   for (const filename of files) {
     const source = readFileSync(new URL(`../src/${filename}`, import.meta.url), "utf8");
     assert.doesNotMatch(source, /UCA\/Modules\/04_Visual_Library/);
@@ -70,4 +74,11 @@ test("stable visuals expose provenance, hashes and parent pages", () => {
   assert.match(source, /perceptualHash/);
   assert.match(source, /parentPages/);
   assert.match(source, /pdf_dct_stream_with_page_relationship/);
+});
+
+test("final closeout entry registers only the structured preparation additions", () => {
+  const source = readFileSync(new URL("../src/index-closeout.ts", import.meta.url), "utf8");
+  assert.match(source, /registerStructuredPreparationTools/);
+  assert.match(source, /await previousInit\.call\(this\)/);
+  assert.doesNotMatch(source, /PaidCoordinator extends|WorkflowEntrypoint|migrations/);
 });
