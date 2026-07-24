@@ -1,4 +1,3 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import patchedDefault, {
   AuthState,
   OneDriveMCP,
@@ -15,20 +14,12 @@ if (!prototype.__finalEngineeringCloseoutApplied) {
     await previousInit.call(this);
     const userId = String(this.props?.userId ?? "");
     if (!userId) throw new Error("No authorized Microsoft user is attached.");
-    const supplement = new McpServer({
-      name: "Nikolay OneDrive Live final engineering closeout",
-      version: "0.6.0",
-    });
-    registerStructuredPreparationTools(supplement, () => ({
+    const actual = this.server as any;
+    registerStructuredPreparationTools(actual, () => ({
       env: this.env,
       userId,
       storage: createIntegratedStateStorage(this.env, userId),
     }));
-    const actual = this.server as any;
-    const additions = supplement as any;
-    for (const [name, tool] of Object.entries(additions._registeredTools ?? {})) {
-      actual._registeredTools[name] = tool;
-    }
   };
   Object.defineProperty(prototype, "__finalEngineeringCloseoutApplied", {
     value: true,
