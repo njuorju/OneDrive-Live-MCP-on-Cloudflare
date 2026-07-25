@@ -1,0 +1,47 @@
+name: Visual Phase 2 fail-closed corrections
+
+on:
+  push:
+    branches:
+      - work/onedrivelive-visual-asset-phase2
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[phase2-failclosed]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: work/onedrivelive-visual-asset-phase2
+          fetch-depth: 0
+      - name: Apply fail-closed corrections
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('src/visual-phase2.ts')
+          text = path.read_text()
+          old = 'grantedToV2,grantedToIdentitiesV2,grantedTo,grantedToIdentities`)]);\n  const profile = await me.json() as { id?: string }; const driveInfo = await drive.json() as { driveType?: string; owner?: IdentitySet }; const permissions = ((await response.json()) as { value?: Permission[] }).value ?? [];'
+          new = 'grantedToV2,grantedToIdentitiesV2,grantedTo,grantedToIdentities&$top=999`)]);\n  const profile = await me.json() as { id?: string }; const driveInfo = await drive.json() as { driveType?: string; owner?: IdentitySet };\n  const permissionPage = await response.json() as { value?: Permission[]; "@odata.nextLink"?: string };\n  if (permissionPage["@odata.nextLink"]) throw new ConnectorError("permission_pagination_incomplete", "The permission set exceeds the bounded inspection page and cannot be classified safely.");\n  const permissions = permissionPage.value ?? [];'
+          if old not in text:
+              raise SystemExit('permission inspection fragment absent')
+          text = text.replace(old, new)
+          old = '}, async (input) => { try { const actions = composeVisualPhase2PlanActions(input); const result = await createPlan({ snapshotId: input.snapshotId, scopePath: input.scopePath, actions }, {}) as CallToolResult;'
+          new = '}, async (input) => { try { const context = contextFactory(); for (const candidate of input.preparedBinaryActions) { const prepared = await readPrep(context, candidate.preparationId, candidate.preparationFingerprint); if (prepared.definition.visualSha256 !== candidate.expectedFinalSha256 || prepared.definition.byteLength !== candidate.expectedByteLength || prepared.definition.width !== candidate.expectedWidth || prepared.definition.height !== candidate.expectedHeight) throw new ConnectorError("prepared_binary_action_mismatch", "A prepared binary action does not match its immutable preparation."); } const actions = composeVisualPhase2PlanActions(input); const result = await createPlan({ snapshotId: input.snapshotId, scopePath: input.scopePath, actions }, {}) as CallToolResult;'
+          if old not in text:
+              raise SystemExit('composition handler fragment absent')
+          text = text.replace(old, new)
+          path.write_text(text)
+          PY
+      - name: Commit correction
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/visual-phase2.ts
+          git diff --cached --quiet && exit 0
+          git commit -m "Fail closed on permission paging and stale preparations [phase2-failclosed]"
+          git push origin HEAD:work/onedrivelive-visual-asset-phase2
