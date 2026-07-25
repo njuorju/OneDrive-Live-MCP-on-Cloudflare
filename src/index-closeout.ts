@@ -6,6 +6,7 @@ import patchedDefault, {
 } from "./index-hotfix";
 import { registerStructuredPreparationTools } from "./structured-preparation";
 import { registerComposedPreparedPlanTool } from "./composed-prepared-plan";
+import { registerVisualPhase2Tools } from "./visual-phase2";
 import { createIntegratedStateStorage } from "./version20-hotfix";
 
 const prototype = OneDriveMCP.prototype as any;
@@ -23,6 +24,7 @@ if (!prototype.__finalEngineeringCloseoutApplied) {
     });
     registerStructuredPreparationTools(actual, contextFactory);
     registerComposedPreparedPlanTool(actual, contextFactory);
+    registerVisualPhase2Tools(actual, contextFactory);
   };
   Object.defineProperty(prototype, "__finalEngineeringCloseoutApplied", {
     value: true,
