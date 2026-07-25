@@ -1,0 +1,59 @@
+name: Deploy merged visual Phase 2 capabilities
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: ${{ github.event.pull_request.head.ref == 'work/onedrivelive-visual-asset-phase2' && github.event.pull_request.base.ref == 'main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 3643f6399304756a3e45d57e7b7dbeab3815d790
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
+          cache: npm
+      - name: Verify deployment credentials are configured
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+      - name: Install pinned dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Re-run repository checks
+        run: npm run check
+      - name: Materialize existing production configuration
+        env:
+          CLOUDFLARE_OAUTH_KV_NAMESPACE_ID: a3ead543dad24b8596ab9193b10f1b9f
+        run: npm run prod:config
+      - name: Deploy exact merged repository source
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_OUTPUT_FILE_DIRECTORY: ${{ runner.temp }}/wrangler-output
+        run: |
+          npx wrangler deploy \
+            --config .wrangler.production.generated.jsonc \
+            --keep-vars \
+            --strict \
+            --message "Deploy ODL-REQ-011/012 visual Phase 2 from merge 3643f6399304756a3e45d57e7b7dbeab3815d790" \
+            --tag "repo-3643f6399304756a3e45d57e7b7dbeab3815d790"
+      - name: Upload sanitized deployment result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase2-production-deployment-result
+          path: ${{ runner.temp }}/wrangler-output/
+          if-no-files-found: ignore
+          retention-days: 1
