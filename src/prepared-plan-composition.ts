@@ -57,6 +57,28 @@ function assertAcyclic(actions: PlanActionLike[]): void {
   for (const id of graph.keys()) visit(id);
 }
 
+export function validateComposedPlanActions(scopePath: string, rawActions: PlanActionLike[]): PlanActionLike[] {
+  const actions = rawActions.map((raw, index) => {
+    const id = actionId(raw.actionId, `actions[${index}].actionId`);
+    assertWithinScope(scopePath, raw.sourcePath);
+    assertWithinScope(scopePath, raw.destinationPath);
+    return { ...raw, actionId: id, dependencies: dependencyList(raw.dependencies, id) };
+  });
+  const ids = new Set<string>();
+  for (const action of actions) {
+    const id = String(action.actionId);
+    if (ids.has(id)) throw new ConnectorError("duplicate_action_id", `Duplicate action ID: ${id}.`);
+    ids.add(id);
+  }
+  for (const action of actions) {
+    for (const dependency of action.dependencies as string[]) {
+      if (!ids.has(dependency)) throw new ConnectorError("unknown_dependency", `Action ${String(action.actionId)} depends on unknown action ${dependency}.`);
+    }
+  }
+  assertAcyclic(actions);
+  return actions;
+}
+
 export function assertPreparationFingerprint(definition: { fingerprint: string }, suppliedFingerprint: string): void {
   if (definition.fingerprint !== suppliedFingerprint) {
     throw new ConnectorError("preparation_fingerprint_changed", "The supplied preparation fingerprint does not match the immutable stored definition.");
@@ -102,21 +124,11 @@ export function composePreparedPlanActions(input: {
     return { ...raw, actionId: id, dependencies, operationOrder: additional.length + index };
   });
 
-  const actions = [...additional, ...prepared];
-  const ids = new Set<string>();
-  for (const action of actions) {
-    const id = String(action.actionId);
-    if (ids.has(id)) throw new ConnectorError("duplicate_action_id", `Duplicate action ID: ${id}.`);
-    ids.add(id);
-  }
+  const actions = validateComposedPlanActions(input.scopePath, [...additional, ...prepared]);
   for (const key of Object.keys(input.preparedDependencies)) {
-    if (!ids.has(key)) throw new ConnectorError("prepared_dependency_target_unknown", `preparedDependencies contains an unknown prepared action ID: ${key}.`);
-  }
-  for (const action of actions) {
-    for (const dependency of action.dependencies as string[]) {
-      if (!ids.has(dependency)) throw new ConnectorError("unknown_dependency", `Action ${String(action.actionId)} depends on unknown action ${dependency}.`);
+    if (!actions.some((action) => action.actionId === key)) {
+      throw new ConnectorError("prepared_dependency_target_unknown", `preparedDependencies contains an unknown prepared action ID: ${key}.`);
     }
   }
-  assertAcyclic(actions);
   return actions;
 }
