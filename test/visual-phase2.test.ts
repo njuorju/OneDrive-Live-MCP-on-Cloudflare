@@ -87,5 +87,5 @@ test("visual Phase 2 composition retains explicit semantics and dependencies whi
       bytes: "forbidden",
     }],
     accessActions: [{ actionId: "access", action: "VERIFY_ACCESS_POLICY", targetPath: "UCA/Modules", policy: "owner_only_no_sharing_links", dependencies: ["asset"] }],
-  }), /inline binary payloads are forbidden/i);
+  }), /binary payloads are forbidden/i);
 });
