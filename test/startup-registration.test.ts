@@ -25,7 +25,7 @@ register(`data:text/javascript,${encodeURIComponent(hooks)}`, import.meta.url);
 
 test("production MCP initialization exposes structured tools after create_integrity_plan", async () => {
   const { OneDriveMCP } = await import("../src/index-closeout");
-  const server = new McpServer({ name: "OneDriveLive production regression", version: "0.6.1" });
+  const server = new McpServer({ name: "OneDriveLive production regression", version: "0.6.2" });
   const storage: any = {
     async get() { return undefined; },
     async put() {},
@@ -51,6 +51,7 @@ test("production MCP initialization exposes structured tools after create_integr
     "prepare_structured_text_patch",
     "prepare_catalogue_pair_update",
     "commit_prepared_integrity_plan",
+    "commit_composed_prepared_integrity_plan",
   ];
   const createPlanIndex = names.indexOf("create_integrity_plan");
   assert.notEqual(createPlanIndex, -1);

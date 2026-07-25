@@ -5,6 +5,7 @@ import patchedDefault, {
   PaidCoordinator,
 } from "./index-hotfix";
 import { registerStructuredPreparationTools } from "./structured-preparation";
+import { registerComposedPreparedPlanTool } from "./composed-prepared-plan";
 import { createIntegratedStateStorage } from "./version20-hotfix";
 
 const prototype = OneDriveMCP.prototype as any;
@@ -15,11 +16,13 @@ if (!prototype.__finalEngineeringCloseoutApplied) {
     const userId = String(this.props?.userId ?? "");
     if (!userId) throw new Error("No authorized Microsoft user is attached.");
     const actual = this.server as any;
-    registerStructuredPreparationTools(actual, () => ({
+    const contextFactory = () => ({
       env: this.env,
       userId,
       storage: createIntegratedStateStorage(this.env, userId),
-    }));
+    });
+    registerStructuredPreparationTools(actual, contextFactory);
+    registerComposedPreparedPlanTool(actual, contextFactory);
   };
   Object.defineProperty(prototype, "__finalEngineeringCloseoutApplied", {
     value: true,
