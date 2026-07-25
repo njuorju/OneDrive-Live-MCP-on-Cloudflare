@@ -1,0 +1,48 @@
+name: Build exact Phase 2 transport artifact
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: visual-phase2-artifact-transport
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: ${{ github.event.pull_request.head.ref == 'work/onedrivelive-visual-asset-phase2' && github.event.pull_request.base.ref == 'main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: work/onedrivelive-visual-asset-phase2
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build and verify exact repository bundle
+        shell: bash
+        run: |
+          cp wrangler.jsonc wrangler.transport.jsonc
+          sed -i 's/REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER/CI_TEST_ROOT/g' wrangler.transport.jsonc
+          sed -i 's/REPLACE_WITH_KV_NAMESPACE_ID/00000000000000000000000000000000/g' wrangler.transport.jsonc
+          rm -rf deploy-artifact
+          npx wrangler deploy --dry-run --config wrangler.transport.jsonc --outdir deploy-artifact
+          echo 'c5a7c9d2fe63e2467d39a0ef928be62ee94d8273fad31bcf454c2d7044f02bd7  deploy-artifact/index-closeout.js' | sha256sum --check --strict
+          rm -f wrangler.transport.jsonc deploy-artifact/index-closeout.js.map
+      - name: Commit temporary exact artifact to the PR branch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f deploy-artifact/index-closeout.js
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Build exact Phase 2 transport artifact [phase2-transport-artifact]"
+          git push origin HEAD:work/onedrivelive-visual-asset-phase2
