@@ -7,6 +7,7 @@ import patchedDefault, {
 import { registerStructuredPreparationTools } from "./structured-preparation";
 import { registerComposedPreparedPlanTool } from "./composed-prepared-plan";
 import { registerVisualPhase2Tools } from "./visual-phase2";
+import { registerAccessVerificationValidator } from "./access-verification-validator";
 import { createIntegratedStateStorage } from "./version20-hotfix";
 
 const prototype = OneDriveMCP.prototype as any;
@@ -25,6 +26,7 @@ if (!prototype.__finalEngineeringCloseoutApplied) {
     registerStructuredPreparationTools(actual, contextFactory);
     registerComposedPreparedPlanTool(actual, contextFactory);
     registerVisualPhase2Tools(actual, contextFactory);
+    registerAccessVerificationValidator(actual, contextFactory);
   };
   Object.defineProperty(prototype, "__finalEngineeringCloseoutApplied", {
     value: true,
