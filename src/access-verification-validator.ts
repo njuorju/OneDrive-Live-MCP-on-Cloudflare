@@ -190,7 +190,9 @@ function validatePreparedBinaryAction(
     const filename = validateItemName(String(meta.proposedFilename ?? ""));
     if (String(action.proposedFilename ?? "") !== filename) errors.push({ actionId, code: "prepared_binary_filename_mismatch" });
   } catch (error) {
-    const safe = error instanceof ConnectorError ? error : new ConnectorError("prepared_binary_path_invalid", "The prepared-binary destination is invalid.");
+    const safe = error instanceof ConnectorError
+      ? error
+      : new ConnectorError("prepared_binary_path_invalid", "The prepared-binary destination is invalid.");
     errors.push({ actionId, code: safe.code, message: safe.message });
   }
   if (!/^prep_[0-9a-f]{48}$/.test(String(meta.preparationId ?? ""))) errors.push({ actionId, code: "preparation_identifier_invalid" });
@@ -220,18 +222,22 @@ function validateAccessActionShape(
     if (hasValue(action, field)) errors.push({ actionId, code: "access_verification_mutation_payload_forbidden", field });
   }
   for (const field of BINARY_META_FIELDS) {
-    if (meta[field] !== undefined && meta[field] !== null) errors.push({ actionId, code: "access_verification_mutation_payload_forbidden", field: `visualPhase2.${field}` });
+    if (meta[field] !== undefined && meta[field] !== null) {
+      errors.push({ actionId, code: "access_verification_mutation_payload_forbidden", field: `visualPhase2.${field}` });
+    }
   }
   if (action.destructive === true) errors.push({ actionId, code: "access_verification_destructive_forbidden" });
-  let target: string | null = null;
   try {
-    target = targetPathForAccessAction(action, meta);
+    const target = targetPathForAccessAction(action, meta);
     if (!withinScope(scopePath, target)) errors.push({ actionId, code: "destination_outside_scope" });
+    return target;
   } catch (error) {
-    const safe = error instanceof ConnectorError ? error : new ConnectorError("access_target_invalid", "The access-policy target is invalid.");
+    const safe = error instanceof ConnectorError
+      ? error
+      : new ConnectorError("access_target_invalid", "The access-policy target is invalid.");
     errors.push({ actionId, code: safe.code, message: safe.message });
+    return null;
   }
-  return target;
 }
 
 export function validateAccessVerificationActions(
@@ -248,7 +254,9 @@ export function validateAccessVerificationActions(
     seenIds.add(actionId);
     actionById.set(actionId, action);
     const name = actionName(action);
-    if (!BASE_ACTIONS.has(name) && !VISUAL_PHASE2_ACTIONS.has(name)) errors.push({ actionId, code: "unsupported_plan_action", action: name });
+    if (!BASE_ACTIONS.has(name) && !VISUAL_PHASE2_ACTIONS.has(name)) {
+      errors.push({ actionId, code: "unsupported_plan_action", action: name });
+    }
   }
 
   const accessTargets = new Map<string, string>();
@@ -284,7 +292,9 @@ export function validateAccessVerificationActions(
       if (actionName(candidate) !== "ENSURE_FOLDER_ACCESS_POLICY") return false;
       const candidateTarget = accessTargets.get(String(candidate.actionId ?? ""));
       const candidateMeta = phase2Meta(candidate);
-      return Boolean(candidateTarget) && policyCoversTarget(String(candidateTarget), target) && candidateMeta?.policy === POLICY;
+      return Boolean(candidateTarget)
+        && policyCoversTarget(String(candidateTarget), target)
+        && candidateMeta?.policy === POLICY;
     });
     if (candidates.length === 0) {
       errors.push({ actionId, code: "access_enforcement_missing", targetPath: target });
@@ -318,9 +328,9 @@ function projectedStorage(
   storage: StableStorage,
   originalPlan: IntegrityPlan,
   projectedPlan: IntegrityPlan,
-): StableStorage {
+): IntegratedContext["storage"] {
   const key = planKey(originalPlan.planId);
-  return {
+  const adapter = {
     async get<T = unknown>(requested: string): Promise<T | undefined> {
       if (requested === key) return projectedPlan as T;
       return storage.get<T>(requested);
@@ -344,6 +354,7 @@ function projectedStorage(
       return storage.list<T>(options);
     },
   };
+  return adapter as unknown as IntegratedContext["storage"];
 }
 
 export async function validateAccessVerificationIntegrityPlan(
@@ -383,7 +394,8 @@ export async function validateAccessVerificationIntegrityPlan(
   return {
     ...result,
     accessVerificationReadOnlyCollisionExcluded: true,
-    accessVerificationActionCount: (plan.actions as ValidationAction[]).filter((action) => actionName(action) === "VERIFY_ACCESS_POLICY").length,
+    accessVerificationActionCount: (plan.actions as ValidationAction[])
+      .filter((action) => actionName(action) === "VERIFY_ACCESS_POLICY").length,
   };
 }
 
