@@ -147,6 +147,12 @@ function targetPathForAccessAction(action: ValidationAction, meta: VisualPhase2M
   return target;
 }
 
+function policyCoversTarget(enforcementTarget: string, verificationTarget: string): boolean {
+  const enforcement = enforcementTarget.toLocaleLowerCase("en");
+  const verification = verificationTarget.toLocaleLowerCase("en");
+  return verification === enforcement || verification.startsWith(`${enforcement}/`);
+}
+
 function dependsTransitively(
   actionById: Map<string, ValidationAction>,
   startActionId: string,
@@ -194,7 +200,7 @@ function validatePreparedBinaryAction(
     const value = Number(meta[field]);
     if (!Number.isInteger(value) || value <= 0) errors.push({ actionId, code: "prepared_binary_evidence_invalid", field });
   }
-  if (!['jpeg', 'jpg'].includes(String(meta.expectedFormat ?? ""))) errors.push({ actionId, code: "prepared_binary_format_invalid" });
+  if (!["jpeg", "jpg"].includes(String(meta.expectedFormat ?? ""))) errors.push({ actionId, code: "prepared_binary_format_invalid" });
 }
 
 function validateAccessActionShape(
@@ -278,7 +284,7 @@ export function validateAccessVerificationActions(
       if (actionName(candidate) !== "ENSURE_FOLDER_ACCESS_POLICY") return false;
       const candidateTarget = accessTargets.get(String(candidate.actionId ?? ""));
       const candidateMeta = phase2Meta(candidate);
-      return candidateTarget === target && candidateMeta?.policy === POLICY;
+      return Boolean(candidateTarget) && policyCoversTarget(String(candidateTarget), target) && candidateMeta?.policy === POLICY;
     });
     if (candidates.length === 0) {
       errors.push({ actionId, code: "access_enforcement_missing", targetPath: target });
