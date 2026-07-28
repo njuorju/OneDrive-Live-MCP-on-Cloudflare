@@ -36,6 +36,7 @@ test("only genuine direct link permissions are selected for the existing DELETE 
   assert.equal(summary.totalSharingLinkCount, 2);
   assert.equal(summary.inheritedPermissionCount, 1);
   assert.equal(summary.directPermissionCount, 1);
+  assert.equal(summary.externalPrincipalCount, 0);
 });
 
 test("unresolved permission objects remain unknown instead of being forced into a direct-link class", () => {

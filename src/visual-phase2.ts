@@ -192,10 +192,6 @@ export function classifyPermissionRecords(input: { permissions: Permission[]; ow
     const hasLinkFacet = Boolean(permission.link);
     const hasInvitationFacet = Boolean(permission.invitation);
     const linkScope = permission.link?.scope ? String(permission.link.scope).toLowerCase() : null;
-    if (counts.total === 0) {
-      if (linkScope === "anonymous" || hasInvitationFacet) counts.external++;
-      else if (linkScope === "organization") counts.internal++;
-    }
     const ownerPermission = owner && !nonOwner && !policyUnknown && !hasLinkFacet && !hasInvitationFacet;
     const policyUnsafe = hasLinkFacet || hasInvitationFacet || nonOwner || policyUnknown || !owner;
     const removable = !inherited && Boolean(permission.id) && (hasLinkFacet || hasInvitationFacet || nonOwner) && (hasLinkFacet || (!owner && !policyUnknown));
