@@ -33,13 +33,33 @@ type Phase2 = {
   expectedHeight?: number; targetPath?: string; policy?: typeof POLICY; provenance?: Record<string, unknown>;
   rightsEvidence?: Record<string, unknown>;
 };
+type PermissionLink = { type?: string; scope?: string; preventsDownload?: boolean };
+type PermissionItemReference = { driveId?: string; id?: string; path?: string };
 type Permission = {
-  id?: string; roles?: string[]; inheritedFrom?: unknown; link?: { scope?: string }; invitation?: unknown;
-  grantedToV2?: IdentitySet; grantedTo?: IdentitySet; grantedToIdentitiesV2?: IdentitySet[]; grantedToIdentities?: IdentitySet[];
+  id?: string; roles?: string[]; inheritedFrom?: PermissionItemReference; link?: PermissionLink;
+  invitation?: unknown; expirationDateTime?: string; grantedToV2?: IdentitySet; grantedTo?: IdentitySet;
+  grantedToIdentitiesV2?: IdentitySet[]; grantedToIdentities?: IdentitySet[];
 };
 type Identity = { id?: string };
-type IdentitySet = { user?: Identity; group?: Identity; application?: Identity; siteGroup?: Identity; siteUser?: Identity };
-type AccessInternal = { evidence: Record<string, unknown>; satisfied: boolean; removable: string[]; inheritedUnsafe: number; unresolvedDirect: number };
+type IdentitySet = {
+  user?: Identity; group?: Identity; application?: Identity; device?: Identity; site?: Identity;
+  siteGroup?: Identity; siteUser?: Identity;
+};
+export type SanitizedPermissionRecord = {
+  permissionId: string | null; roles: string[]; hasLinkFacet: boolean; hasInvitationFacet: boolean;
+  hasGrantedToV2: boolean; hasGrantedToIdentitiesV2: boolean; linkType: string | null;
+  linkScope: string | null; preventsDownload: boolean | null; expiration: string | null;
+  inheritedFrom: { driveId: string | null; itemId: string | null; path: string | null } | null;
+  classification: "owner" | "direct_link" | "inherited_link" | "direct_principal" | "inherited_principal" | "invitation" | "unknown";
+  principalTypes: Array<"user" | "group" | "application" | "device" | "site" | "unknown">;
+  principalCounts: { total: number; user: number; group: number; application: number; device: number; site: number; unknown: number; internal: number; external: number; unresolved: number };
+  internalExternalClassification: "internal" | "external" | "mixed" | "unknown";
+  inherited: boolean; direct: boolean; ownerPermission: boolean; removable: boolean;
+  nonRemovableReason: string | null; descendantsWouldReceiveAccess: boolean;
+  policyUnsafe: boolean; policyExternalPrincipalCount: number; policyUnresolvedPrincipalCount: number;
+  unresolvedDirect: boolean; selectionReason: string;
+};
+type AccessInternal = { evidence: Record<string, unknown>; satisfied: boolean; removable: string[]; inheritedUnsafe: number; unresolvedDirect: number; permissionRecords: SanitizedPermissionRecord[] };
 type ExecInput = { executionToken: string; ownerType: IntegrityOwnerType; ownerId: string; invocationId: string; correlationId: string };
 type Lease = { planId: string; leaseId: string; fencingToken: number; invocationId: string; ownerType: IntegrityOwnerType; ownerId: string; correlationId: string; recovery?: Record<string, unknown> };
 
@@ -135,32 +155,167 @@ async function readPrep(context: HotfixContext, id: string, fingerprint: string)
 }
 
 function identitySets(permission: Permission): IdentitySet[] { return [permission.grantedToV2, permission.grantedTo, ...(permission.grantedToIdentitiesV2 ?? []), ...(permission.grantedToIdentities ?? [])].filter(Boolean) as IdentitySet[]; }
+function permissionReference(value: unknown): SanitizedPermissionRecord["inheritedFrom"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const reference = value as PermissionItemReference;
+  return { driveId: reference.driveId ? String(reference.driveId) : null, itemId: reference.id ? String(reference.id) : null, path: reference.path ? String(reference.path) : null };
+}
+function principalTypes(counts: SanitizedPermissionRecord["principalCounts"]): SanitizedPermissionRecord["principalTypes"] {
+  const types: SanitizedPermissionRecord["principalTypes"] = [];
+  for (const type of ["user", "group", "application", "device", "site"] as const) if (counts[type] > 0) types.push(type);
+  if (counts.unknown > 0 || types.length === 0) types.push("unknown");
+  return types;
+}
+export function classifyPermissionRecords(input: { permissions: Permission[]; ownerIds: string[]; itemIsFolder: boolean }): SanitizedPermissionRecord[] {
+  const owners = new Set(input.ownerIds.filter(Boolean));
+  return input.permissions.map((permission) => {
+    const sets = identitySets(permission);
+    const counts: SanitizedPermissionRecord["principalCounts"] = { total: 0, user: 0, group: 0, application: 0, device: 0, site: 0, unknown: 0, internal: 0, external: 0, unresolved: 0 };
+    let owner = false, nonOwner = false, policyUnknown = sets.length === 0, unsupportedPrincipal = false;
+    for (const set of sets) {
+      let recognized = false;
+      if (set.user) {
+        recognized = true; counts.user++; counts.total++;
+        if (set.user.id) { if (owners.has(set.user.id)) { owner = true; counts.internal++; } else { nonOwner = true; counts.external++; } }
+        else { policyUnknown = true; counts.unresolved++; }
+      }
+      for (const [type, principal] of [["group", set.group], ["application", set.application], ["group", set.siteGroup], ["user", set.siteUser]] as const) {
+        if (!principal) continue; recognized = true; counts[type]++; counts.total++; counts.external++; nonOwner = true;
+      }
+      for (const [type, principal] of [["device", set.device], ["site", set.site]] as const) {
+        if (!principal) continue; recognized = true; counts[type]++; counts.total++; counts.unresolved++; unsupportedPrincipal = true;
+      }
+      if (!recognized) { counts.unknown++; counts.total++; counts.unresolved++; }
+    }
+    if (sets.length === 0) { counts.unknown++; counts.unresolved++; }
+    const inherited = Boolean(permission.inheritedFrom);
+    const hasLinkFacet = Boolean(permission.link);
+    const hasInvitationFacet = Boolean(permission.invitation);
+    const linkScope = permission.link?.scope ? String(permission.link.scope).toLowerCase() : null;
+    if (counts.total === 0) {
+      if (linkScope === "anonymous" || hasInvitationFacet) counts.external++;
+      else if (linkScope === "organization") counts.internal++;
+    }
+    const ownerPermission = owner && !nonOwner && !policyUnknown && !hasLinkFacet && !hasInvitationFacet;
+    const policyUnsafe = hasLinkFacet || hasInvitationFacet || nonOwner || policyUnknown || !owner;
+    const removable = !inherited && Boolean(permission.id) && (hasLinkFacet || hasInvitationFacet || nonOwner) && (hasLinkFacet || (!owner && !policyUnknown));
+    let nonRemovableReason: string | null = null;
+    if (!removable) {
+      if (inherited) nonRemovableReason = "inherited_permission";
+      else if (!permission.id) nonRemovableReason = "missing_permission_id";
+      else if (ownerPermission) nonRemovableReason = "owner_permission";
+      else if (policyUnknown) nonRemovableReason = "unresolved_principal";
+      else if (unsupportedPrincipal) nonRemovableReason = "unsupported_principal_type";
+      else nonRemovableReason = "not_selected_by_policy";
+    }
+    let classification: SanitizedPermissionRecord["classification"];
+    if (hasInvitationFacet) classification = "invitation";
+    else if (hasLinkFacet) classification = inherited ? "inherited_link" : "direct_link";
+    else if (ownerPermission) classification = "owner";
+    else if (sets.length > 0) classification = inherited ? "inherited_principal" : "direct_principal";
+    else classification = "unknown";
+    let internalExternalClassification: SanitizedPermissionRecord["internalExternalClassification"] = "unknown";
+    if (counts.internal > 0 && counts.external > 0) internalExternalClassification = "mixed";
+    else if (counts.external > 0) internalExternalClassification = "external";
+    else if (counts.internal > 0) internalExternalClassification = "internal";
+    const selectionReason = removable
+      ? hasLinkFacet ? "direct_link_selected" : hasInvitationFacet ? "direct_invitation_selected" : "direct_non_owner_principal_selected"
+      : String(nonRemovableReason);
+    return {
+      permissionId: permission.id ? String(permission.id) : null,
+      roles: Array.isArray(permission.roles) ? permission.roles.map(String) : [],
+      hasLinkFacet, hasInvitationFacet, hasGrantedToV2: Boolean(permission.grantedToV2),
+      hasGrantedToIdentitiesV2: Array.isArray(permission.grantedToIdentitiesV2) && permission.grantedToIdentitiesV2.length > 0,
+      linkType: permission.link?.type ? String(permission.link.type) : null, linkScope,
+      preventsDownload: typeof permission.link?.preventsDownload === "boolean" ? permission.link.preventsDownload : null,
+      expiration: permission.expirationDateTime ? String(permission.expirationDateTime) : null,
+      inheritedFrom: inherited ? permissionReference(permission.inheritedFrom) : null,
+      classification, principalTypes: principalTypes(counts), principalCounts: counts,
+      internalExternalClassification, inherited, direct: !inherited, ownerPermission, removable,
+      nonRemovableReason, descendantsWouldReceiveAccess: input.itemIsFolder,
+      policyUnsafe, policyExternalPrincipalCount: counts.external + (hasInvitationFacet ? 1 : 0),
+      policyUnresolvedPrincipalCount: policyUnknown ? 1 : 0,
+      unresolvedDirect: !inherited && policyUnsafe && !removable,
+      selectionReason,
+    };
+  });
+}
+export function summarizePermissionRecords(records: SanitizedPermissionRecord[]): {
+  inheritedPermissionCount: number; directPermissionCount: number; ownerGrantCount: number;
+  additionalDirectGrantCount: number; totalSharingLinkCount: number; anonymousSharingLinkCount: number;
+  organizationWideSharingLinkCount: number; inheritedUnsafeCount: number; externalPrincipalCount: number;
+  unresolvedPrincipalCount: number; unresolvedDirectCount: number; roleCounts: Record<string, number>;
+} {
+  const summary = { inheritedPermissionCount: 0, directPermissionCount: 0, ownerGrantCount: 0, additionalDirectGrantCount: 0, totalSharingLinkCount: 0, anonymousSharingLinkCount: 0, organizationWideSharingLinkCount: 0, inheritedUnsafeCount: 0, externalPrincipalCount: 0, unresolvedPrincipalCount: 0, unresolvedDirectCount: 0, roleCounts: {} as Record<string, number> };
+  for (const record of records) {
+    record.inherited ? summary.inheritedPermissionCount++ : summary.directPermissionCount++;
+    if (record.ownerPermission) summary.ownerGrantCount++;
+    if (record.hasLinkFacet) summary.totalSharingLinkCount++;
+    if (record.hasLinkFacet && record.linkScope === "anonymous") summary.anonymousSharingLinkCount++;
+    if (record.hasLinkFacet && record.linkScope === "organization") summary.organizationWideSharingLinkCount++;
+    if (record.direct && record.policyUnsafe) summary.additionalDirectGrantCount++;
+    if (record.inherited && record.policyUnsafe) summary.inheritedUnsafeCount++;
+    summary.externalPrincipalCount += record.policyExternalPrincipalCount;
+    summary.unresolvedPrincipalCount += record.policyUnresolvedPrincipalCount;
+    if (record.unresolvedDirect) summary.unresolvedDirectCount++;
+    for (const role of record.roles) summary.roleCounts[role] = (summary.roleCounts[role] ?? 0) + 1;
+  }
+  return summary;
+}
 export function ownerOnlyPolicySatisfied(input: { permissionCount: number; ownerGrantCount: number; sharingLinkCount: number; directAdditionalGrantCount: number; inheritedUnsafeCount: number; externalPrincipalCount: number; unresolvedPrincipalCount: number }): boolean {
   return input.permissionCount > 0 && input.ownerGrantCount > 0 && input.sharingLinkCount === 0 && input.directAdditionalGrantCount === 0 && input.inheritedUnsafeCount === 0 && input.externalPrincipalCount === 0 && input.unresolvedPrincipalCount === 0;
 }
+function enforcementPreview(records: SanitizedPermissionRecord[]): Record<string, unknown> {
+  const expectedPostcondition = { requestedPolicySatisfied: true, ownerGrantCountMinimum: 1, totalSharingLinkCount: 0, additionalDirectGrantCount: 0, inheritedUnsafeCount: 0, externalPrincipalCount: 0, unresolvedPrincipalCount: 0 };
+  return {
+    policy: POLICY, mutationPerformed: false,
+    evaluatedPermissions: records.map((record) => ({
+      permissionId: record.permissionId, selected: record.removable, selectionOrSkipReason: record.selectionReason,
+      inherited: record.inherited, ownerPermission: record.ownerPermission, hasGenuineLinkFacet: record.hasLinkFacet,
+      removable: record.removable, intendedHttpMethod: record.removable ? "DELETE" : null,
+      graphEndpointTemplate: record.removable ? "DELETE /me/drive/items/{item-id}/permissions/{permission-id}" : null,
+      expectedPostcondition: record.removable ? "permission_absent_and_owner_only_policy_re_evaluated" : "permission_unchanged",
+    })),
+    selectedPermissionIds: records.filter((record) => record.removable && record.permissionId).map((record) => record.permissionId),
+    skippedPermissionIds: records.filter((record) => !record.removable && record.permissionId).map((record) => record.permissionId),
+    selectedOperations: records.filter((record) => record.removable && record.permissionId).map((record) => ({ permissionId: record.permissionId, method: "DELETE", endpointTemplate: "DELETE /me/drive/items/{item-id}/permissions/{permission-id}" })),
+    expectedPostcondition,
+  };
+}
 async function inspectInternal(context: HotfixContext, item: VerifiedItem): Promise<AccessInternal> {
-  const [me, drive, response] = await Promise.all([graphResponse(context.env, context.userId, "/me?$select=id"), graphResponse(context.env, context.userId, "/me/drive?$select=driveType,owner"), graphResponse(context.env, context.userId, `/me/drive/items/${encodeURIComponent(item.item.id)}/permissions?$select=id,roles,link,invitation,inheritedFrom,grantedToV2,grantedToIdentitiesV2,grantedTo,grantedToIdentities&$top=999`)]);
+  const [me, drive, response] = await Promise.all([graphResponse(context.env, context.userId, "/me?$select=id"), graphResponse(context.env, context.userId, "/me/drive?$select=driveType,owner"), graphResponse(context.env, context.userId, `/me/drive/items/${encodeURIComponent(item.item.id)}/permissions?$select=id,roles,link,invitation,expirationDateTime,inheritedFrom,grantedToV2,grantedToIdentitiesV2,grantedTo,grantedToIdentities&$top=999`)]);
   const profile = await me.json() as { id?: string }; const driveInfo = await drive.json() as { driveType?: string; owner?: IdentitySet };
   const permissionPage = await response.json() as { value?: Permission[]; "@odata.nextLink"?: string };
   if (permissionPage["@odata.nextLink"]) throw new ConnectorError("permission_pagination_incomplete", "The permission set exceeds the bounded inspection page and cannot be classified safely.");
   const permissions = permissionPage.value ?? [];
-  const owners = new Set([profile.id, driveInfo.owner?.user?.id].filter(Boolean) as string[]); if (!owners.size) throw new ConnectorError("owner_identity_unresolved", "The authenticated OneDrive owner could not be safely resolved.");
-  let inherited = 0, direct = 0, ownerGrants = 0, links = 0, anonymous = 0, organization = 0, additional = 0, inheritedUnsafe = 0, external = 0, unresolved = 0, unresolvedDirect = 0; const removable: string[] = []; const roles: Record<string, number> = {};
-  for (const permission of permissions) {
-    const inheritedGrant = Boolean(permission.inheritedFrom); inheritedGrant ? inherited++ : direct++; for (const role of permission.roles ?? []) roles[role] = (roles[role] ?? 0) + 1;
-    const sets = identitySets(permission); let owner = false, nonOwner = false, unknown = sets.length === 0;
-    for (const set of sets) { if (set.user?.id) owners.has(set.user.id) ? owner = true : (nonOwner = true, external++); else if (set.user) unknown = true; for (const principal of [set.group, set.application, set.siteGroup, set.siteUser]) if (principal) { nonOwner = true; external++; } }
-    const link = Boolean(permission.link); const scope = String(permission.link?.scope ?? "").toLowerCase(); if (link) links++; if (scope === "anonymous") anonymous++; if (scope === "organization") organization++; if (permission.invitation) external++;
-    if (owner && !nonOwner && !unknown && !link && !permission.invitation) ownerGrants++;
-    const unsafe = link || Boolean(permission.invitation) || nonOwner || unknown || !owner; if (unknown) unresolved++;
-    if (inheritedGrant && unsafe) inheritedUnsafe++;
-    if (!inheritedGrant && unsafe) { additional++; const safeDelete = Boolean(permission.id) && (link || Boolean(permission.invitation) || nonOwner) && (link || (!owner && !unknown)); safeDelete ? removable.push(String(permission.id)) : unresolvedDirect++; }
-  }
-  const satisfied = ownerOnlyPolicySatisfied({ permissionCount: permissions.length, ownerGrantCount: ownerGrants, sharingLinkCount: links, directAdditionalGrantCount: additional, inheritedUnsafeCount: inheritedUnsafe, externalPrincipalCount: external, unresolvedPrincipalCount: unresolved });
-  return { satisfied, removable, inheritedUnsafe, unresolvedDirect, evidence: { item: compactVerifiedItem(item), driveType: String(driveInfo.driveType ?? "unknown"), permissionsInherited: inherited > 0, inheritedPermissionCount: inherited, directPermissionCount: direct, ownerGrantCount: ownerGrants, additionalDirectGrantCount: additional, totalSharingLinkCount: links, anonymousSharingLinkCount: anonymous, organizationWideSharingLinkCount: organization, externalPrincipalCount: external, unresolvedPrincipalCount: unresolved, roleCounts: roles, accessLimitedToAuthenticatedOwner: satisfied, childWouldInheritBroaderAccess: Boolean(item.item.folder) && !satisfied, requestedPolicy: POLICY, requestedPolicySatisfied: satisfied, sanitized: true, tokensExposed: false, graphUrlsExposed: false, principalNamesExposed: false } };
+  const ownerIds = [profile.id, driveInfo.owner?.user?.id].filter(Boolean) as string[];
+  if (!ownerIds.length) throw new ConnectorError("owner_identity_unresolved", "The authenticated OneDrive owner could not be safely resolved.");
+  const permissionRecords = classifyPermissionRecords({ permissions, ownerIds, itemIsFolder: Boolean(item.item.folder) });
+  const summary = summarizePermissionRecords(permissionRecords);
+  const satisfied = ownerOnlyPolicySatisfied({ permissionCount: permissionRecords.length, ownerGrantCount: summary.ownerGrantCount, sharingLinkCount: summary.totalSharingLinkCount, directAdditionalGrantCount: summary.additionalDirectGrantCount, inheritedUnsafeCount: summary.inheritedUnsafeCount, externalPrincipalCount: summary.externalPrincipalCount, unresolvedPrincipalCount: summary.unresolvedPrincipalCount });
+  const removable = permissionRecords.filter((record) => record.removable && record.permissionId).map((record) => String(record.permissionId));
+  return {
+    satisfied, removable, inheritedUnsafe: summary.inheritedUnsafeCount, unresolvedDirect: summary.unresolvedDirectCount, permissionRecords,
+    evidence: {
+      item: compactVerifiedItem(item), driveType: String(driveInfo.driveType ?? "unknown"),
+      permissionsInherited: summary.inheritedPermissionCount > 0, inheritedPermissionCount: summary.inheritedPermissionCount,
+      directPermissionCount: summary.directPermissionCount, ownerGrantCount: summary.ownerGrantCount,
+      additionalDirectGrantCount: summary.additionalDirectGrantCount, totalSharingLinkCount: summary.totalSharingLinkCount,
+      anonymousSharingLinkCount: summary.anonymousSharingLinkCount, organizationWideSharingLinkCount: summary.organizationWideSharingLinkCount,
+      externalPrincipalCount: summary.externalPrincipalCount, unresolvedPrincipalCount: summary.unresolvedPrincipalCount,
+      roleCounts: summary.roleCounts, accessLimitedToAuthenticatedOwner: satisfied,
+      childWouldInheritBroaderAccess: Boolean(item.item.folder) && !satisfied,
+      requestedPolicy: POLICY, requestedPolicySatisfied: satisfied,
+      permissionRecords, enforcementPreview: enforcementPreview(permissionRecords),
+      permissionInspectionRequest: { method: "GET", endpointTemplate: "GET /me/drive/items/{item-id}/permissions" },
+      oneDriveMutationPerformed: false, sanitized: true, tokensExposed: false, graphUrlsExposed: false,
+      principalNamesExposed: false, emailAddressesExposed: false, sharingUrlsExposed: false, invitationRedemptionUrlsExposed: false,
+    },
+  };
 }
-export async function inspectItemAccess(context: HotfixContext, input: { itemId?: string; path?: string }): Promise<Record<string, unknown>> {
+export async function inspectItemAccess(context: HotfixContext, input: { itemId?: string; path?: string; requestedPolicy?: typeof POLICY }): Promise<Record<string, unknown>> {
   if (Boolean(input.itemId) === Boolean(input.path !== undefined)) throw new ConnectorError("access_target_invalid", "Provide exactly one of itemId or path.");
+  if (input.requestedPolicy && input.requestedPolicy !== POLICY) throw new ConnectorError("access_policy_unsupported", "Only owner_only_no_sharing_links is supported.");
   const item = input.itemId ? await verifyItemInsideRoot(context.env, context.userId, input.itemId) : await resolveRelativeItem(context.env, context.userId, input.path!);
   return (await inspectInternal(context, item)).evidence;
 }
@@ -229,7 +384,7 @@ const accessSchema = z.object({ actionId: z.string().min(1).max(200), action: z.
 
 export function registerVisualPhase2Tools(server: McpServer, contextFactory: () => HotfixContext): void {
   server.registerTool("prepare_document_visual_asset", { title: "Prepare exact document visual asset", description: "Verify one source PDF and one unchanged embedded JPEG original, then store the exact bytes immutably in private R2 without mutating OneDrive.", inputSchema: { sourceItemId: z.string().min(1).max(500), expectedSourceETag: z.string().min(1).max(1000), expectedSourceSha256: z.string().regex(/^[0-9a-f]{64}$/), stableVisualKey: z.string().regex(/^pdf:image:\d+:\d+$/), expectedVisualSha256: z.string().regex(/^[0-9a-f]{64}$/), expectedFormat: z.enum(["jpeg", "jpg"]), expectedWidth: z.number().int().positive().max(16384), expectedHeight: z.number().int().positive().max(16384), expectedByteLength: z.number().int().positive().max(MAX_BYTES), bytes: z.never().optional(), content: z.never().optional() }, annotations: NON_DESTRUCTIVE }, async (input) => { try { return textResult(await prepareDocumentVisualAsset(contextFactory(), input)); } catch (error) { return errorResult(error); } });
-  server.registerTool("inspect_item_access", { title: "Inspect sanitized OneDrive access", description: "Inspect inherited/direct grants, sharing links, external principals, owner-only access, and child inheritance without exposing identities, tokens, or Graph URLs.", inputSchema: { itemId: z.string().min(1).max(500).optional(), path: z.string().max(1000).optional(), requestedPolicy: z.literal(POLICY).default(POLICY) }, annotations: READ_ONLY }, async ({ itemId, path }) => { try { return textResult(await inspectItemAccess(contextFactory(), { itemId, path })); } catch (error) { return errorResult(error); } });
+  server.registerTool("inspect_item_access", { title: "Inspect sanitized OneDrive access", description: "Inspect inherited/direct grants, sharing links, external principals, owner-only access, and child inheritance without exposing identities, tokens, or Graph URLs.", inputSchema: { itemId: z.string().min(1).max(500).optional(), path: z.string().max(1000).optional(), requestedPolicy: z.literal(POLICY).default(POLICY) }, annotations: READ_ONLY }, async ({ itemId, path, requestedPolicy }) => { try { return textResult(await inspectItemAccess(contextFactory(), { itemId, path, requestedPolicy })); } catch (error) { return errorResult(error); } });
   const createPlan = tool(server, "create_integrity_plan")?.handler; if (!createPlan) throw new Error("create_integrity_plan must be registered before visual Phase 2 composition tools.");
   server.registerTool("commit_visual_phase2_integrity_plan", { title: "Compose visual Phase 2 integrity plan", description: "Create one non-executed integrity plan containing exact prepared-binary creation and owner-only access-policy actions. Binary bytes are obtained only from immutable preparation.", inputSchema: { snapshotId: z.string().uuid(), scopePath: z.string().max(1000), structuralActions: z.array(structureSchema).max(100).default([]), preparedBinaryActions: z.array(binarySchema).min(1).max(100), accessActions: z.array(accessSchema).min(1).max(100), reason: z.string().min(1).max(5000).default("Create a non-executed visual Phase 2 plan with exact assets and owner-only access controls.") }, annotations: NON_DESTRUCTIVE }, async (input) => { try { const context = contextFactory(); for (const candidate of input.preparedBinaryActions) { const prepared = await readPrep(context, candidate.preparationId, candidate.preparationFingerprint); if (prepared.definition.visualSha256 !== candidate.expectedFinalSha256 || prepared.definition.byteLength !== candidate.expectedByteLength || prepared.definition.width !== candidate.expectedWidth || prepared.definition.height !== candidate.expectedHeight) throw new ConnectorError("prepared_binary_action_mismatch", "A prepared binary action does not match its immutable preparation."); } const actions = composeVisualPhase2PlanActions(input); const result = await createPlan({ snapshotId: input.snapshotId, scopePath: input.scopePath, actions }, {}) as CallToolResult; if (result.isError) return result; return textResult({ ...data(result), actionCount: actions.length, exactPreparedBinaryActionCount: input.preparedBinaryActions.length, accessPolicyActionCount: input.accessActions.length, structuralActionCount: input.structuralActions.length, composedBy: "visual_phase2_prepared_plan_extension", callerSuppliedBinaryAccepted: false, oneDriveMutationPerformed: false, semanticPlanActions: actions.map((action) => ({ actionId: action.actionId, action: phase2(action as PlanAction)?.actionType ?? action.action, dependencies: action.dependencies ?? [] })), planCsvPreview: toCsv(actions as Array<Record<string, unknown>>) }); } catch (error) { return errorResult(error); } });
   const execute = tool(server, "execute_integrity_plan"); if (execute?.handler && !execute.__visualPhase2Wrapped) { const original = execute.handler.bind(execute); execute.handler = async (input: ExecInput) => { try { const token = await openJson<{ planId: string; planHash: string; expiresAt: number }>(contextFactory().env.COOKIE_ENCRYPTION_KEY, String(input.executionToken ?? "")).catch(() => null); if (!token || token.expiresAt <= Date.now()) return original(input, {}); const plan = await contextFactory().storage.get<IntegrityPlan>(planKey(token.planId)); const ready = plan ? remainingActions(plan.actions, plan.completedActions, plan.failedActions, plan.skippedDependencyActions) : []; return ready[0] && phase2(ready[0]) ? textResult(await executeCustom(contextFactory(), input, token)) : original(input, {}); } catch (error) { return errorResult(error); } }; execute.__visualPhase2Wrapped = true; }
