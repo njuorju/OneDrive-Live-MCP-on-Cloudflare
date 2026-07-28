@@ -1,0 +1,55 @@
+name: Correct ODL-REQ-015 aggregate attribution
+
+on:
+  push:
+    branches:
+      - work/odl-req-015-permission-provenance
+
+permissions:
+  contents: write
+
+jobs:
+  correct:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: work/odl-req-015-permission-provenance
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Correct link/principal attribution
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          source = Path('src/visual-phase2.ts')
+          text = source.read_text()
+          old = '''    if (counts.total === 0) {
+              if (linkScope === "anonymous" || hasInvitationFacet) counts.external++;
+              else if (linkScope === "organization") counts.internal++;
+            }
+          '''
+          if old not in text:
+              raise SystemExit('link-scope principal attribution fragment absent')
+          text = text.replace(old, '', 1)
+          source.write_text(text)
+          test = Path('test/permission-provenance.test.ts')
+          body = test.read_text()
+          anchor = '    assert.equal(summary.directPermissionCount, 1);\n'
+          if anchor not in body:
+              raise SystemExit('aggregate test anchor absent')
+          body = body.replace(anchor, anchor + '    assert.equal(summary.externalPrincipalCount, 0);\n', 1)
+          test.write_text(body)
+          PY
+      - name: Verify
+        run: npm ci && npm run check
+      - name: Commit correction and remove temporary files
+        run: |
+          rm .github/workflows/odl-req-015-correct-aggregate.yml .github/odl-req-015-trigger
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/visual-phase2.ts test/permission-provenance.test.ts .github/workflows/odl-req-015-correct-aggregate.yml .github/odl-req-015-trigger
+          git commit -m "Correct permission aggregate attribution [ODL-REQ-015]"
+          git push origin HEAD:work/odl-req-015-permission-provenance
