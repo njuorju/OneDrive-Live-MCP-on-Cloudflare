@@ -24,23 +24,20 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          import re
           source = Path('src/visual-phase2.ts')
           text = source.read_text()
-          old = '''    if (counts.total === 0) {
-              if (linkScope === "anonymous" || hasInvitationFacet) counts.external++;
-              else if (linkScope === "organization") counts.internal++;
-            }
-          '''
-          if old not in text:
+          pattern = r'\n    if \(counts\.total === 0\) \{\n      if \(linkScope === "anonymous" \|\| hasInvitationFacet\) counts\.external\+\+;\n      else if \(linkScope === "organization"\) counts\.internal\+\+;\n    \}\n'
+          text, replaced = re.subn(pattern, '\n', text, count=1)
+          if replaced != 1:
               raise SystemExit('link-scope principal attribution fragment absent')
-          text = text.replace(old, '', 1)
           source.write_text(text)
           test = Path('test/permission-provenance.test.ts')
           body = test.read_text()
-          anchor = '    assert.equal(summary.directPermissionCount, 1);\n'
+          anchor = '  assert.equal(summary.directPermissionCount, 1);\n'
           if anchor not in body:
               raise SystemExit('aggregate test anchor absent')
-          body = body.replace(anchor, anchor + '    assert.equal(summary.externalPrincipalCount, 0);\n', 1)
+          body = body.replace(anchor, anchor + '  assert.equal(summary.externalPrincipalCount, 0);\n', 1)
           test.write_text(body)
           PY
       - name: Verify
