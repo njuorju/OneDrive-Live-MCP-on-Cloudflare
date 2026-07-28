@@ -21,37 +21,17 @@ jobs:
           node-version: 22
           cache: npm
       - name: Correct link/principal attribution
+        shell: bash
         run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          source = Path('src/visual-phase2.ts')
-          lines = source.read_text().splitlines()
-          start = next((i for i, line in enumerate(lines) if line.strip() == 'if (counts.total === 0) {'), None)
-          if start is None:
-              raise SystemExit('link-scope principal attribution block absent')
-          expected = [
-              'if (counts.total === 0) {',
-              'if (linkScope === "anonymous" || hasInvitationFacet) counts.external++;',
-              'else if (linkScope === "organization") counts.internal++;',
-              '}',
-          ]
-          if [line.strip() for line in lines[start:start + 4]] != expected:
-              raise SystemExit('link-scope principal attribution block changed')
-          del lines[start:start + 4]
-          source.write_text('\n'.join(lines) + '\n')
-
-          test = Path('test/permission-provenance.test.ts')
-          test_lines = test.read_text().splitlines()
-          anchor = next((i for i, line in enumerate(test_lines) if line.strip() == 'assert.equal(summary.directPermissionCount, 1);'), None)
-          if anchor is None:
-              raise SystemExit('aggregate test anchor absent')
-          test_lines.insert(anchor + 1, '  assert.equal(summary.externalPrincipalCount, 0);')
-          test.write_text('\n'.join(test_lines) + '\n')
-          PY
+          grep -n 'if (counts.total === 0)' src/visual-phase2.ts
+          sed -i '/^[[:space:]]*if (counts\.total === 0) {$/,+3d' src/visual-phase2.ts
+          ! grep -q 'if (counts.total === 0)' src/visual-phase2.ts
+          sed -i '/assert.equal(summary.directPermissionCount, 1);/a\  assert.equal(summary.externalPrincipalCount, 0);' test/permission-provenance.test.ts
+          grep -q 'assert.equal(summary.externalPrincipalCount, 0);' test/permission-provenance.test.ts
       - name: Verify
         run: npm ci && npm run check
       - name: Commit correction and remove temporary files
+        shell: bash
         run: |
           rm .github/workflows/odl-req-015-correct-aggregate.yml .github/odl-req-015-trigger
           git config user.name "github-actions[bot]"
