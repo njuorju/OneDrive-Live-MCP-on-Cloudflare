@@ -20,14 +20,22 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: Correct link/principal attribution
+      - name: Locate link attribution block
+        shell: bash
+        run: grep -nF 'if (counts.total === 0) {' src/visual-phase2.ts
+      - name: Remove link attribution block
         shell: bash
         run: |
-          grep -n 'if (counts.total === 0)' src/visual-phase2.ts
-          sed -i '/^[[:space:]]*if (counts\.total === 0) {$/,+3d' src/visual-phase2.ts
-          ! grep -q 'if (counts.total === 0)' src/visual-phase2.ts
+          line=$(grep -nF 'if (counts.total === 0) {' src/visual-phase2.ts | head -1 | cut -d: -f1)
+          test -n "$line"
+          sed -i "${line},$((line+3))d" src/visual-phase2.ts
+          ! grep -qF 'if (counts.total === 0) {' src/visual-phase2.ts
+      - name: Add aggregate assertion
+        shell: bash
+        run: |
+          grep -nF 'assert.equal(summary.directPermissionCount, 1);' test/permission-provenance.test.ts
           sed -i '/assert.equal(summary.directPermissionCount, 1);/a\  assert.equal(summary.externalPrincipalCount, 0);' test/permission-provenance.test.ts
-          grep -q 'assert.equal(summary.externalPrincipalCount, 0);' test/permission-provenance.test.ts
+          grep -qF 'assert.equal(summary.externalPrincipalCount, 0);' test/permission-provenance.test.ts
       - name: Verify
         run: npm ci && npm run check
       - name: Commit correction and remove temporary files
