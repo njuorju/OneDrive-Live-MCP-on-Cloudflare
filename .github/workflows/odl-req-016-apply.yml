@@ -1,0 +1,369 @@
+name: Apply ODL-REQ-016 owner permission protection
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: work/odl-req-016-owner-permission-protection
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Apply bounded classifier and selector correction
+        shell: bash
+        run: |
+          python <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('src/visual-phase2.ts')
+          source = path.read_text()
+
+          old_type_pattern = r'export type SanitizedPermissionRecord = \{.*?\n\};\ntype AccessInternal'
+          new_type = '''export type SanitizedPermissionRecord = {
+            permissionId: string | null; roles: string[]; hasLinkFacet: boolean; hasInvitationFacet: boolean;
+            hasGrantedToV2: boolean; hasGrantedToIdentitiesV2: boolean; linkType: string | null;
+            linkScope: string | null; preventsDownload: boolean | null; expiration: string | null;
+            inheritedFrom: { driveId: string | null; itemId: string | null; path: string | null } | null;
+            classification: "owner" | "direct_link" | "inherited_link" | "direct_principal" | "inherited_principal" | "inherited_permission" | "invitation" | "unknown";
+            principalTypes: Array<"user" | "group" | "application" | "device" | "site" | "unknown">;
+            principalCounts: { total: number; user: number; group: number; application: number; device: number; site: number; unknown: number; internal: number; external: number; unresolved: number };
+            internalExternalClassification: "internal" | "external" | "mixed" | "unknown";
+            inherited: boolean; direct: boolean; ownerPermission: boolean; isOwnerPermission: boolean;
+            isProtectedPermission: boolean; removable: boolean; policyRelevantSharingPermission: boolean;
+            selectedForDeletion: boolean; nonRemovableReason: string | null; descendantsWouldReceiveAccess: boolean;
+            policyUnsafe: boolean; policyExternalPrincipalCount: number; policyUnresolvedPrincipalCount: number;
+            unresolvedDirect: boolean; selectionReason: string; selectionDecision: string;
+            intendedHttpMethod: "DELETE" | null; intendedEndpoint: string | null;
+          };
+          type AccessInternal'''
+          source, count = re.subn(old_type_pattern, new_type, source, count=1, flags=re.S)
+          assert count == 1, f'type replacement count={count}'
+
+          logic_pattern = r'export function classifyPermissionRecords\(.*?\nasync function inspectInternal'
+          new_logic = '''export function classifyPermissionRecords(input: { permissions: Permission[]; ownerIds: string[]; itemIsFolder: boolean }): SanitizedPermissionRecord[] {
+            const owners = new Set(input.ownerIds.filter(Boolean));
+            return input.permissions.map((permission) => {
+              const sets = identitySets(permission);
+              const counts: SanitizedPermissionRecord["principalCounts"] = { total: 0, user: 0, group: 0, application: 0, device: 0, site: 0, unknown: 0, internal: 0, external: 0, unresolved: 0 };
+              let owner = false, nonOwner = false, policyUnknown = sets.length === 0, unsupportedPrincipal = false;
+              for (const set of sets) {
+                let recognized = false;
+                if (set.user) {
+                  recognized = true; counts.user++; counts.total++;
+                  if (set.user.id) { if (owners.has(set.user.id)) { owner = true; counts.internal++; } else { nonOwner = true; counts.external++; } }
+                  else { policyUnknown = true; counts.unresolved++; }
+                }
+                for (const [type, principal] of [["group", set.group], ["application", set.application], ["group", set.siteGroup], ["user", set.siteUser]] as const) {
+                  if (!principal) continue; recognized = true; counts[type]++; counts.total++; counts.external++; nonOwner = true;
+                }
+                for (const [type, principal] of [["device", set.device], ["site", set.site]] as const) {
+                  if (!principal) continue; recognized = true; counts[type]++; counts.total++; counts.unresolved++; unsupportedPrincipal = true;
+                }
+                if (!recognized) { counts.unknown++; counts.total++; counts.unresolved++; }
+              }
+              if (sets.length === 0) { counts.unknown++; counts.unresolved++; }
+              const inherited = Boolean(permission.inheritedFrom);
+              const hasLinkFacet = Boolean(permission.link);
+              const hasInvitationFacet = Boolean(permission.invitation);
+              const linkScope = permission.link?.scope ? String(permission.link.scope).toLowerCase() : null;
+              const roles = Array.isArray(permission.roles) ? permission.roles.map(String) : [];
+              const ownerPermission = roles.some((role) => role.toLowerCase() === "owner");
+              const isProtectedPermission = ownerPermission;
+              const policyUnsafe = !isProtectedPermission && (hasLinkFacet || hasInvitationFacet || nonOwner || policyUnknown || !owner);
+              const removable = !isProtectedPermission && !inherited && Boolean(permission.id) && (hasLinkFacet || hasInvitationFacet || nonOwner) && (hasLinkFacet || (!owner && !policyUnknown));
+              let nonRemovableReason: string | null = null;
+              if (!removable) {
+                if (isProtectedPermission) nonRemovableReason = "protected_owner_permission";
+                else if (inherited) nonRemovableReason = "inherited_permission";
+                else if (!permission.id) nonRemovableReason = "missing_permission_id";
+                else if (policyUnknown) nonRemovableReason = "unresolved_principal";
+                else if (unsupportedPrincipal) nonRemovableReason = "unsupported_principal_type";
+                else nonRemovableReason = "not_selected_by_policy";
+              }
+              let classification: SanitizedPermissionRecord["classification"];
+              if (ownerPermission) classification = "owner";
+              else if (inherited) classification = hasLinkFacet ? "inherited_link" : sets.length > 0 ? "inherited_principal" : "inherited_permission";
+              else if (hasLinkFacet) classification = "direct_link";
+              else if (sets.length > 0) classification = "direct_principal";
+              else if (hasInvitationFacet) classification = "invitation";
+              else classification = "unknown";
+              let internalExternalClassification: SanitizedPermissionRecord["internalExternalClassification"] = "unknown";
+              if (counts.internal > 0 && counts.external > 0) internalExternalClassification = "mixed";
+              else if (counts.external > 0) internalExternalClassification = "external";
+              else if (counts.internal > 0) internalExternalClassification = "internal";
+              const policyRelevantSharingPermission = !isProtectedPermission && policyUnsafe;
+              const selectedForDeletion = removable;
+              const selectionDecision = selectedForDeletion
+                ? hasLinkFacet ? "direct_link_selected" : hasInvitationFacet ? "direct_invitation_selected" : "direct_non_owner_principal_selected"
+                : isProtectedPermission ? "protected_owner_permission_skipped" : String(nonRemovableReason);
+              return {
+                permissionId: permission.id ? String(permission.id) : null,
+                roles, hasLinkFacet, hasInvitationFacet, hasGrantedToV2: Boolean(permission.grantedToV2),
+                hasGrantedToIdentitiesV2: Array.isArray(permission.grantedToIdentitiesV2) && permission.grantedToIdentitiesV2.length > 0,
+                linkType: permission.link?.type ? String(permission.link.type) : null, linkScope,
+                preventsDownload: typeof permission.link?.preventsDownload === "boolean" ? permission.link.preventsDownload : null,
+                expiration: permission.expirationDateTime ? String(permission.expirationDateTime) : null,
+                inheritedFrom: inherited ? permissionReference(permission.inheritedFrom) : null,
+                classification, principalTypes: principalTypes(counts), principalCounts: counts,
+                internalExternalClassification, inherited, direct: !inherited, ownerPermission,
+                isOwnerPermission: ownerPermission, isProtectedPermission, removable, policyRelevantSharingPermission,
+                selectedForDeletion, nonRemovableReason, descendantsWouldReceiveAccess: input.itemIsFolder && policyUnsafe,
+                policyUnsafe, policyExternalPrincipalCount: isProtectedPermission ? 0 : counts.external + (hasInvitationFacet ? 1 : 0),
+                policyUnresolvedPrincipalCount: isProtectedPermission ? 0 : policyUnknown ? 1 : 0,
+                unresolvedDirect: !inherited && policyUnsafe && !removable,
+                selectionReason: selectionDecision, selectionDecision,
+                intendedHttpMethod: selectedForDeletion ? "DELETE" : null,
+                intendedEndpoint: selectedForDeletion ? "DELETE /me/drive/items/{item-id}/permissions/{permission-id}" : null,
+              };
+            });
+          }
+          export function summarizePermissionRecords(records: SanitizedPermissionRecord[]): {
+            inheritedPermissionCount: number; directPermissionCount: number; ownerGrantCount: number;
+            additionalDirectGrantCount: number; totalSharingLinkCount: number; rawLinkFacetCount: number;
+            policyRelevantSharingLinkCount: number; protectedOwnerPermissionCount: number;
+            anonymousSharingLinkCount: number; organizationWideSharingLinkCount: number;
+            inheritedUnsafeCount: number; externalPrincipalCount: number;
+            unresolvedPrincipalCount: number; unresolvedDirectCount: number; roleCounts: Record<string, number>;
+          } {
+            const summary = { inheritedPermissionCount: 0, directPermissionCount: 0, ownerGrantCount: 0, additionalDirectGrantCount: 0, totalSharingLinkCount: 0, rawLinkFacetCount: 0, policyRelevantSharingLinkCount: 0, protectedOwnerPermissionCount: 0, anonymousSharingLinkCount: 0, organizationWideSharingLinkCount: 0, inheritedUnsafeCount: 0, externalPrincipalCount: 0, unresolvedPrincipalCount: 0, unresolvedDirectCount: 0, roleCounts: {} as Record<string, number> };
+            for (const record of records) {
+              record.inherited ? summary.inheritedPermissionCount++ : summary.directPermissionCount++;
+              if (record.ownerPermission) summary.ownerGrantCount++;
+              if (record.isProtectedPermission) summary.protectedOwnerPermissionCount++;
+              if (record.hasLinkFacet) { summary.totalSharingLinkCount++; summary.rawLinkFacetCount++; }
+              if (record.hasLinkFacet && record.policyRelevantSharingPermission) summary.policyRelevantSharingLinkCount++;
+              if (record.hasLinkFacet && record.linkScope === "anonymous") summary.anonymousSharingLinkCount++;
+              if (record.hasLinkFacet && record.linkScope === "organization") summary.organizationWideSharingLinkCount++;
+              if (record.direct && record.policyUnsafe) summary.additionalDirectGrantCount++;
+              if (record.inherited && record.policyUnsafe) summary.inheritedUnsafeCount++;
+              summary.externalPrincipalCount += record.policyExternalPrincipalCount;
+              summary.unresolvedPrincipalCount += record.policyUnresolvedPrincipalCount;
+              if (record.unresolvedDirect) summary.unresolvedDirectCount++;
+              for (const role of record.roles) summary.roleCounts[role] = (summary.roleCounts[role] ?? 0) + 1;
+            }
+            return summary;
+          }
+          export function ownerOnlyPolicySatisfied(input: { permissionCount: number; ownerGrantCount: number; sharingLinkCount: number; directAdditionalGrantCount: number; inheritedUnsafeCount: number; externalPrincipalCount: number; unresolvedPrincipalCount: number }): boolean {
+            return input.permissionCount > 0 && input.ownerGrantCount > 0 && input.sharingLinkCount === 0 && input.directAdditionalGrantCount === 0 && input.inheritedUnsafeCount === 0 && input.externalPrincipalCount === 0 && input.unresolvedPrincipalCount === 0;
+          }
+          export function evaluateOwnerOnlyPolicy(records: SanitizedPermissionRecord[]) {
+            const summary = summarizePermissionRecords(records);
+            const satisfied = ownerOnlyPolicySatisfied({ permissionCount: records.length, ownerGrantCount: summary.ownerGrantCount, sharingLinkCount: summary.policyRelevantSharingLinkCount, directAdditionalGrantCount: summary.additionalDirectGrantCount, inheritedUnsafeCount: summary.inheritedUnsafeCount, externalPrincipalCount: summary.externalPrincipalCount, unresolvedPrincipalCount: summary.unresolvedPrincipalCount });
+            const selectedPermissionIds = records.filter((record) => record.selectedForDeletion && record.permissionId).map((record) => String(record.permissionId));
+            return { summary, satisfied, selectedPermissionIds, inheritedUnsafeCount: summary.inheritedUnsafeCount, unresolvedDirectCount: summary.unresolvedDirectCount };
+          }
+          export function buildEnforcementPreview(records: SanitizedPermissionRecord[]): Record<string, unknown> {
+            const evaluation = evaluateOwnerOnlyPolicy(records);
+            const expectedPostcondition = { requestedPolicySatisfied: true, ownerGrantCountMinimum: 1, policyRelevantSharingLinkCount: 0, additionalDirectGrantCount: 0, inheritedUnsafeCount: 0, externalPrincipalCount: 0, unresolvedPrincipalCount: 0, rawLinkFacetCountPreserved: true };
+            return {
+              policy: POLICY, mutationPerformed: false,
+              evaluatedPermissions: records.map((record) => ({
+                permissionId: record.permissionId, roles: record.roles, classification: record.classification,
+                selected: record.selectedForDeletion, decision: record.selectionDecision,
+                selectionOrSkipReason: record.selectionDecision, inherited: record.inherited, direct: record.direct,
+                ownerPermission: record.ownerPermission, isOwnerPermission: record.isOwnerPermission,
+                isProtectedPermission: record.isProtectedPermission, protectedOwnerStatus: record.isProtectedPermission,
+                rawHasLinkFacet: record.hasLinkFacet, hasGenuineLinkFacet: record.hasLinkFacet && !record.isProtectedPermission,
+                removable: record.removable, nonRemovableReason: record.nonRemovableReason,
+                intendedHttpMethod: record.intendedHttpMethod, intendedEndpoint: record.intendedEndpoint,
+                graphEndpointTemplate: record.intendedEndpoint,
+                expectedMutation: record.selectedForDeletion ? "delete_permission" : "none",
+                expectedPostcondition: record.selectedForDeletion ? "permission_absent_and_owner_only_policy_re_evaluated" : "permission_unchanged",
+              })),
+              selectedPermissionIds: evaluation.selectedPermissionIds,
+              skippedPermissionIds: records.filter((record) => !record.selectedForDeletion && record.permissionId).map((record) => record.permissionId),
+              selectedOperations: records.filter((record) => record.selectedForDeletion && record.permissionId).map((record) => ({ permissionId: record.permissionId, method: record.intendedHttpMethod, endpointTemplate: record.intendedEndpoint })),
+              expectedPostcondition,
+            };
+          }
+          async function inspectInternal'''
+          source, count = re.subn(logic_pattern, new_logic, source, count=1, flags=re.S)
+          assert count == 1, f'logic replacement count={count}'
+
+          old_eval = '''  const permissionRecords = classifyPermissionRecords({ permissions, ownerIds, itemIsFolder: Boolean(item.item.folder) });
+            const summary = summarizePermissionRecords(permissionRecords);
+            const satisfied = ownerOnlyPolicySatisfied({ permissionCount: permissionRecords.length, ownerGrantCount: summary.ownerGrantCount, sharingLinkCount: summary.totalSharingLinkCount, directAdditionalGrantCount: summary.additionalDirectGrantCount, inheritedUnsafeCount: summary.inheritedUnsafeCount, externalPrincipalCount: summary.externalPrincipalCount, unresolvedPrincipalCount: summary.unresolvedPrincipalCount });
+            const removable = permissionRecords.filter((record) => record.removable && record.permissionId).map((record) => String(record.permissionId));'''
+          new_eval = '''  const permissionRecords = classifyPermissionRecords({ permissions, ownerIds, itemIsFolder: Boolean(item.item.folder) });
+            const evaluation = evaluateOwnerOnlyPolicy(permissionRecords);
+            const summary = evaluation.summary;
+            const satisfied = evaluation.satisfied;
+            const removable = evaluation.selectedPermissionIds;'''
+          assert old_eval in source
+          source = source.replace(old_eval, new_eval, 1)
+
+          old_evidence = '''      additionalDirectGrantCount: summary.additionalDirectGrantCount, totalSharingLinkCount: summary.totalSharingLinkCount,
+                anonymousSharingLinkCount: summary.anonymousSharingLinkCount, organizationWideSharingLinkCount: summary.organizationWideSharingLinkCount,'''
+          new_evidence = '''      additionalDirectGrantCount: summary.additionalDirectGrantCount, totalSharingLinkCount: summary.totalSharingLinkCount,
+                rawLinkFacetCount: summary.rawLinkFacetCount, policyRelevantSharingLinkCount: summary.policyRelevantSharingLinkCount,
+                protectedOwnerPermissionCount: summary.protectedOwnerPermissionCount,
+                anonymousSharingLinkCount: summary.anonymousSharingLinkCount, organizationWideSharingLinkCount: summary.organizationWideSharingLinkCount,'''
+          assert old_evidence in source
+          source = source.replace(old_evidence, new_evidence, 1)
+          source = source.replace('permissionRecords, enforcementPreview: enforcementPreview(permissionRecords),', 'permissionRecords, enforcementPreview: buildEnforcementPreview(permissionRecords),', 1)
+
+          enforce_pattern = r'async function enforcePolicy\(context: HotfixContext, path: string\): Promise<Record<string, unknown>> \{.*?\n\}\nasync function verifyPolicy'
+          new_enforce = '''async function enforcePolicy(context: HotfixContext, path: string): Promise<Record<string, unknown>> {
+            const item = await resolveRelativeItem(context.env, context.userId, path); if (!item.item.folder) throw new ConnectorError("access_policy_target_not_folder", "The owner-only policy target must be a folder.");
+            const before = await inspectInternal(context, item); if (before.inheritedUnsafe) throw new ConnectorError("inherited_access_policy_conflict", "Broader inherited access cannot be removed by this bounded action."); if (before.unresolvedDirect) throw new ConnectorError("access_policy_unresolved_grants", "A direct permission could not be safely classified for removal.");
+            for (const id of before.removable) { await verifyItemInsideRoot(context.env, context.userId, item.item.id); await graphResponse(context.env, context.userId, `/me/drive/items/${encodeURIComponent(item.item.id)}/permissions/${encodeURIComponent(id)}`, { method: "DELETE" }); }
+            const after = await inspectInternal(context, await verifyItemInsideRoot(context.env, context.userId, item.item.id)); if (!after.satisfied) throw new ConnectorError("access_policy_not_satisfied", "Unexpected permissions or links remain after enforcement.");
+            const deleteOperationsIssued = before.removable.length;
+            const protectedOwnerPermissionsPreserved = before.permissionRecords.filter((record) => record.isProtectedPermission).length;
+            return { policy: POLICY, before: before.evidence, after: after.evidence, policyOutcome: before.satisfied && deleteOperationsIssued === 0 ? "policy_already_satisfied" : "policy_enforced", protectedOwnerPermissionsPreserved, removedDirectPermissionCount: deleteOperationsIssued, deleteOperationsIssued, zeroDeleteOperationsIssued: deleteOperationsIssued === 0, oneDriveMutationPerformed: deleteOperationsIssued > 0, accessBroadened: false, verifiedAfterMutation: deleteOperationsIssued > 0, verifiedAfterEnforcement: true };
+          }
+          async function verifyPolicy'''
+          source, count = re.subn(enforce_pattern, new_enforce, source, count=1, flags=re.S)
+          assert count == 1, f'enforce replacement count={count}'
+
+          path.write_text(source)
+          PY
+      - name: Replace focused permission tests
+        shell: bash
+        run: |
+          cat > test/permission-provenance.test.ts <<'EOF'
+          import test from "node:test";
+          import assert from "node:assert/strict";
+          import { buildEnforcementPreview, classifyPermissionRecords, evaluateOwnerOnlyPolicy, summarizePermissionRecords } from "../src/visual-phase2";
+
+          const ownerWithLink = {
+            id: "owner-membership",
+            roles: ["owner"],
+            link: {},
+            grantedToV2: { user: { id: "owner-id" } },
+            grantedToIdentitiesV2: [{ user: { id: "second-user" } }],
+          };
+
+          test("owner role takes precedence over a simultaneous Graph link facet", () => {
+            const [record] = classifyPermissionRecords({ ownerIds: ["owner-id"], itemIsFolder: true, permissions: [ownerWithLink] });
+            assert.equal(record.classification, "owner");
+            assert.equal(record.hasLinkFacet, true);
+            assert.equal(record.linkType, null);
+            assert.equal(record.linkScope, null);
+            assert.equal(record.hasGrantedToV2, true);
+            assert.equal(record.principalCounts.user, 2);
+            assert.equal(record.isOwnerPermission, true);
+            assert.equal(record.isProtectedPermission, true);
+            assert.equal(record.removable, false);
+            assert.equal(record.nonRemovableReason, "protected_owner_permission");
+            assert.equal(record.policyRelevantSharingPermission, false);
+            assert.equal(record.selectedForDeletion, false);
+            assert.equal(record.selectionDecision, "protected_owner_permission_skipped");
+            assert.equal(record.intendedHttpMethod, null);
+            assert.equal(record.intendedEndpoint, null);
+            assert.equal(record.descendantsWouldReceiveAccess, false);
+          });
+
+          test("protected owner permission alone produces an enforcement no-op and verification pass", () => {
+            const records = classifyPermissionRecords({ ownerIds: ["owner-id"], itemIsFolder: true, permissions: [ownerWithLink] });
+            const evaluation = evaluateOwnerOnlyPolicy(records);
+            const summary = evaluation.summary;
+            assert.equal(summary.totalSharingLinkCount, 1);
+            assert.equal(summary.rawLinkFacetCount, 1);
+            assert.equal(summary.policyRelevantSharingLinkCount, 0);
+            assert.equal(summary.protectedOwnerPermissionCount, 1);
+            assert.equal(evaluation.satisfied, true);
+            assert.deepEqual(evaluation.selectedPermissionIds, []);
+            const preview = buildEnforcementPreview(records) as any;
+            assert.deepEqual(preview.selectedPermissionIds, []);
+            assert.deepEqual(preview.selectedOperations, []);
+            assert.equal(preview.evaluatedPermissions[0].expectedMutation, "none");
+          });
+
+          test("protected owner is skipped while a genuine direct read link is selected", () => {
+            const records = classifyPermissionRecords({ ownerIds: ["owner-id"], itemIsFolder: true, permissions: [ownerWithLink, { id: "read-link", roles: ["read"], link: { type: "view", scope: "anonymous" } }] });
+            const evaluation = evaluateOwnerOnlyPolicy(records);
+            assert.equal(records[0].selectedForDeletion, false);
+            assert.equal(records[1].classification, "direct_link");
+            assert.equal(records[1].selectedForDeletion, true);
+            assert.deepEqual(evaluation.selectedPermissionIds, ["read-link"]);
+            assert.equal(evaluation.satisfied, false);
+          });
+
+          test("protected owner is skipped while a genuine direct write link is selected", () => {
+            const records = classifyPermissionRecords({ ownerIds: ["owner-id"], itemIsFolder: true, permissions: [ownerWithLink, { id: "write-link", roles: ["write"], link: { type: "edit", scope: "organization" } }] });
+            assert.equal(records[0].selectionDecision, "protected_owner_permission_skipped");
+            assert.equal(records[1].selectionDecision, "direct_link_selected");
+            assert.deepEqual(evaluateOwnerOnlyPolicy(records).selectedPermissionIds, ["write-link"]);
+          });
+
+          test("protected owner and inherited link preserve inherited-access semantics", () => {
+            const records = classifyPermissionRecords({ ownerIds: ["owner-id"], itemIsFolder: true, permissions: [ownerWithLink, { id: "inherited-link", roles: ["read"], inheritedFrom: { driveId: "drive", id: "parent", path: "/drive/root:/parent" }, link: { type: "view", scope: "organization" } }] });
+            const evaluation = evaluateOwnerOnlyPolicy(records);
+            assert.equal(records[0].selectedForDeletion, false);
+            assert.equal(records[1].classification, "inherited_link");
+            assert.equal(records[1].selectedForDeletion, false);
+            assert.equal(records[1].nonRemovableReason, "inherited_permission");
+            assert.deepEqual(records[1].inheritedFrom, { driveId: "drive", itemId: "parent", path: "/drive/root:/parent" });
+            assert.equal(evaluation.inheritedUnsafeCount, 1);
+            assert.equal(evaluation.satisfied, false);
+          });
+
+          test("non-owner direct-link deletion semantics remain unchanged", () => {
+            const [record] = classifyPermissionRecords({ ownerIds: ["owner-id"], itemIsFolder: true, permissions: [{ id: "direct-link", roles: ["read"], link: { type: "view", scope: "anonymous", preventsDownload: true } }] });
+            assert.equal(record.classification, "direct_link");
+            assert.equal(record.removable, true);
+            assert.equal(record.selectionDecision, "direct_link_selected");
+            assert.equal(record.intendedHttpMethod, "DELETE");
+            assert.equal(record.preventsDownload, true);
+          });
+
+          test("owner permission without a link facet remains protected and non-removable", () => {
+            const [record] = classifyPermissionRecords({ ownerIds: ["owner-id"], itemIsFolder: true, permissions: [{ id: "owner", roles: ["owner"], grantedToV2: { user: { id: "owner-id" } } }] });
+            assert.equal(record.classification, "owner");
+            assert.equal(record.hasLinkFacet, false);
+            assert.equal(record.isProtectedPermission, true);
+            assert.equal(record.removable, false);
+            assert.equal(record.nonRemovableReason, "protected_owner_permission");
+            assert.equal(summarizePermissionRecords([record]).policyRelevantSharingLinkCount, 0);
+          });
+
+          test("unfamiliar non-owner permission facets remain explicitly unknown", () => {
+            const [record] = classifyPermissionRecords({ ownerIds: ["owner-id"], itemIsFolder: false, permissions: [{ id: "unknown", roles: ["read"], futureFacet: { value: true } } as any] });
+            assert.equal(record.classification, "unknown");
+            assert.equal(record.isOwnerPermission, false);
+            assert.equal(record.removable, false);
+            assert.equal(record.nonRemovableReason, "unresolved_principal");
+          });
+
+          test("preview and execution evaluation consume the same selector output and never construct owner DELETE", () => {
+            const records = classifyPermissionRecords({ ownerIds: ["owner-id"], itemIsFolder: true, permissions: [ownerWithLink, { id: "direct-link", roles: ["read"], link: { type: "view", scope: "anonymous" } }] });
+            const evaluation = evaluateOwnerOnlyPolicy(records);
+            const preview = buildEnforcementPreview(records) as any;
+            assert.deepEqual(preview.selectedPermissionIds, evaluation.selectedPermissionIds);
+            assert.equal(preview.selectedOperations.some((operation: any) => operation.permissionId === "owner-membership"), false);
+            assert.equal(preview.evaluatedPermissions[0].intendedHttpMethod, null);
+            assert.equal(preview.evaluatedPermissions[0].intendedEndpoint, null);
+          });
+          EOF
+      - name: Install dependencies
+        run: npm ci
+      - name: Focused ODL-REQ-015 and ODL-REQ-016 tests
+        run: npx tsx --test test/permission-provenance.test.ts
+      - name: ODL-REQ-014 validator regression
+        run: npx tsx --test test/access-verification-validator.test.ts
+      - name: Fast regression suite
+        run: npm run check
+      - name: Production dry-run bundle
+        run: npm run prod:dry-run
+      - name: Commit bounded implementation and remove temporary workflow
+        shell: bash
+        run: |
+          rm .github/workflows/odl-req-016-apply.yml .github/odl-req-016-trigger
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/visual-phase2.ts test/permission-provenance.test.ts .github/workflows/odl-req-016-apply.yml .github/odl-req-016-trigger
+          git commit -m "Protect owner permissions during access enforcement [ODL-REQ-016]"
+          git push origin HEAD:work/odl-req-016-owner-permission-protection
