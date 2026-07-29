@@ -57,7 +57,7 @@ jobs:
       - name: Production dry-run bundle
         run: npm run prod:dry-run
         env:
-          CLOUDFLARE_OAUTH_KV_NAMESPACE_ID: 00000000000000000000000000000000
+          CLOUDFLARE_OAUTH_KV_NAMESPACE_ID: "00000000000000000000000000000000"
       - name: Commit only tested source and tests
         shell: bash
         run: |
