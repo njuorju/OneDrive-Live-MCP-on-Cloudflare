@@ -1,0 +1,72 @@
+name: Commit ODL-REQ-016 tested source
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  commit-tested-source:
+    if: github.head_ref == 'work/odl-req-016-owner-permission-protection'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: work/odl-req-016-owner-permission-protection
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Apply the existing bounded patch definition
+        shell: bash
+        run: |
+          if grep -q 'isProtectedPermission: boolean' src/visual-phase2.ts; then
+            echo 'ODL-REQ-016 source already applied.'
+            exit 0
+          fi
+          python <<'PY'
+          from pathlib import Path
+          import subprocess
+          import textwrap
+
+          workflow = Path('.github/workflows/odl-req-016-apply.yml').read_text()
+
+          def run_block(name: str, next_name: str) -> None:
+              start = workflow.index(f'      - name: {name}')
+              end = workflow.index(f'      - name: {next_name}', start)
+              section = workflow[start:end]
+              marker = '        run: |\n'
+              script = textwrap.dedent(section.split(marker, 1)[1])
+              subprocess.run(['bash', '-euo', 'pipefail', '-c', script], check=True)
+
+          run_block('Apply bounded classifier and selector correction', 'Replace focused permission tests')
+          run_block('Replace focused permission tests', 'Install dependencies')
+          PY
+      - name: Install pinned dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Focused ODL-REQ-015 and ODL-REQ-016 tests
+        run: npx tsx --test test/permission-provenance.test.ts
+      - name: ODL-REQ-014 validator regression
+        run: npx tsx --test test/access-verification-validator.test.ts
+      - name: Fast regression suite
+        run: npm run check
+      - name: Production dry-run bundle
+        run: npm run prod:dry-run
+        env:
+          CLOUDFLARE_OAUTH_KV_NAMESPACE_ID: 00000000000000000000000000000000
+      - name: Commit only tested source and tests
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/visual-phase2.ts test/permission-provenance.test.ts
+          if git diff --cached --quiet; then
+            echo 'No source changes to commit.'
+            exit 0
+          fi
+          git commit -m "Protect owner permissions during access enforcement [ODL-REQ-016]"
+          git push origin HEAD:work/odl-req-016-owner-permission-protection
