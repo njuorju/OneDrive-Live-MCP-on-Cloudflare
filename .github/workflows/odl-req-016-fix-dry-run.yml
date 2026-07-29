@@ -1,0 +1,36 @@
+name: Fix ODL-REQ-016 dry-run environment
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: work/odl-req-016-owner-permission-protection
+          fetch-depth: 0
+      - name: Supply non-secret production dry-run placeholder
+        shell: bash
+        run: |
+          python <<'PY'
+          from pathlib import Path
+          path = Path('.github/workflows/odl-req-016-apply.yml')
+          text = path.read_text()
+          old = '      - name: Production dry-run bundle\n        run: npm run prod:dry-run\n'
+          new = '      - name: Production dry-run bundle\n        run: npm run prod:dry-run\n        env:\n          CLOUDFLARE_OAUTH_KV_NAMESPACE_ID: 00000000000000000000000000000000\n'
+          assert old in text
+          path.write_text(text.replace(old, new, 1))
+          PY
+          rm .github/workflows/odl-req-016-fix-dry-run.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/odl-req-016-apply.yml .github/workflows/odl-req-016-fix-dry-run.yml
+          git commit -m "Supply ODL-REQ-016 production dry-run placeholder"
+          git push origin HEAD:work/odl-req-016-owner-permission-protection
