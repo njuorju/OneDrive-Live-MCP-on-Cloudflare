@@ -5,6 +5,7 @@ import { McpAgent } from "agents/mcp";
 import { z } from "zod";
 import { AuthState } from "./auth-state";
 import { ConnectorError, safeErrorResult } from "./errors";
+import { registerFileBackedTextTools } from "./file-backed-text";
 import {
   createFolder,
   createTextFile,
@@ -161,7 +162,7 @@ export class OneDriveMCP extends McpAgent<Env, unknown, Props> {
       "list_visual_assets",
       {
         title: "Discover OneDrive visual assets",
-        description: "Find photographs, maps, diagrams, screenshots, rendered plans, charts, illustrations, and other image assets inside the configured OneDrive root. Use this first, inspect shortlisted candidates with get_image_metadata, then call fetch_image_for_analysis, and finally fetch_original_file for the selected asset when embedding it in a presentation or document.",
+        description: "Find photographs, maps, diagrams, screenshots, rendered plans, charts, illustrations, and other image assets inside the configured root. Use this first, inspect shortlisted candidates with get_image_metadata, then call fetch_image_for_analysis, and finally fetch_original_file for the selected asset when embedding it in a presentation or document.",
         inputSchema: {
           path: z.string().max(1000).optional(),
           recursive: z.boolean().default(false),
@@ -255,6 +256,8 @@ export class OneDriveMCP extends McpAgent<Env, unknown, Props> {
       },
       async ({ itemId, expectedETag, content }) => { try { return textResult(await replaceTextFile(this.env, this.userId(), itemId, expectedETag, content)); } catch (error) { return errorResult(error); } },
     );
+
+    registerFileBackedTextTools(this.server, () => ({ env: this.env, userId: this.userId() }));
 
     this.server.registerTool(
       "rename_item",
