@@ -1,0 +1,162 @@
+name: Deploy ODL-REQ-018 exact CI artifact
+
+on:
+  pull_request:
+    types: [opened]
+    branches: [main]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      WORKER_NAME: nikolay-onedrive-mcp
+      IMPLEMENTATION_COMMIT: 88ddde457aaad5392ca4798ad972d06448b368a7
+      TESTED_HEAD: d5d23f9684386a960dbdf009400e3d88431716ca
+      TESTED_PR_MERGE: baa2935b8be6fb2caffe7d3a65f6b9ee2f953206
+      TEST_RUN_ID: "30697958609"
+      ARTIFACT_ID: "8817872451"
+      EXPECTED_ARCHIVE_SHA256: 8204fb8dbc376f6e91e8abdd5ba3c3ce62923fa05320e5c03db638931cd6de03
+      EXPECTED_ENTRY_SHA256: 45c87e9da55c7e30fade6623c4e58288b8fa12664c42bcd69079071312685093
+      EXPECTED_ENTRY_BYTES: "4457114"
+      CURRENT_VERSION_ID: 0adfc440-57cf-4dc4-b47b-6aca6992a270
+      DEPLOY_TAG: odl-req-018-artifact-45c87e9da55c7e30
+      HEALTH_URL: https://nikolay-onedrive-mcp.fdas201290.workers.dev/health
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Check out exact merged implementation configuration
+        uses: actions/checkout@v4
+        with:
+          ref: 88ddde457aaad5392ca4798ad972d06448b368a7
+          fetch-depth: 1
+
+      - name: Download and verify exact reviewed artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          mkdir -p deployment-artifact
+          curl --fail-with-body --silent --show-error --location \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" \
+            -o deployment-artifact/artifact.zip
+          echo "${EXPECTED_ARCHIVE_SHA256}  deployment-artifact/artifact.zip" | sha256sum --check --strict
+          unzip -q deployment-artifact/artifact.zip -d deployment-artifact/extracted
+          test -f deployment-artifact/extracted/index-closeout.js
+          actual_bytes=$(wc -c < deployment-artifact/extracted/index-closeout.js | tr -d ' ')
+          test "$actual_bytes" = "$EXPECTED_ENTRY_BYTES"
+          echo "${EXPECTED_ENTRY_SHA256}  deployment-artifact/extracted/index-closeout.js" | sha256sum --check --strict
+          grep -q 'registerRenderedSaveHotfix' deployment-artifact/extracted/index-closeout.js
+          grep -q 'render_blank' deployment-artifact/extracted/index-closeout.js
+          grep -q 'readBackSha256' deployment-artifact/extracted/index-closeout.js
+          grep -q 'conflictBehavior=fail' deployment-artifact/extracted/index-closeout.js
+
+      - name: Confirm production baseline and prepare strict binding inheritance
+        shell: bash
+        run: |
+          set -euo pipefail
+          api="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${WORKER_NAME}"
+          auth=(-H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" -H "Content-Type: application/json")
+          curl --fail-with-body --silent --show-error "${auth[@]}" "$api/deployments" -o deployment-artifact/before-deployments.json
+          jq -e '.success == true' deployment-artifact/before-deployments.json >/dev/null
+          active=$(jq -r '.result.deployments[0].versions[] | select(.percentage == 100) | .version_id' deployment-artifact/before-deployments.json)
+          test "$active" = "$CURRENT_VERSION_ID"
+          curl --fail-with-body --silent --show-error "${auth[@]}" "$api/settings" -o deployment-artifact/settings.json
+          jq -e '.success == true and (.result.bindings | length > 0)' deployment-artifact/settings.json >/dev/null
+          jq -e '.result.bindings[] | select(.name == "MAX_TEXT_WRITE_KB" and .type == "plain_text" and .text == "4096")' deployment-artifact/settings.json >/dev/null
+          jq '[.result.bindings[] | {name:.name,type:"inherit"}]' deployment-artifact/settings.json > deployment-artifact/upload-bindings.json
+          jq -n \
+            --slurpfile bindings deployment-artifact/upload-bindings.json \
+            --arg message "Deploy ODL-REQ-018 exact CI artifact ${EXPECTED_ENTRY_SHA256}; test-run=${TEST_RUN_ID}; tested-head=${TESTED_HEAD}; tested-pr-merge=${TESTED_PR_MERGE}; merge=${IMPLEMENTATION_COMMIT}" \
+            --arg tag "$DEPLOY_TAG" \
+            '{main_module:"index-closeout.js",compatibility_date:"2026-07-23",compatibility_flags:["nodejs_compat"],bindings:$bindings[0],annotations:{"workers/message":$message,"workers/tag":$tag}}' \
+            > deployment-artifact/metadata.json
+
+      - name: Upload exact Worker version
+        shell: bash
+        run: |
+          set -euo pipefail
+          api="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${WORKER_NAME}"
+          status=$(curl --silent --show-error --output deployment-artifact/upload.json --write-out '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -F 'metadata=@deployment-artifact/metadata.json;type=application/json' \
+            -F 'index-closeout.js=@deployment-artifact/extracted/index-closeout.js;type=application/javascript+module' \
+            "$api/versions?bindings_inherit=strict")
+          test "$status" = "200"
+          jq -e '.success == true and (.result.id | length > 0)' deployment-artifact/upload.json >/dev/null
+          version_id=$(jq -r '.result.id' deployment-artifact/upload.json)
+          echo "VERSION_ID=$version_id" >> "$GITHUB_ENV"
+          curl --fail-with-body --silent --show-error \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "$api/versions/$version_id" -o deployment-artifact/version.json
+          jq -e '.success == true' deployment-artifact/version.json >/dev/null
+          baseline_bindings=$(jq '.result.bindings | length' deployment-artifact/settings.json)
+          uploaded_bindings=$(jq '.result.resources.bindings | length' deployment-artifact/version.json)
+          test "$uploaded_bindings" = "$baseline_bindings"
+          jq -S '[.result.bindings[].name]' deployment-artifact/settings.json > deployment-artifact/before-binding-names.json
+          jq -S '[.result.resources.bindings[].name]' deployment-artifact/version.json > deployment-artifact/after-binding-names.json
+          diff -u deployment-artifact/before-binding-names.json deployment-artifact/after-binding-names.json
+          jq -e '.result.resources.bindings[] | select(.name == "MAX_TEXT_WRITE_KB" and .type == "plain_text" and .text == "4096")' deployment-artifact/version.json >/dev/null
+
+      - name: Deploy new version at 100 percent
+        shell: bash
+        run: |
+          set -euo pipefail
+          api="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${WORKER_NAME}"
+          jq -n \
+            --arg version "$VERSION_ID" \
+            --arg message "Deploy ODL-REQ-018 exact CI artifact; test-run=${TEST_RUN_ID}; tested-head=${TESTED_HEAD}; tested-pr-merge=${TESTED_PR_MERGE}; merge=${IMPLEMENTATION_COMMIT}" \
+            '{strategy:"percentage",versions:[{version_id:$version,percentage:100}],annotations:{"workers/message":$message}}' \
+            > deployment-artifact/deployment-request.json
+          status=$(curl --silent --show-error --output deployment-artifact/deployment.json --write-out '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data @deployment-artifact/deployment-request.json \
+            "$api/deployments")
+          test "$status" = "200"
+          jq -e --arg version "$VERSION_ID" '.success == true and .result.versions[0].version_id == $version and .result.versions[0].percentage == 100' deployment-artifact/deployment.json >/dev/null
+          deployment_id=$(jq -r '.result.id' deployment-artifact/deployment.json)
+          echo "DEPLOYMENT_ID=$deployment_id" >> "$GITHUB_ENV"
+
+      - name: Verify traffic and production health
+        shell: bash
+        run: |
+          set -euo pipefail
+          api="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${WORKER_NAME}"
+          curl --fail-with-body --silent --show-error \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "$api/deployments" -o deployment-artifact/after-deployments.json
+          jq -e --arg version "$VERSION_ID" '.success == true and .result.deployments[0].versions[0].version_id == $version and .result.deployments[0].versions[0].percentage == 100' deployment-artifact/after-deployments.json >/dev/null
+          curl --fail-with-body --silent --show-error "$HEALTH_URL" -o deployment-artifact/health.json
+          jq -e 'type == "object"' deployment-artifact/health.json >/dev/null
+          jq -n \
+            --arg version "$VERSION_ID" \
+            --arg deployment "$DEPLOYMENT_ID" \
+            --arg merge "$IMPLEMENTATION_COMMIT" \
+            --arg testedHead "$TESTED_HEAD" \
+            --arg testedMerge "$TESTED_PR_MERGE" \
+            --arg testRun "$TEST_RUN_ID" \
+            --arg artifactSha "$EXPECTED_ENTRY_SHA256" \
+            --arg archiveSha "$EXPECTED_ARCHIVE_SHA256" \
+            --argjson bytes "$EXPECTED_ENTRY_BYTES" \
+            '{versionId:$version,deploymentId:$deployment,trafficPercentage:100,mergeCommit:$merge,testedHead:$testedHead,testedPrMerge:$testedMerge,testRunId:$testRun,artifactSha256:$artifactSha,archiveSha256:$archiveSha,artifactByteLength:$bytes,healthVerified:true}' \
+            > deployment-artifact/deployment-summary.json
+          cat deployment-artifact/deployment-summary.json
+
+      - name: Upload sanitized deployment evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: odl-req-018-deployment-summary
+          path: deployment-artifact/deployment-summary.json
+          if-no-files-found: error
+          retention-days: 7
