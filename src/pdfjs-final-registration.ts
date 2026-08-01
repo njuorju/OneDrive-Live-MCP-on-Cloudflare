@@ -2,12 +2,14 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   registerIntegratedToolsWithPdfJsHotfix,
 } from "./pdfjs-renderer-hotfix";
+import { registerRenderedSaveHotfix } from "./rendered-save-hotfix";
 import type { HotfixContext } from "./version20-hotfix";
 
 /**
  * The replacement server is assembled before it is attached to a transport.
  * Suppress SDK list-changed notifications during that assembly so updating the
- * final render callback cannot interfere with MCP initialization/reconnection.
+ * final render and rendered-save callbacks cannot interfere with MCP
+ * initialization/reconnection.
  */
 export function registerIntegratedToolsWithQuietPdfJsHotfix(
   server: McpServer,
@@ -18,6 +20,7 @@ export function registerIntegratedToolsWithQuietPdfJsHotfix(
   target.sendToolListChanged = () => undefined;
   try {
     registerIntegratedToolsWithPdfJsHotfix(server, contextFactory);
+    registerRenderedSaveHotfix(server, contextFactory);
   } finally {
     target.sendToolListChanged = originalSendToolListChanged;
   }
