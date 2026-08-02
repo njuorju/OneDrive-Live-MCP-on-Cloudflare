@@ -8,6 +8,7 @@ import {
   errorResult,
   getArtifact,
   nowIso,
+  putArtifact,
   requestHash,
   textResult,
   type PaidJobRecord,
@@ -30,6 +31,7 @@ import {
   type StartVisualCatalogueInput,
   type VisualWorkflowPayload,
 } from "./visual-catalogue-runtime";
+import { resolveClassifierSelection } from "./visual-catalogue-opencode";
 import {
   readPreparation,
   readPublicationManifest,
@@ -102,6 +104,7 @@ async function reserveWorkflowJob(
 
 function boundedResult(record: VisualResultRecord): Record<string, unknown> {
   return {
+    candidateId: record.stableVisualId,
     stableVisualId: record.stableVisualId,
     stableKey: record.stableKey,
     pageOrSlide: record.pageOrSlide,
@@ -113,8 +116,24 @@ function boundedResult(record: VisualResultRecord): Record<string, unknown> {
     canonicalVisualId: record.canonicalVisualId,
     disagreement: record.disagreement,
     reviewState: record.reviewState,
+    reviewRoutingReason: record.reviewRoutingReason ?? null,
+    modelProvider: record.modelProvider,
+    model: record.model,
+    parserResult: record.parserResult ?? null,
+    schemaValidationResult: record.schemaValidationResult ?? null,
     error: record.error,
   };
+}
+
+async function boundedCandidateImage(env: Env, record: VisualResultRecord, maxDimension: number, detail: "auto" | "low" | "high"): Promise<{ data: string; mimeType: string }> {
+  if (!record.artifactR2Key) throw new ConnectorError("candidate_artifact_missing", "The candidate has no private cached image artifact.");
+  const source = await getArtifact(env, record.artifactR2Key);
+  const bound = detail === "low" ? Math.min(maxDimension, 1024) : maxDimension;
+  const transformed = (env.IMAGES as any).input(source.body).transform({ width: bound, height: bound, fit: "scale-down" });
+  const output = await transformed.output({ format: "image/jpeg", quality: detail === "high" ? 92 : 88, anim: false });
+  const response = output.response();
+  if (!response.ok) throw new ConnectorError("candidate_analysis_render_failed", "The private candidate artifact could not be prepared for analysis.", { retryable: true });
+  return { data: bytesToBase64(new Uint8Array(await response.arrayBuffer())), mimeType: "image/jpeg" };
 }
 
 export class VisualCatalogueWorkflow extends WorkflowEntrypoint<Env, VisualWorkflowPayload> {
@@ -143,8 +162,15 @@ export function registerVisualCatalogueCompilerTools(server: McpServer, contextF
       renderFormat: z.enum(["png", "jpeg", "webp"]).default("png"),
       renderWidth: z.number().int().min(256).max(4096).default(1600),
       renderDpi: z.number().int().min(36).max(300).default(144),
-      classifierMode: z.enum(["openai_responses", "openai_batch", "fixture"]).optional(),
+      classifierProvider: z.enum(["openai", "opencode_zen", "fixture"]).optional(),
+      classifierMode: z.enum(["openai_responses", "openai_batch", "opencode_chat_completions", "fixture"]).optional(),
       model: z.string().min(1).max(100).optional(),
+      allowPaidFallback: z.boolean().default(false),
+      dataSensitivity: z.enum(["public", "internal", "confidential", "personal", "restricted"]).optional(),
+      freeProviderDataPolicyAcknowledged: z.boolean().default(false),
+      classifierConcurrency: z.number().int().min(1).max(8).default(2),
+      classifierMaxDimension: z.number().int().min(256).max(3000).default(1280),
+      classifierJpegQuality: z.number().int().min(1).max(100).default(82),
       rubricVersion: z.string().min(1).max(200).optional(),
       promptVersion: z.string().min(1).max(200).optional(),
       dryRun: z.boolean().default(false),
@@ -158,9 +184,7 @@ export function registerVisualCatalogueCompilerTools(server: McpServer, contextF
     const context = contextFactory();
     try {
       const input = raw as StartVisualCatalogueInput;
-      const mode = input.classifierMode ?? (input.dryRun ? "fixture" : "openai_batch");
-      if (!input.dryRun && mode === "fixture") throw new ConnectorError("fixture_production_forbidden", "Fixture classification is permitted only for dry runs.");
-      if (mode !== "fixture" && !String(context.env.OPENAI_API_KEY ?? "")) throw new ConnectorError("openai_api_key_missing", "OPENAI_API_KEY is not configured. Add the secret before starting model-backed classification.");
+      const selection = resolveClassifierSelection(input, context.env);
       const reserved = await reserveWorkflowJob(context, "start_visual_catalogue_job", "compile", input as unknown as Record<string, unknown>);
       return textResult({
         jobId: reserved.job.jobId,
@@ -173,7 +197,10 @@ export function registerVisualCatalogueCompilerTools(server: McpServer, contextF
         sourceItemId: input.sourceItemId,
         exactSourceETag: input.expectedSourceETag,
         exactSourceSha256: input.expectedSourceSha256.toLowerCase(),
-        classifierMode: mode,
+        classifierProvider: selection.provider,
+        classifierMode: selection.mode,
+        model: selection.model,
+        allowPaidFallback: selection.allowPaidFallback,
         recommendedNextOperation: "get_visual_catalogue_job",
         oneDriveMutationPerformed: false,
       });
@@ -207,6 +234,10 @@ export function registerVisualCatalogueCompilerTools(server: McpServer, contextF
         sourceType: detail.sourceType ?? null,
         routingMode: detail.routingMode ?? null,
         counts: detail.resultCounts ?? null,
+        classifierProvider: detail.classifierProvider ?? null,
+        providerPolicyReceipt: detail.providerPolicyReceipt ?? null,
+        providerCapabilities: detail.providerCapabilities ?? null,
+        calibration: detail.calibration ?? null,
         metrics: detail.metrics ?? null,
         approvalFingerprint: detail.approvalFingerprint ?? null,
         approvedFingerprint: detail.approvedFingerprint ?? null,
@@ -263,6 +294,8 @@ export function registerVisualCatalogueCompilerTools(server: McpServer, contextF
           totalReviewCandidates: packet.reviewVisualIds.length,
           returnedItems: selected.length,
           contactSheetScope: "all review-required candidates plus deterministic sample",
+          candidateFetchTool: "fetch_visual_catalogue_candidate_for_analysis",
+          reviewInstructions: packet.reviewInstructions ?? "Open difficult candidates individually using jobId and candidateId.",
         }, null, 2),
       }];
       if (manifest.contactSheetKey) {
@@ -282,6 +315,67 @@ export function registerVisualCatalogueCompilerTools(server: McpServer, contextF
           decisionSummary: selected.map(boundedResult),
           approvalFingerprint: packet.approvalFingerprint,
           returnedItems: selected.length,
+          candidateFetchTool: "fetch_visual_catalogue_candidate_for_analysis",
+          reviewInstructions: packet.reviewInstructions ?? "Open difficult candidates individually using jobId and candidateId.",
+        },
+        content,
+      };
+    } catch (error) {
+      return errorResult(error);
+    }
+  });
+
+  server.registerTool("fetch_visual_catalogue_candidate_for_analysis", {
+    title: "Fetch visual catalogue candidate for analysis",
+    description: "Return actual bounded image content for one difficult compiler candidate, and optionally adjacent members of its proposed series, directly from private R2 without exposing object URLs or mutating OneDrive.",
+    inputSchema: {
+      jobId: UUID,
+      candidateId: z.string().min(1).max(200),
+      maxDimension: z.number().int().min(256).max(3000).default(2000),
+      detail: z.enum(["auto", "low", "high"]).default("auto"),
+      includeAdjacentSeriesMembers: z.boolean().default(false),
+    },
+    annotations: READ_ONLY,
+  }, async ({ jobId, candidateId, maxDimension, detail, includeAdjacentSeriesMembers }) => {
+    const context = contextFactory();
+    try {
+      const manifest = await readCompilerManifest(context.env, jobId);
+      const results = await loadCompilerResults(context.env, manifest);
+      const selected = results.find((record) => record.stableVisualId === candidateId);
+      if (!selected) throw new ConnectorError("candidate_not_found", "The candidate does not belong to this visual catalogue job.");
+      const members = includeAdjacentSeriesMembers && selected.pageSeriesId
+        ? results.filter((record) => record.pageSeriesId === selected.pageSeriesId).sort((left, right) => Number(left.pageOrSlide ?? 0) - Number(right.pageOrSlide ?? 0)).slice(0, 4)
+        : [selected];
+      const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [{
+        type: "text",
+        text: JSON.stringify({
+          jobId,
+          requestedCandidateId: candidateId,
+          returnedCandidates: members.map(boundedResult),
+          privateCacheOnly: true,
+          oneDriveMutationPerformed: false,
+        }, null, 2),
+      }];
+      for (const member of members) content.push({ type: "image", ...(await boundedCandidateImage(context.env, member, maxDimension, detail)) });
+      const auditId = crypto.randomUUID();
+      await putArtifact(context.env, `visual-compiler/jobs/${jobId}/review-audit/${auditId}.json`, JSON.stringify({
+        version: 1,
+        auditId,
+        jobId,
+        candidateId,
+        returnedCandidateIds: members.map((record) => record.stableVisualId),
+        detail,
+        maxDimension,
+        occurredAt: nowIso(),
+      }), "application/json; charset=utf-8", { jobId, candidateId, auditId });
+      return {
+        structuredContent: {
+          jobId,
+          requestedCandidateId: candidateId,
+          returnedCandidates: members.map(boundedResult),
+          auditId,
+          privateCacheOnly: true,
+          oneDriveMutationPerformed: false,
         },
         content,
       };

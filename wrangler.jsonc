@@ -31,6 +31,11 @@
     "PAID_RENDER_ORIGIN": "https://nikolay-onedrive-mcp.fdas201290.workers.dev",
     "VISUAL_CLASSIFIER_PROVIDER": "openai",
     "VISUAL_CLASSIFIER_MODEL": "gpt-5.2-2025-12-11",
+    "OPENCODE_ZEN_MODEL": "mimo-v2.5-free",
+    "OPENCODE_ZEN_DISCOVERY_TTL_SECONDS": "3600",
+    "VISUAL_CLASSIFIER_CONCURRENCY": "2",
+    "VISUAL_CLASSIFIER_MAX_DIMENSION": "1280",
+    "VISUAL_CLASSIFIER_JPEG_QUALITY": "82",
     "VISUAL_RUBRIC_VERSION": "uca-visual-rubric-2026-08-02",
     "VISUAL_PROMPT_VERSION": "visual-source-classifier-2026-08-02",
     "VISUAL_RENDERER_VERSION": "pdfjs-cache-v1"

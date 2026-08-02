@@ -5,7 +5,7 @@ interface Env {
   PAID_COORDINATOR: DurableObjectNamespace;
   PAID_WORKFLOW: Workflow;
   VISUAL_CATALOGUE_WORKFLOW: Workflow;
-  PAID_JOBS: Queue<import("./src/paid-core").PaidJobMessage>;
+  PAID_JOBS: Queue<import("./src/paid-core").PaidJobMessage | import("./src/visual-catalogue-opencode").OpenCodeClassifierQueueMessage>;
   ARTIFACTS: R2Bucket;
   AI: Ai;
   IMAGES: ImagesBinding;
@@ -14,6 +14,7 @@ interface Env {
   MICROSOFT_CLIENT_SECRET: string;
   COOKIE_ENCRYPTION_KEY: string;
   OPENAI_API_KEY?: string;
+  OPENCODE_ZEN_API_KEY?: string;
   OWNER_MICROSOFT_ID: string;
   CONNECTOR_NAME: string;
   ONEDRIVE_ROOT: string;
@@ -33,6 +34,11 @@ interface Env {
   PAID_RENDER_ORIGIN?: string;
   VISUAL_CLASSIFIER_PROVIDER?: string;
   VISUAL_CLASSIFIER_MODEL?: string;
+  OPENCODE_ZEN_MODEL?: string;
+  OPENCODE_ZEN_DISCOVERY_TTL_SECONDS?: string;
+  VISUAL_CLASSIFIER_CONCURRENCY?: string;
+  VISUAL_CLASSIFIER_MAX_DIMENSION?: string;
+  VISUAL_CLASSIFIER_JPEG_QUALITY?: string;
   VISUAL_RUBRIC_VERSION?: string;
   VISUAL_PROMPT_VERSION?: string;
   VISUAL_RENDERER_VERSION?: string;

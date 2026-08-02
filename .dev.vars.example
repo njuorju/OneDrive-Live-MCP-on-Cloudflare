@@ -9,3 +9,7 @@ OWNER_MICROSOFT_ID="replace-with-owner-graph-id"
 
 # 32-byte random key, preferably a 64-character hexadecimal value
 COOKIE_ENCRYPTION_KEY="replace-with-random-encryption-key"
+
+# Optional visual-classifier providers. Configure only the provider you intend to use.
+OPENAI_API_KEY="replace-with-openai-api-key"
+OPENCODE_ZEN_API_KEY="replace-with-opencode-zen-api-key"

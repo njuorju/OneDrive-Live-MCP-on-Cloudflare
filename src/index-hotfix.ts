@@ -179,7 +179,7 @@ const worker: ExportedHandler<SchedulerEnv> = {
         return Reflect.get(target, property, receiver);
       },
     });
-    await processPaidQueueBatch(batch as MessageBatch<PaidJobMessage>, paidEnv);
+    await processPaidQueueBatch(batch as any, paidEnv);
   },
 
   scheduled(_controller, env, ctx): void {
