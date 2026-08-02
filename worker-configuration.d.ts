@@ -4,6 +4,7 @@ interface Env {
   AUTH_STATE: DurableObjectNamespace;
   PAID_COORDINATOR: DurableObjectNamespace;
   PAID_WORKFLOW: Workflow;
+  VISUAL_CATALOGUE_WORKFLOW: Workflow;
   PAID_JOBS: Queue<import("./src/paid-core").PaidJobMessage>;
   ARTIFACTS: R2Bucket;
   AI: Ai;
@@ -12,6 +13,7 @@ interface Env {
   MICROSOFT_CLIENT_ID: string;
   MICROSOFT_CLIENT_SECRET: string;
   COOKIE_ENCRYPTION_KEY: string;
+  OPENAI_API_KEY?: string;
   OWNER_MICROSOFT_ID: string;
   CONNECTOR_NAME: string;
   ONEDRIVE_ROOT: string;
@@ -29,6 +31,11 @@ interface Env {
   PAID_MAX_SOURCE_MB?: string;
   PAID_VISUAL_PARSE_MB?: string;
   PAID_RENDER_ORIGIN?: string;
+  VISUAL_CLASSIFIER_PROVIDER?: string;
+  VISUAL_CLASSIFIER_MODEL?: string;
+  VISUAL_RUBRIC_VERSION?: string;
+  VISUAL_PROMPT_VERSION?: string;
+  VISUAL_RENDERER_VERSION?: string;
   WORKER_DEPLOYMENT_ID?: string;
   WORKER_VERSION?: string;
 }
