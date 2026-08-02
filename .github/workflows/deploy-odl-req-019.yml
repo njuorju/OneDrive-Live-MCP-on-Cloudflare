@@ -1,0 +1,99 @@
+name: Deploy ODL-REQ-019 exact main
+
+on:
+  push:
+    branches:
+      - deploy/odl-req-019-exact-main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-nikolay-onedrive-mcp
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: 3f67b673280f2119de4eedd09745e20f
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 91c0f04defc3304ba59679a82fa3b859e32714ae
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Verify exact source tree
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "91c0f04defc3304ba59679a82fa3b859e32714ae"
+          npm run type-check
+          npm test
+
+      - name: Generate production config from verified live bindings
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          cfg = json.loads(Path('wrangler.jsonc').read_text())
+          cfg['name'] = 'nikolay-onedrive-mcp'
+          cfg['keep_vars'] = True
+          cfg['kv_namespaces'] = [
+            {'binding': 'OAUTH_KV', 'id': 'a3ead543dad24b8596ab9193b10f1b9f'}
+          ]
+          cfg['vars'].update({
+            'CONNECTOR_NAME': 'OneDrive Live MCP',
+            'ONEDRIVE_ROOT': 'Работа',
+            'MAX_FILE_MB': '20',
+            'MAX_ORIGINAL_FILE_MB': '25',
+            'MAX_TEXT_WRITE_KB': '4096',
+            'MAX_READ_CHARS': '50000',
+            'CACHE_TTL_SECONDS': '604800',
+            'MAX_IMAGE_INPUT_MB': '15',
+            'MAX_IMAGE_PIXELS': '40000000',
+            'MAX_IMAGE_DIMENSION': '8192',
+            'MAX_IMAGE_PAGES': '8',
+            'IMAGE_PROCESSING_TIMEOUT_MS': '15000',
+            'INTEGRITY_LEASE_SECONDS': '600',
+            'PAID_MAX_SOURCE_MB': '500',
+            'PAID_VISUAL_PARSE_MB': '40',
+            'PAID_RENDER_ORIGIN': 'https://nikolay-onedrive-mcp.fdas201290.workers.dev',
+            'VISUAL_CLASSIFIER_PROVIDER': 'openai',
+            'VISUAL_CLASSIFIER_MODEL': 'gpt-5.2-2025-12-11',
+            'VISUAL_RUBRIC_VERSION': 'uca-visual-rubric-2026-08-02',
+            'VISUAL_PROMPT_VERSION': 'visual-source-classifier-2026-08-02',
+            'VISUAL_RENDERER_VERSION': 'pdfjs-cache-v1',
+            'WORKER_DEPLOYMENT_ID': 'repo-91c0f04defc3304ba59679a82fa3b859e32714ae'
+          })
+          Path('wrangler.production.json').write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n')
+          PY
+
+      - name: Upload and deploy exact Worker version
+        shell: bash
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN"
+          npx wrangler deploy \
+            --config wrangler.production.json \
+            --name nikolay-onedrive-mcp \
+            --message "Deploy ODL-REQ-019 exact main 91c0f04defc3304ba59679a82fa3b859e32714ae" \
+            --tag "odl-req-019-91c0f04defc3304b" \
+            2>&1 | tee deployment.log
+
+      - name: Upload deployment evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: odl-req-019-deployment-evidence
+          path: deployment.log
+          if-no-files-found: error
+          retention-days: 7
