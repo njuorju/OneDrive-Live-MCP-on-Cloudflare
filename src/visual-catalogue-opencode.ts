@@ -58,7 +58,16 @@ export type OpenCodeCapabilityReceipt = {
   discoveryTimestamp: string;
   discoveryCacheHit: boolean;
   modelPresent: boolean;
-  modelMetadata: Record<string, unknown>;
+  modelMetadata: {
+    id: string;
+    object: string | null;
+    created: number | null;
+    ownedBy: string | null;
+    contextLength: number | null;
+    inputModalities: string[];
+    outputModalities: string[];
+    pricingMetadataPresent: boolean;
+  };
   visionProbe: {
     passed: boolean;
     status: number;
@@ -67,7 +76,7 @@ export type OpenCodeCapabilityReceipt = {
     blueSquareObserved: boolean;
     redCircleObserved: boolean;
     detailFieldAccepted: boolean;
-    sanitizedUsage: Record<string, number | null>;
+    sanitizedUsage: { inputTokens: number | null; outputTokens: number | null; totalTokens: number | null };
   };
   structuredOutput: {
     responseFormatAccepted: boolean;
@@ -291,9 +300,23 @@ function modelList(body: unknown): Record<string, unknown>[] {
   return [];
 }
 
-function sanitizedModelMetadata(model: Record<string, unknown>): Record<string, unknown> {
-  const allowed = ["id", "object", "created", "owned_by", "context_length", "input_modalities", "output_modalities", "pricing"];
-  return Object.fromEntries(allowed.filter((key) => model[key] !== undefined).map((key) => [key, model[key]]));
+function sanitizedStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((item) => String(item)).slice(0, 16) : [];
+}
+
+function sanitizedModelMetadata(model: Record<string, unknown>): OpenCodeCapabilityReceipt["modelMetadata"] {
+  const created = Number(model.created);
+  const contextLength = Number(model.context_length);
+  return {
+    id: String(model.id ?? model.name ?? OPENCODE_ZEN_MODEL),
+    object: model.object === undefined || model.object === null ? null : String(model.object),
+    created: Number.isFinite(created) ? created : null,
+    ownedBy: model.owned_by === undefined || model.owned_by === null ? null : String(model.owned_by),
+    contextLength: Number.isFinite(contextLength) ? contextLength : null,
+    inputModalities: sanitizedStringArray(model.input_modalities),
+    outputModalities: sanitizedStringArray(model.output_modalities),
+    pricingMetadataPresent: Boolean(model.pricing && typeof model.pricing === "object"),
+  };
 }
 
 async function readCapabilityCache(env: Env): Promise<OpenCodeCapabilityReceipt | null> {
