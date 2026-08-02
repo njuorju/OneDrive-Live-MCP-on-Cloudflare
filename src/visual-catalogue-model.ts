@@ -1,6 +1,6 @@
 import { canonicalJson, sha256HexUtf8 } from "./paid-core";
 
-export const VISUAL_COMPILER_VERSION = "odl-req-019-v1";
+export const VISUAL_COMPILER_VERSION = "odl-req-020-v1";
 export const VISUAL_RUBRIC_VERSION = "uca-visual-rubric-2026-08-02";
 export const VISUAL_PROMPT_VERSION = "visual-source-classifier-2026-08-02";
 export const VISUAL_RENDERER_VERSION = "pdfjs-cache-v1";
@@ -123,6 +123,17 @@ export type VisualResultRecord = {
   createdAt: string;
   updatedAt: string;
   error: { code: string; message: string; retryable: boolean } | null;
+  classifierArtifactId?: string | null;
+  classifierArtifactSha256?: string | null;
+  classifierArtifactWidth?: number | null;
+  classifierArtifactHeight?: number | null;
+  classifierEndpointFamily?: string | null;
+  classificationPassNumber?: number | null;
+  responseLatencyMilliseconds?: number | null;
+  parserResult?: string | null;
+  schemaValidationResult?: string | null;
+  sanitizedUsage?: { inputTokens: number; outputTokens: number; totalTokens: number } | null;
+  reviewRoutingReason?: string | null;
 };
 
 export type SeriesRecord = {
@@ -156,6 +167,7 @@ export type ReviewPacketSummary = {
   reviewVisualIds: string[];
   deterministicSampleVisualIds: string[];
   approvalFingerprint: string;
+  reviewInstructions?: string;
 };
 
 export type CatalogueFileReference = {
