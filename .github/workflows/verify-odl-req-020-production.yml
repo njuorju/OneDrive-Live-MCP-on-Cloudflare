@@ -70,7 +70,7 @@ jobs:
 
           settings = get(f'/accounts/{account}/workers/scripts/{worker}/settings')
           bindings = settings.get('bindings', []) if isinstance(settings, dict) else []
-          binding_summary = sorted(
+          binding_summary = sorted([
               {
                   'name': binding.get('name'),
                   'type': binding.get('type'),
@@ -79,7 +79,7 @@ jobs:
               }
               for binding in bindings
               if binding.get('name')
-          , key=lambda item: item['name'])
+          ], key=lambda item: item['name'])
           binding_names = {item['name'] for item in binding_summary}
           required_bindings = {
               'VISUAL_CATALOGUE_WORKFLOW', 'PAID_WORKFLOW', 'PAID_JOBS', 'ARTIFACTS',
