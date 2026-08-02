@@ -42,6 +42,7 @@ import {
   type PaidJobRecord,
   type StableVisualRecord,
 } from "./paid-core";
+import { processOpenCodeClassifierQueueMessage, type OpenCodeClassifierQueueMessage } from "./visual-catalogue-opencode";
 
 const PAID_RENDER_PAGE_PREFIX = "/__paid-render-page/";
 const PAID_RENDER_PDF_PREFIX = "/__paid-render-pdf/";
@@ -937,30 +938,63 @@ export class PaidConnectorWorkflow extends WorkflowEntrypoint<Env, PaidJobMessag
 }
 
 export async function processPaidQueueBatch(
-  batch: MessageBatch<PaidJobMessage>,
+  batch: MessageBatch<PaidJobMessage | OpenCodeClassifierQueueMessage>,
   env: Env,
 ): Promise<void> {
   for (const message of batch.messages) {
     const body = message.body;
+    if ((body as OpenCodeClassifierQueueMessage).kind === "visual_classifier") {
+      const classifier = body as OpenCodeClassifierQueueMessage;
+      try {
+        await processOpenCodeClassifierQueueMessage(env, classifier);
+        message.ack();
+      } catch (error) {
+        const value = error as { code?: string; message?: string; retryable?: boolean };
+        const attempts = Number((message as any).attempts ?? 1);
+        logPaidError("visual_classifier_attempt_failed", error, {
+          jobId: classifier.jobId,
+          candidateId: classifier.candidate.stableVisualId,
+          passNumber: classifier.passNumber,
+          attempts,
+        });
+        if (value.retryable !== false && attempts < 5) {
+          message.retry({ delaySeconds: Math.min(300, 10 * 2 ** Math.max(0, attempts - 1)) });
+        } else {
+          await putArtifact(env, `${classifier.resultKey}.error.json`, JSON.stringify({
+            code: value.code ?? "visual_classifier_failed",
+            message: value instanceof Error ? value.message : String(value.message ?? error),
+            retryable: false,
+          }), "application/json; charset=utf-8", {
+            jobId: classifier.jobId,
+            candidateId: classifier.candidate.stableVisualId,
+            passNumber: String(classifier.passNumber),
+          }).catch(() => undefined);
+          message.ack();
+        }
+      }
+      continue;
+    }
+
+    const paid = body as PaidJobMessage;
     try {
-      if (body.version !== 1 || !body.jobId || !body.userId || !QUEUED_TOOL_NAMES.has(body.toolName)) {
+      if (paid.version !== 1 || !paid.jobId || !paid.userId || !QUEUED_TOOL_NAMES.has(paid.toolName)) {
         throw new ConnectorError("invalid_paid_job_message", "The paid job message is invalid.");
       }
-      await processPaidMessage(body, env);
+      await processPaidMessage(paid, env);
       message.ack();
     } catch (error) {
       const value = error as { code?: string; message?: string; retryable?: boolean; details?: Record<string, unknown> };
       const attempts = Number((message as any).attempts ?? 1);
-      logPaidError("job_attempt_failed", error, { jobId: body.jobId, toolName: body.toolName, attempts });
+      logPaidError("job_attempt_failed", error, { jobId: paid.jobId, toolName: paid.toolName, attempts });
       if (value.retryable !== false && attempts < 5) {
-        await updateJob(env, body.userId, body.jobId, {
+        await updateJob(env, paid.userId, paid.jobId, {
           status: "queued",
           stage: `retry_wait_${attempts}`,
           error: { code: value.code ?? "paid_job_failed", message: value.message ?? "Queued job attempt failed.", retryable: true },
         }).catch(() => undefined);
         message.retry({ delaySeconds: Math.min(300, 10 * 2 ** Math.max(0, attempts - 1)) });
       } else {
-        await updateJob(env, body.userId, body.jobId, {
+        await updateJob(env, paid.userId, paid.jobId, {
           status: "failed",
           stage: "failed",
           error: {
