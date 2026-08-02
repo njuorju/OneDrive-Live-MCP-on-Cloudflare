@@ -1,0 +1,26 @@
+name: Export ODL-REQ-020 source
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: work/odl-req-020-opencode-mimo
+          fetch-depth: 1
+      - name: Archive exact branch tree
+        run: tar --exclude=.git -czf odl020-source.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: odl020-source
+          path: odl020-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
