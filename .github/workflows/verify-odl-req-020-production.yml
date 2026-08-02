@@ -1,0 +1,128 @@
+name: Verify ODL-REQ-020 production
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: 3f67b673280f2119de4eedd09745e20f
+      WORKER_NAME: nikolay-onedrive-mcp
+      EXPECTED_VERSION_ID: 1c4fc6d5-6f15-451b-a2ef-2500600c2bfe
+    steps:
+      - name: Query sanitized production state
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          account = os.environ['CLOUDFLARE_ACCOUNT_ID']
+          token = os.environ['CLOUDFLARE_API_TOKEN']
+          worker = os.environ['WORKER_NAME']
+          expected = os.environ['EXPECTED_VERSION_ID']
+          base = 'https://api.cloudflare.com/client/v4'
+
+          def get(path):
+              request = urllib.request.Request(
+                  base + path,
+                  headers={'Authorization': f'Bearer {token}', 'Accept': 'application/json'},
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  payload = json.load(response)
+              if not payload.get('success'):
+                  raise RuntimeError(f'Cloudflare API failed for {path}: {payload.get("errors", [])}')
+              return payload.get('result')
+
+          versions_raw = get(f'/accounts/{account}/workers/scripts/{worker}/versions?page=1&per_page=5')
+          version_items = versions_raw.get('items', versions_raw) if isinstance(versions_raw, dict) else versions_raw
+          latest = next((item for item in version_items if item.get('id') == expected), None)
+          if latest is None:
+              raise RuntimeError('Expected deployed version is not present in recent Worker versions')
+
+          deployments_raw = get(f'/accounts/{account}/workers/scripts/{worker}/deployments')
+          deployments = deployments_raw.get('deployments', deployments_raw) if isinstance(deployments_raw, dict) else deployments_raw
+          deployment = next(
+              (
+                  item for item in deployments
+                  if any(version.get('version_id') == expected for version in item.get('versions', []))
+              ),
+              None,
+          )
+          if deployment is None:
+              raise RuntimeError('Expected Worker version has no deployment')
+          traffic = next(
+              version.get('percentage')
+              for version in deployment.get('versions', [])
+              if version.get('version_id') == expected
+          )
+          if traffic != 100:
+              raise RuntimeError(f'Expected version traffic is {traffic}, not 100')
+
+          settings = get(f'/accounts/{account}/workers/scripts/{worker}/settings')
+          bindings = settings.get('bindings', []) if isinstance(settings, dict) else []
+          binding_summary = sorted(
+              {
+                  'name': binding.get('name'),
+                  'type': binding.get('type'),
+                  'class_name': binding.get('class_name'),
+                  'workflow_name': binding.get('workflow_name'),
+              }
+              for binding in bindings
+              if binding.get('name')
+          , key=lambda item: item['name'])
+          binding_names = {item['name'] for item in binding_summary}
+          required_bindings = {
+              'VISUAL_CATALOGUE_WORKFLOW', 'PAID_WORKFLOW', 'PAID_JOBS', 'ARTIFACTS',
+              'MCP_OBJECT', 'AUTH_STATE', 'PAID_COORDINATOR', 'OAUTH_KV', 'BROWSER', 'IMAGES'
+          }
+          missing_bindings = sorted(required_bindings - binding_names)
+          if missing_bindings:
+              raise RuntimeError(f'Missing production bindings: {missing_bindings}')
+
+          secrets_raw = get(f'/accounts/{account}/workers/scripts/{worker}/secrets')
+          secret_names = sorted(item.get('name') for item in secrets_raw if item.get('name'))
+          required_existing_secrets = {'COOKIE_ENCRYPTION_KEY', 'MICROSOFT_CLIENT_ID', 'MICROSOFT_CLIENT_SECRET'}
+          if not required_existing_secrets.issubset(set(secret_names)):
+              raise RuntimeError('One or more pre-existing secret bindings are missing')
+
+          output = {
+              'worker': worker,
+              'version': {
+                  'number': latest.get('number'),
+                  'id': latest.get('id'),
+                  'created_on': latest.get('metadata', {}).get('created_on'),
+                  'message': latest.get('annotations', {}).get('workers/message'),
+                  'tag': latest.get('annotations', {}).get('workers/tag'),
+              },
+              'deployment': {
+                  'id': deployment.get('id'),
+                  'created_on': deployment.get('created_on'),
+                  'traffic_percentage': traffic,
+                  'strategy': deployment.get('strategy'),
+              },
+              'bindings': binding_summary,
+              'secret_names': secret_names,
+              'opencode_secret_present': 'OPENCODE_ZEN_API_KEY' in secret_names,
+          }
+          with open('verification.json', 'w', encoding='utf-8') as handle:
+              json.dump(output, handle, ensure_ascii=False, indent=2)
+              handle.write('\n')
+          print(json.dumps(output, ensure_ascii=False, indent=2))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: odl-req-020-production-verification
+          path: verification.json
+          if-no-files-found: error
+          retention-days: 7
