@@ -1,4 +1,4 @@
-name: Export ODL-REQ-020 source
+name: Apply ODL-REQ-020 implementation
 
 on:
   pull_request:
@@ -6,23 +6,26 @@ on:
       - main
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  export:
+  apply:
+    if: github.event.pull_request.head.ref == 'work/odl-req-020-opencode-mimo'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
           ref: work/odl-req-020-opencode-mimo
-          fetch-depth: 1
-      - name: Archive exact branch tree
+          fetch-depth: 0
+      - name: Apply exact implementation patch
+        shell: bash
         run: |
-          mkdir -p .export
-          tar --exclude=.git --exclude=.export -czf .export/odl020-source.tar.gz .
-      - uses: actions/upload-artifact@v4
-        with:
-          name: odl020-source
-          path: .export/odl020-source.tar.gz
-          if-no-files-found: error
-          retention-days: 1
+          cat .odl020/patch.part* | base64 -d | gzip -d > /tmp/odl020.patch
+          git apply --check /tmp/odl020.patch
+          git apply /tmp/odl020.patch
+          rm -rf .odl020
+          git config user.name 'ODL-REQ-020 automation'
+          git config user.email 'actions@users.noreply.github.com'
+          git add -A
+          git commit -m 'ODL-REQ-020: add OpenCode Zen MiMo classifier'
+          git push origin HEAD:work/odl-req-020-opencode-mimo
