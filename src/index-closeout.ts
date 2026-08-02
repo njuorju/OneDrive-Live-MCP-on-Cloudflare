@@ -8,6 +8,7 @@ import { registerStructuredPreparationTools } from "./structured-preparation";
 import { registerComposedPreparedPlanTool } from "./composed-prepared-plan";
 import { registerVisualPhase2Tools } from "./visual-phase2";
 import { registerAccessVerificationValidator } from "./access-verification-validator";
+import { registerVisualCatalogueCompilerTools, VisualCatalogueWorkflow } from "./visual-catalogue-tools";
 import { createIntegratedStateStorage } from "./version20-hotfix";
 
 const prototype = OneDriveMCP.prototype as any;
@@ -27,6 +28,7 @@ if (!prototype.__finalEngineeringCloseoutApplied) {
     registerComposedPreparedPlanTool(actual, contextFactory);
     registerVisualPhase2Tools(actual, contextFactory);
     registerAccessVerificationValidator(actual, contextFactory);
+    registerVisualCatalogueCompilerTools(actual, contextFactory);
   };
   Object.defineProperty(prototype, "__finalEngineeringCloseoutApplied", {
     value: true,
@@ -36,5 +38,5 @@ if (!prototype.__finalEngineeringCloseoutApplied) {
   });
 }
 
-export { AuthState, OneDriveMCP, PaidCoordinator, PaidConnectorWorkflow };
+export { AuthState, OneDriveMCP, PaidCoordinator, PaidConnectorWorkflow, VisualCatalogueWorkflow };
 export default patchedDefault;
