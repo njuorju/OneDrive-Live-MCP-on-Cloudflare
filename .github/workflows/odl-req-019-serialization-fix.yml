@@ -16,42 +16,43 @@ jobs:
         with:
           ref: work/odl-req-019-visual-catalogue-compiler
           fetch-depth: 0
-      - name: Apply exact serialization corrections
+      - name: Apply bounded serialization corrections
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
+          import re
 
           publication = Path('src/visual-catalogue-publication.ts')
           text = publication.read_text()
-          old = '''      const item = await step.do(`read catalogue ${reference.role}`, { retries: { limit: 3, delay: "5 seconds", backoff: "exponential" }, timeout: "5 minutes" }, async () => liveCatalogueBytes(env, payload.userId, reference));
-              live.set(reference.role, { reference, ...item });'''
-          new = '''      const item = await liveCatalogueBytes(env, payload.userId, reference);
-              live.set(reference.role, { reference, ...item });'''
-          if old not in text:
-              raise SystemExit('catalogue read snippet not found')
-          text = text.replace(old, new, 1)
 
-          old = '''        const uploaded = await step.do(`publish cached visual ${String(index + 1).padStart(3, "0")} ${record.stableKey}`, { retries: { limit: 1, delay: "1 second", backoff: "constant" }, timeout: "10 minutes" }, async () => uploadAsset(env, payload.userId, input.destinationPath, filename, bytes, object.httpMetadata?.contentType ?? "image/png"));'''
-          new = '''        const uploaded = await uploadAsset(env, payload.userId, input.destinationPath, filename, bytes, object.httpMetadata?.contentType ?? "image/png");'''
-          if old not in text:
-              raise SystemExit('visual upload snippet not found')
-          text = text.replace(old, new, 1)
-
-          old = '''        const uploaded = await step.do(`publish cached series ${String(index + 1).padStart(3, "0")} ${definition.seriesId}`, { retries: { limit: 1, delay: "1 second", backoff: "constant" }, timeout: "10 minutes" }, async () => uploadAsset(env, payload.userId, input.destinationPath, filename, stitched.bytes, "image/png"));'''
-          new = '''        const uploaded = await uploadAsset(env, payload.userId, input.destinationPath, filename, stitched.bytes, "image/png");'''
-          if old not in text:
-              raise SystemExit('series upload snippet not found')
-          text = text.replace(old, new, 1)
+          patterns = [
+            (
+              r'(?m)^\s{6}const item = await step\.do\(`read catalogue \$\{reference\.role\}`, \{ retries: \{ limit: 3, delay: "5 seconds", backoff: "exponential" \}, timeout: "5 minutes" \}, async \(\) => liveCatalogueBytes\(env, payload\.userId, reference\)\);$',
+              '      const item = await liveCatalogueBytes(env, payload.userId, reference);',
+            ),
+            (
+              r'(?m)^\s{8}const uploaded = await step\.do\(`publish cached visual .*?async \(\) => uploadAsset\(env, payload\.userId, input\.destinationPath, filename, bytes, object\.httpMetadata\?\.contentType \?\? "image/png"\)\);$',
+              '        const uploaded = await uploadAsset(env, payload.userId, input.destinationPath, filename, bytes, object.httpMetadata?.contentType ?? "image/png");',
+            ),
+            (
+              r'(?m)^\s{8}const uploaded = await step\.do\(`publish cached series .*?async \(\) => uploadAsset\(env, payload\.userId, input\.destinationPath, filename, stitched\.bytes, "image/png"\)\);$',
+              '        const uploaded = await uploadAsset(env, payload.userId, input.destinationPath, filename, stitched.bytes, "image/png");',
+            ),
+          ]
+          for pattern, replacement in patterns:
+            text, count = re.subn(pattern, replacement, text, count=1)
+            if count != 1:
+              raise SystemExit(f'expected exactly one publication replacement, got {count}: {pattern}')
           publication.write_text(text)
 
           runtime = Path('src/visual-catalogue-runtime.ts')
           text = runtime.read_text()
-          old = '''          status = await step.do(`poll OpenAI batch ${chunkIndex} attempt ${String(poll).padStart(3, "0")}`, { retries: { limit: 4, delay: "10 seconds", backoff: "exponential" }, timeout: "2 minutes" }, async () => batchStatus(env, submitted.batchId));'''
-          new = '''          status = await (step as any).do(`poll OpenAI batch ${chunkIndex} attempt ${String(poll).padStart(3, "0")}`, { retries: { limit: 4, delay: "10 seconds", backoff: "exponential" }, timeout: "2 minutes" }, async () => batchStatus(env, submitted.batchId)) as Record<string, unknown>;'''
-          if old not in text:
-              raise SystemExit('batch poll snippet not found')
-          text = text.replace(old, new, 1)
+          pattern = r'(?m)^\s{10}status = await step\.do\(`poll OpenAI batch \$\{chunkIndex\} attempt \$\{String\(poll\)\.padStart\(3, "0"\)\}`, \{ retries: \{ limit: 4, delay: "10 seconds", backoff: "exponential" \}, timeout: "2 minutes" \}, async \(\) => batchStatus\(env, submitted\.batchId\)\);$'
+          replacement = '          status = await (step as any).do(`poll OpenAI batch ${chunkIndex} attempt ${String(poll).padStart(3, "0")}`, { retries: { limit: 4, delay: "10 seconds", backoff: "exponential" }, timeout: "2 minutes" }, async () => batchStatus(env, submitted.batchId)) as Record<string, unknown>;'
+          text, count = re.subn(pattern, replacement, text, count=1)
+          if count != 1:
+            raise SystemExit(f'expected exactly one runtime replacement, got {count}')
           runtime.write_text(text)
           PY
       - name: Commit correction
@@ -63,5 +64,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/visual-catalogue-publication.ts src/visual-catalogue-runtime.ts
-          git commit -m "ODL-REQ-019 keep rich bytes out of Workflow state"
+          git commit -m "ODL-REQ-019 keep rich values out of Workflow state"
           git push origin HEAD:work/odl-req-019-visual-catalogue-compiler
