@@ -28,7 +28,12 @@
     "INTEGRITY_LEASE_SECONDS": "600",
     "PAID_MAX_SOURCE_MB": "500",
     "PAID_VISUAL_PARSE_MB": "40",
-    "PAID_RENDER_ORIGIN": "https://nikolay-onedrive-mcp.fdas201290.workers.dev"
+    "PAID_RENDER_ORIGIN": "https://nikolay-onedrive-mcp.fdas201290.workers.dev",
+    "VISUAL_CLASSIFIER_PROVIDER": "openai",
+    "VISUAL_CLASSIFIER_MODEL": "gpt-5.2-2025-12-11",
+    "VISUAL_RUBRIC_VERSION": "uca-visual-rubric-2026-08-02",
+    "VISUAL_PROMPT_VERSION": "visual-source-classifier-2026-08-02",
+    "VISUAL_RENDERER_VERSION": "pdfjs-cache-v1"
   },
   "migrations": [
     { "new_sqlite_classes": ["OneDriveMCP"], "tag": "v1" },
@@ -70,6 +75,12 @@
       "binding": "PAID_WORKFLOW",
       "class_name": "PaidConnectorWorkflow",
       "limits": { "steps": 10000 }
+    },
+    {
+      "name": "onedrive-live-mcp-visual-catalogue",
+      "binding": "VISUAL_CATALOGUE_WORKFLOW",
+      "class_name": "VisualCatalogueWorkflow",
+      "limits": { "steps": 25000 }
     }
   ],
   "ai": { "binding": "AI" },
