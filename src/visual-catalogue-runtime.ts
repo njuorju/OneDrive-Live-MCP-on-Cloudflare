@@ -1399,9 +1399,10 @@ export async function runVisualCompileWorkflow(
     if (selection.provider === "opencode_zen") {
       manifest.stage = "discovering_opencode_capabilities";
       await writeManifest(env, manifest);
-      capability = await step.do("discover OpenCode Zen model and vision capability", { retries: { limit: 3, delay: "10 seconds", backoff: "exponential" }, timeout: "5 minutes" }, async () => discoverOpenCodeCapabilities(env));
-      manifest.providerCapabilities = capability;
-      manifest.metrics.costClassification = capability.costClassification;
+      const discoveredCapability = await step.do("discover OpenCode Zen model and vision capability", { retries: { limit: 3, delay: "10 seconds", backoff: "exponential" }, timeout: "5 minutes" }, async () => discoverOpenCodeCapabilities(env));
+      capability = discoveredCapability;
+      manifest.providerCapabilities = discoveredCapability;
+      manifest.metrics.costClassification = discoveredCapability.costClassification;
       await writeManifest(env, manifest);
     }
 
