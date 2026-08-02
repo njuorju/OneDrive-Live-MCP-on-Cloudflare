@@ -1,9 +1,9 @@
 name: Deploy ODL-REQ-019 exact main
 
 on:
-  push:
+  pull_request:
     branches:
-      - deploy/odl-req-019-exact-main
+      - main
 
 permissions:
   contents: read
