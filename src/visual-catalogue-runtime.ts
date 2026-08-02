@@ -1134,7 +1134,7 @@ export async function runVisualCompileWorkflow(
         const submitted = await step.do(`submit OpenAI batch ${chunkIndex}`, { retries: { limit: 4, delay: "20 seconds", backoff: "exponential" }, timeout: "10 minutes" }, async () => submitBatch(env, model, verifiedSource.source, manifest.sourceType as SourceType, manifest.routingMode as RoutingMode, entries));
         let status: Record<string, unknown> = {};
         for (let poll = 1; poll <= 144; poll += 1) {
-          status = await step.do(`poll OpenAI batch ${chunkIndex} attempt ${String(poll).padStart(3, "0")}`, { retries: { limit: 4, delay: "10 seconds", backoff: "exponential" }, timeout: "2 minutes" }, async () => batchStatus(env, submitted.batchId));
+          status = await (step as any).do(`poll OpenAI batch ${chunkIndex} attempt ${String(poll).padStart(3, "0")}`, { retries: { limit: 4, delay: "10 seconds", backoff: "exponential" }, timeout: "2 minutes" }, async () => batchStatus(env, submitted.batchId)) as Record<string, unknown>;
           const state = String(status.status ?? "");
           if (["completed", "failed", "expired", "cancelled"].includes(state)) break;
           await step.sleep(`wait OpenAI batch ${chunkIndex} attempt ${String(poll).padStart(3, "0")}`, "10 minutes");

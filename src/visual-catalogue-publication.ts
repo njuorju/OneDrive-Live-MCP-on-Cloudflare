@@ -469,7 +469,7 @@ export async function runPrepareVisualPublicationWorkflow(
     const live = new Map<CatalogueFileReference["role"], { reference: CatalogueFileReference; verified: VerifiedItem; bytes: Uint8Array; sha256: string }>();
     for (let index = 0; index < input.catalogueFiles.length; index += 1) {
       const reference = input.catalogueFiles[index];
-      const item = await step.do(`read catalogue ${reference.role}`, { retries: { limit: 3, delay: "5 seconds", backoff: "exponential" }, timeout: "5 minutes" }, async () => liveCatalogueBytes(env, payload.userId, reference));
+      const item = await liveCatalogueBytes(env, payload.userId, reference);
       live.set(reference.role, { reference, ...item });
       await updateJob(env, payload.userId, payload.jobId, { progress: Math.min(30, 5 + Math.round((index + 1) / input.catalogueFiles.length * 25)), stage: `read_${reference.role}` });
     }
@@ -832,7 +832,7 @@ export async function runPublishCachedAssetsWorkflow(
         const bytes = new Uint8Array(await object.arrayBuffer());
         if (await sha256Bytes(bytes) !== record.artifactSha256) throw new ConnectorError("cached_artifact_changed", `Cached bytes for ${item.id} changed.`);
         const filename = deterministicAssetFilename(record, input.filenamePolicy);
-        const uploaded = await step.do(`publish cached visual ${String(index + 1).padStart(3, "0")} ${record.stableKey}`, { retries: { limit: 1, delay: "1 second", backoff: "constant" }, timeout: "10 minutes" }, async () => uploadAsset(env, payload.userId, input.destinationPath, filename, bytes, object.httpMetadata?.contentType ?? "image/png"));
+        const uploaded = await uploadAsset(env, payload.userId, input.destinationPath, filename, bytes, object.httpMetadata?.contentType ?? "image/png");
         published.push({
           stableVisualId: record.stableVisualId,
           seriesId: null,
@@ -856,7 +856,7 @@ export async function runPublishCachedAssetsWorkflow(
         if (!canonical) throw new ConnectorError("series_canonical_missing", `Series ${item.id} has no canonical result.`);
         const stitched = await stitchedSeries(env, input.classificationJobId, definition, results);
         const filename = validateItemName(`${String(input.filenamePolicy?.prefix ?? compiler.source.filename.replace(/\.[^.]+$/, "")).replace(/[^A-Za-z0-9_.-]+/g, "_").slice(0, 120)}_${definition.seriesId.slice(7, 19)}_series.png`);
-        const uploaded = await step.do(`publish cached series ${String(index + 1).padStart(3, "0")} ${definition.seriesId}`, { retries: { limit: 1, delay: "1 second", backoff: "constant" }, timeout: "10 minutes" }, async () => uploadAsset(env, payload.userId, input.destinationPath, filename, stitched.bytes, "image/png"));
+        const uploaded = await uploadAsset(env, payload.userId, input.destinationPath, filename, stitched.bytes, "image/png");
         published.push({
           stableVisualId: definition.canonicalVisualId,
           seriesId: definition.seriesId,
