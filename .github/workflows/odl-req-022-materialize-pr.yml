@@ -22,13 +22,14 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-          import base64, gzip, io, re, tarfile
+          import base64, io, tarfile
           from pathlib import Path
           source = Path('.github/workflows/odl-req-022-bootstrap.yml').read_text()
-          match = re.search(r'^\s*PATCH_TGZ_B64:\s*(\S+)\s*$', source, re.M)
-          if not match:
-              raise SystemExit('embedded patch archive not found')
-          data = base64.b64decode(match.group(1))
+          prefix = '          PATCH_TGZ_B64: '
+          lines = [line for line in source.splitlines() if line.startswith(prefix)]
+          if len(lines) != 1:
+              raise SystemExit(f'embedded patch archive not found exactly once: {len(lines)}')
+          data = base64.b64decode(lines[0][len(prefix):].strip(), validate=True)
           with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as archive:
               archive.extractall('.')
           Path('.github/workflows/odl-req-022-bootstrap.yml').unlink(missing_ok=True)
