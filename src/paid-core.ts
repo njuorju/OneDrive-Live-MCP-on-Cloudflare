@@ -206,7 +206,7 @@ export async function coordinatorRequest<T>(
   const response = await env.PAID_COORDINATOR.get(id).fetch(`https://paid-coordinator${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ ...body, userId }),
   });
   const value = await response.json().catch(() => null) as { ok?: boolean; result?: T; error?: Record<string, unknown> } | null;
   if (!response.ok || !value?.ok) {
