@@ -1,0 +1,70 @@
+name: ODL-REQ-024 Probe D main monitor
+
+on:
+  push:
+    branches:
+      - odl-req-024-opencode-go-vision-contract
+    paths:
+      - .odl-req-024-probe-d-monitor
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: 3f67b673280f2119de4eedd09745e20f
+      REPO: njuorju/OneDrive-Live-MCP-on-Cloudflare
+      TARGET_SHA: 6b02965b0a29d2ab11c98ea1550321384fb1ccf9
+      WORKFLOW_NAME: onedrive-live-mcp-visual-catalogue
+      INSTANCE_ID: odl-req-024-6b02965b0a29
+    steps:
+      - name: Poll exact main CI and diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+          gha=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")
+          cf=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json")
+          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
+          for _ in $(seq 1 150); do
+            curl -fsS "${gha[@]}" "https://api.github.com/repos/$REPO/actions/runs?head_sha=$TARGET_SHA&event=push&per_page=10" > runs.json
+            run_id=$(jq -r '.workflow_runs|map(select(.name=="CI"))|sort_by(.created_at)|reverse|.[0].id//empty' runs.json)
+            if [[ -n "$run_id" ]]; then
+              curl -fsS "${gha[@]}" "https://api.github.com/repos/$REPO/actions/runs/$run_id" > run.json
+              if [[ "$(jq -r '.status' run.json)" == "completed" ]]; then
+                curl -fsS "${gha[@]}" "https://api.github.com/repos/$REPO/actions/runs/$run_id/jobs?filter=latest&per_page=100" > jobs.json
+                jq '{id,name,status,conclusion,event,head_sha,run_number,created_at,updated_at}' run.json > github-run.json
+                jq '{jobs:[.jobs[]|{id,name,status,conclusion,started_at,completed_at,steps:[(.steps//[])[]|{name,status,conclusion,number}]}]}' jobs.json > github-jobs.json
+                break
+              fi
+            fi
+            sleep 10
+          done
+          test -s github-run.json
+          for _ in $(seq 1 150); do
+            code=$(curl -sS -o instance.json -w '%{http_code}' "${cf[@]}" "$api/workflows/$WORKFLOW_NAME/instances/$INSTANCE_ID?simple=false&order=asc")
+            if [[ "$code" == 200 ]] && jq -e '.success==true' instance.json >/dev/null; then
+              status=$(jq -r '.result.status' instance.json)
+              if [[ "$status" == complete || "$status" == errored || "$status" == terminated ]]; then
+                jq '{success,result:{status:.result.status,versionId:.result.versionId,queued:.result.queued,start:.result.start,end:.result.end,error:.result.error,step_count:.result.step_count,output:(if .result.output==null then null elif (.result.output|type)=="string" then (try (.result.output|fromjson) catch {parseError:true}) else .result.output end),steps:[(.result.steps//[])[]|{type,name,success,finished,start,end,error,attempts:[(.attempts//[])[]|{start,end,success,error}]}]}}' instance.json > diagnostic.json
+                break
+              fi
+            fi
+            sleep 10
+          done
+          test -s diagnostic.json
+          if grep -Eiq 'data:image|base64,|authorization|bearer[[:space:]]|UCA VISION PROBE 2047|ODL-REQ-024 TEXT CONTROL|r2Key|sourceRenderArtifactId|sourceRenderSha256' diagnostic.json; then exit 2; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: odl-req-024-probe-d-main-monitor
+          path: |
+            github-run.json
+            github-jobs.json
+            diagnostic.json
+          retention-days: 1
+      - run: exit 1
