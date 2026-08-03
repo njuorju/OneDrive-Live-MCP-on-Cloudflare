@@ -11,13 +11,13 @@ import {
   validateCataloguePairBytes,
 } from "../src/file-backed-text";
 
-const connectorReference = "https://files.openaiusercontent.com/connector/fixture";
+const connectorReference = { download_url: "https://files.openaiusercontent.com/connector/fixture", file_id: "file_fixture" };
 
 function arrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
-function responseFor(bytes: Uint8Array, contentType = "application/octet-stream"): typeof fetch {
+function responseFor(bytes: Uint8Array, contentType = "text/plain"): typeof fetch {
   return (async (..._args: Parameters<typeof fetch>) => new Response(arrayBuffer(bytes), {
     status: 200,
     headers: {
@@ -27,22 +27,23 @@ function responseFor(bytes: Uint8Array, contentType = "application/octet-stream"
   })) as typeof fetch;
 }
 
-test("file inputs are emitted as top-level binary connector parameters", () => {
-  const schema = z.toJSONSchema(connectorFileInputSchema) as Record<string, unknown>;
-  assert.equal(schema.type, "string");
-  assert.equal(schema.format, "binary");
-  assert.equal(schema.contentMediaType, "application/octet-stream");
+test("file inputs use the supported ChatGPT connector-file object schema", () => {
+  const schema = z.toJSONSchema(connectorFileInputSchema) as any;
+  assert.equal(schema.type, "object");
+  assert.deepEqual(schema.required, ["download_url", "file_id"]);
+  assert.deepEqual(Object.keys(schema.properties).sort(), ["download_url", "file_id", "file_name", "mime_type"]);
+  assert.equal(schema.additionalProperties, false);
 });
 
 test("only OpenAI and ChatGPT connector file references are accepted", () => {
-  assert.equal(trustedConnectorFileUrl(connectorReference).hostname, "files.openaiusercontent.com");
+  assert.equal(trustedConnectorFileUrl(connectorReference.download_url).hostname, "files.openaiusercontent.com");
   assert.throws(
     () => trustedConnectorFileUrl("https://example.com/catalogue.csv"),
-    (error: unknown) => error instanceof ConnectorError && error.code === "untrusted_connector_file",
+    (error: unknown) => error instanceof ConnectorError && error.code === "connector_file_download_forbidden",
   );
   assert.throws(
     () => trustedConnectorFileUrl("/mnt/data/catalogue.csv"),
-    (error: unknown) => error instanceof ConnectorError && error.code === "invalid_connector_file",
+    (error: unknown) => error instanceof ConnectorError && error.code === "connector_file_reference_malformed",
   );
 });
 
@@ -67,7 +68,7 @@ test("expected SHA-256 is checked before publication", async () => {
   const bytes = new TextEncoder().encode("id,name\n1,A\n");
   await assert.rejects(
     () => loadConnectorTextFile(connectorReference, "fixture.csv", 1024, "0".repeat(64), responseFor(bytes)),
-    (error: unknown) => error instanceof ConnectorError && error.code === "sha256_mismatch",
+    (error: unknown) => error instanceof ConnectorError && error.code === "connector_file_hash_mismatch",
   );
 });
 
@@ -75,7 +76,7 @@ test("malformed UTF-8 is rejected", async () => {
   const bytes = Uint8Array.from([0xc3, 0x28]);
   await assert.rejects(
     () => loadConnectorTextFile(connectorReference, "fixture.txt", 1024, undefined, responseFor(bytes)),
-    (error: unknown) => error instanceof ConnectorError && error.code === "text_not_utf8",
+    (error: unknown) => error instanceof ConnectorError && error.code === "connector_file_content_invalid",
   );
 });
 
@@ -83,7 +84,7 @@ test("binary control bytes are rejected", async () => {
   const bytes = Uint8Array.from([0x41, 0x00, 0x42]);
   await assert.rejects(
     () => loadConnectorTextFile(connectorReference, "fixture.txt", 1024, undefined, responseFor(bytes)),
-    (error: unknown) => error instanceof ConnectorError && error.code === "binary_file_rejected",
+    (error: unknown) => error instanceof ConnectorError && error.code === "connector_file_content_invalid",
   );
 });
 
@@ -91,7 +92,7 @@ test("files over the configured text limit fail before mutation", async () => {
   const bytes = new TextEncoder().encode("12345");
   await assert.rejects(
     () => loadConnectorTextFile(connectorReference, "fixture.txt", 4, undefined, responseFor(bytes)),
-    (error: unknown) => error instanceof ConnectorError && error.code === "text_too_large",
+    (error: unknown) => error instanceof ConnectorError && error.code === "connector_file_too_large",
   );
 });
 
@@ -99,7 +100,7 @@ test("unsupported destination extensions fail before retrieval", async () => {
   const bytes = new TextEncoder().encode("text");
   await assert.rejects(
     () => loadConnectorTextFile(connectorReference, "fixture.exe", 1024, undefined, responseFor(bytes)),
-    (error: unknown) => error instanceof ConnectorError && error.code === "unsupported_text_extension",
+    (error: unknown) => error instanceof ConnectorError && error.code === "connector_file_content_invalid",
   );
 });
 
