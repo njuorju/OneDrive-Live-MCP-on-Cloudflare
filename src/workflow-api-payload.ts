@@ -7,3 +7,10 @@ export function normalizeWorkflowApiPayload(payload: unknown): unknown {
     return payload;
   }
 }
+
+export function extractWorkflowEventPayload(event: unknown): unknown {
+  if (event !== null && typeof event === "object" && !Array.isArray(event) && "payload" in event) {
+    return normalizeWorkflowApiPayload((event as { payload?: unknown }).payload);
+  }
+  return normalizeWorkflowApiPayload(event);
+}
