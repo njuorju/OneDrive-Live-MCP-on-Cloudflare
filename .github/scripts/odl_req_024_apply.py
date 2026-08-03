@@ -1,0 +1,154 @@
+from pathlib import Path
+
+
+def replace_once(path: str | Path, old: str, new: str) -> None:
+    target = Path(path)
+    text = target.read_text()
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f"{target}: expected one match, got {count}")
+    target.write_text(text.replace(old, new, 1))
+
+
+go = Path("src/visual-catalogue-opencode-go.ts")
+if "CAPABILITY_CACHE_KEY_V2" in go.read_text():
+    raise SystemExit(0)
+
+replace_once(
+    go,
+    'export const ODL_REQ_022_GO_PROBE_VERSION = "odl-req-022-go-capability-v1" as const;\n',
+    'export const ODL_REQ_022_GO_PROBE_VERSION = "odl-req-022-go-capability-v1" as const;\nexport const ODL_REQ_024_GO_PROBE_VERSION = "odl-req-024-go-vision-contract-v1" as const;\n',
+)
+replace_once(
+    go,
+    '  probeVersion: typeof ODL_REQ_022_GO_PROBE_VERSION;\n',
+    '  probeVersion: typeof ODL_REQ_022_GO_PROBE_VERSION | typeof ODL_REQ_024_GO_PROBE_VERSION;\n',
+)
+replace_once(
+    go,
+    'const CAPABILITY_CACHE_KEY = `visual-compiler/provider-cache/opencode-go/${OPENCODE_GO_MODEL}/${ODL_REQ_022_GO_PROBE_VERSION}/capabilities.json`;\n',
+    'const CAPABILITY_CACHE_KEY_V1 = `visual-compiler/provider-cache/opencode-go/${OPENCODE_GO_MODEL}/${ODL_REQ_022_GO_PROBE_VERSION}/capabilities.json`;\nconst CAPABILITY_CACHE_KEY_V2 = `visual-compiler/provider-cache/opencode-go/${OPENCODE_GO_MODEL}/${ODL_REQ_024_GO_PROBE_VERSION}/capabilities.json`;\n\nfunction capabilityCacheKey(probeVersion: OpenCodeGoCapabilityReceipt["probeVersion"]): string {\n  return probeVersion === ODL_REQ_024_GO_PROBE_VERSION ? CAPABILITY_CACHE_KEY_V2 : CAPABILITY_CACHE_KEY_V1;\n}\n',
+)
+replace_once(
+    go,
+    'export async function writeOpenCodeGoCapabilityCache(env: Env, receipt: OpenCodeGoCapabilityReceipt): Promise<void> {\n  await putArtifact(env, CAPABILITY_CACHE_KEY, JSON.stringify(receipt, null, 2), "application/json; charset=utf-8", {',
+    'export async function writeOpenCodeGoCapabilityCache(env: Env, receipt: OpenCodeGoCapabilityReceipt): Promise<void> {\n  await putArtifact(env, capabilityCacheKey(receipt.probeVersion), JSON.stringify(receipt, null, 2), "application/json; charset=utf-8", {',
+)
+old_read = '''export async function readOpenCodeGoCapabilityCache(env: Env): Promise<OpenCodeGoCapabilityReceipt | null> {
+  const object = await env.ARTIFACTS.get(CAPABILITY_CACHE_KEY);
+  if (!object) return null;
+  try {
+    const receipt = JSON.parse(await object.text()) as OpenCodeGoCapabilityReceipt;
+    if (receipt.provider !== OPENCODE_GO_PROVIDER || receipt.mode !== OPENCODE_GO_MODE || receipt.model !== OPENCODE_GO_MODEL) return null;
+    if (receipt.probeVersion !== ODL_REQ_022_GO_PROBE_VERSION || !receipt.visionProbe.passed) return null;
+    if (receipt.credentialBindingName !== selectOpenCodeGoCredentialBinding(env)) return null;
+    if (Date.now() - Date.parse(receipt.discoveryTimestamp) > OPENCODE_GO_CAPABILITY_CACHE_SECONDS * 1000) return null;
+    return { ...receipt, discoveryCacheHit: true, accounting: await readOpenCodeGoSpendLedger(env, receipt.spendLedgerKey) };
+  } catch {
+    return null;
+  }
+}'''
+new_read = '''export async function readOpenCodeGoCapabilityCache(env: Env): Promise<OpenCodeGoCapabilityReceipt | null> {
+  for (const key of [CAPABILITY_CACHE_KEY_V2, CAPABILITY_CACHE_KEY_V1]) {
+    const object = await env.ARTIFACTS.get(key);
+    if (!object) continue;
+    try {
+      const receipt = JSON.parse(await object.text()) as OpenCodeGoCapabilityReceipt;
+      if (receipt.provider !== OPENCODE_GO_PROVIDER || receipt.mode !== OPENCODE_GO_MODE || receipt.model !== OPENCODE_GO_MODEL) continue;
+      if (![ODL_REQ_024_GO_PROBE_VERSION, ODL_REQ_022_GO_PROBE_VERSION].includes(receipt.probeVersion) || !receipt.visionProbe.passed) continue;
+      if (receipt.credentialBindingName !== selectOpenCodeGoCredentialBinding(env)) continue;
+      if (Date.now() - Date.parse(receipt.discoveryTimestamp) > OPENCODE_GO_CAPABILITY_CACHE_SECONDS * 1000) continue;
+      return { ...receipt, discoveryCacheHit: true, accounting: await readOpenCodeGoSpendLedger(env, receipt.spendLedgerKey) };
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}'''
+replace_once(go, old_read, new_read)
+
+diagnostic = Path("src/visual-classifier-capability-go-diagnostic.ts")
+replace_once(
+    diagnostic,
+    '  OPENCODE_GO_MODELS_ENDPOINT,\n  OPENCODE_GO_PROVIDER,\n',
+    '  OPENCODE_GO_MODELS_ENDPOINT,\n  OPENCODE_GO_PROVIDER,\n  ODL_REQ_024_GO_PROBE_VERSION,\n',
+)
+replace_once(
+    diagnostic,
+    'export const ODL_REQ_024_GO_PROBE_VERSION = "odl-req-024-go-vision-contract-v1" as const;\n',
+    '',
+)
+replace_once(
+    diagnostic,
+    '''    const result = await step.do(
+      `ODL-REQ-024 ${probe} attempt ${attempt}`,
+      { retries: { limit: 0, delay: "1 second", backoff: "constant" }, timeout: "2 minutes" },
+      async () => runProbe({
+        env,
+        probe,
+        attempt,
+        fixture,
+        credentialBindingName,
+        spendLedgerKey: diagnosticLedger.key,
+        retryReason,
+      }),
+    );''',
+    '''    const result = await runProbe({
+      env,
+      probe,
+      attempt,
+      fixture,
+      credentialBindingName,
+      spendLedgerKey: diagnosticLedger.key,
+      retryReason,
+    });''',
+)
+replace_once(
+    diagnostic,
+    '''        const result = await step.do(
+          `ODL-REQ-024 capability ${probe} attempt ${attempt}`,
+          { retries: { limit: 0, delay: "1 second", backoff: "constant" }, timeout: "2 minutes" },
+          async () => runProbe({
+            env,
+            probe,
+            attempt,
+            fixture,
+            credentialBindingName,
+            spendLedgerKey: capabilityLedger.key,
+            retryReason: attempt > 1 ? "bounded_capability_retry" : null,
+          }),
+        );''',
+    '''        const result = await runProbe({
+          env,
+          probe,
+          attempt,
+          fixture,
+          credentialBindingName,
+          spendLedgerKey: capabilityLedger.key,
+          retryReason: attempt > 1 ? "bounded_capability_retry" : null,
+        });''',
+)
+replace_once(
+    diagnostic,
+    '  let capabilityReceipt: Record<string, unknown> | null = null;\n',
+    '  let capabilityReceipt: ({ status: "passed" | "failed" } & Record<string, unknown>) | null = null;\n',
+)
+
+capability = Path("src/visual-classifier-capability-go.ts")
+replace_once(
+    capability,
+    '  ODL_REQ_022_GO_PROBE_VERSION,\n',
+    '  ODL_REQ_022_GO_PROBE_VERSION,\n  ODL_REQ_024_GO_PROBE_VERSION,\n',
+)
+replace_once(
+    capability,
+    '  const budgets = validateOpenCodeGoBudgets(expected?.maxBillableRequests, expected?.maxEstimatedSpendUsd);\n  const index = await readJsonIfPresent<CapabilityIndex>(env, indexKey(credentialBindingName, budgets.maxBillableRequests, budgets.maxEstimatedSpendUsd));\n',
+    '  const budgets = validateOpenCodeGoBudgets(expected?.maxBillableRequests, expected?.maxEstimatedSpendUsd);\n  const currentCache = await import("./visual-catalogue-opencode-go").then((module) => module.readOpenCodeGoCapabilityCache(env));\n  if (currentCache\n    && currentCache.probeVersion === ODL_REQ_024_GO_PROBE_VERSION\n    && currentCache.maxBillableRequests === budgets.maxBillableRequests\n    && currentCache.maxEstimatedSpendUsd === budgets.maxEstimatedSpendUsd) return currentCache;\n  const index = await readJsonIfPresent<CapabilityIndex>(env, indexKey(credentialBindingName, budgets.maxBillableRequests, budgets.maxEstimatedSpendUsd));\n',
+)
+
+classifier = Path("src/visual-catalogue-opencode.ts")
+replace_once(
+    classifier,
+    '  const request: Record<string, unknown> = { model: message.model, messages, max_tokens: 1400, temperature: 0 };\n  if (message.capability.structuredOutput.responseFormatAccepted) request.response_format = { type: "json_object" };\n',
+    '  const request: Record<string, unknown> = { model: message.model, messages, max_tokens: 1400, temperature: 0 };\n  if (isGo) request.stream = false;\n  if (message.capability.structuredOutput.responseFormatAccepted) request.response_format = { type: "json_object" };\n',
+)
