@@ -614,6 +614,12 @@ export async function runOpenCodeGoVisionDiagnosticWorkflow(
   step: WorkflowStep,
 ): Promise<Record<string, unknown>> {
   if (!payload.input?.__odlReq024GoVisionDiagnostic) throw new Error("ODL-REQ-024 diagnostic payload is invalid.");
+  await step.do("ODL-REQ-024 initialize sanitized diagnostic", async () => ({
+    initialized: true,
+    probeVersion: ODL_REQ_024_GO_PROBE_VERSION,
+    oneDriveAccessed: false,
+    sourcePdfRead: false,
+  }));
   const jobId = String(payload.jobId ?? payload.workflowId ?? crypto.randomUUID()).slice(0, 100);
   const diagnosticMaxRequests = Math.min(
     ODL_REQ_024_DIAGNOSTIC_MAX_REQUESTS,
