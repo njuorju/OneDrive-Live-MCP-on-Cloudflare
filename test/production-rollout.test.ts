@@ -55,8 +55,8 @@ test("ODL-REQ-024 deployment is exact-main, post-CI, leased, and runs only the s
   assert.match(workflow, /if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/);
   assert.match(workflow, /needs: validate/);
   assert.match(workflow, /test "\$\(git rev-parse HEAD\)" = "\$GITHUB_SHA"/);
-  assert.match(workflow, /OPENING_VERSION_ID: 02c982a0-a751-4caf-8130-7e35b44f76c9/);
-  assert.match(workflow, /OPENING_DEPLOYMENT_ID: d287a789-722c-4e03-b47d-85653b805b44/);
+  assert.match(workflow, /OPENING_VERSION_ID: e06f333e-3343-433f-b876-4968e32d2f18/);
+  assert.match(workflow, /OPENING_DEPLOYMENT_ID: 987e6b2d-1ad0-453f-a0de-6f17513e2223/);
   assert.match(workflow, /npx wrangler deploy --config wrangler\.production\.json/);
   assert.match(workflow, /odl-req-024-go-vision-contract-v1/);
   assert.match(workflow, /__odlReq024GoVisionDiagnostic/);
@@ -69,5 +69,7 @@ test("ODL-REQ-024 deployment is exact-main, post-CI, leased, and runs only the s
   assert.match(workflow, /cmp pre-bindings\.json post-bindings\.json/);
   assert.match(workflow, /cmp pre-secret-bindings\.json post-secret-bindings\.json/);
   assert.match(workflow, /healthHttp200:true/);
+  assert.match(workflow, /if: always\(\)/);
+  assert.match(workflow, /odl-req-024-workflow-failure\.json/);
   assert.doesNotMatch(workflow, /start_visual_catalogue_job|sourceItemId|pageStart|pageEnd|workflow_dispatch|deployment-only|transport branch/i);
 });
