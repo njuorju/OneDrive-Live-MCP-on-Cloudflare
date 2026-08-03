@@ -1,0 +1,40 @@
+name: ODL-REQ-023 PR runner
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.pull_request.head.ref == 'odl-req-023-chatgpt-file-params'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: odl-req-023-chatgpt-file-params
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
+          cache: npm
+      - name: Execute focused implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          src = Path('.github/workflows/odl-req-023-apply.yml').read_text().splitlines()
+          marker = '        run: |'
+          index = src.index(marker) + 1
+          body = []
+          for line in src[index:]:
+              body.append(line[10:] if line.startswith('          ') else line)
+          body.insert(-4, 'rm -f .github/workflows/odl-req-023-pr-runner.yml .odl-req-023-trigger')
+          Path('/tmp/odl23-apply.sh').write_text('\n'.join(body) + '\n')
+          PY
+          bash /tmp/odl23-apply.sh
