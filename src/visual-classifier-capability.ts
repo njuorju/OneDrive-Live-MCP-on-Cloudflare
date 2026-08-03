@@ -271,6 +271,7 @@ export function sanitizeProviderError(value: unknown): { code: string | null; me
     let text = String(raw);
     text = text
       .replace(/(?:bearer|authorization|api[-_ ]?key|token|secret)\s*[:=]?\s*[^\s,;]+/gi, "[redacted]")
+      .replace(/\bsk-[A-Za-z0-9._-]+\b/gi, "[redacted]")
       .replace(/https?:\/\/[^\s"'<>]+/gi, "[redacted-url]")
       .replace(/<[^>]+>/g, " ")
       .replace(/(?:cookie|set-cookie|x-api-key|authorization)\s*:[^\r\n]+/gi, "[redacted-header]")
@@ -711,7 +712,7 @@ export async function runVisualClassifierCapabilityWorkflow(
     const provisionalNext = new Date(Date.now() + baseDelay * 1000).toISOString();
     const result = await step.do(
       `capability cycle ${String(cycle).padStart(2, "0")} ${stage}`,
-      { retries: { limit: 0 }, timeout: "2 minutes" },
+      { retries: { limit: 0, delay: "1 second", backoff: "constant" }, timeout: "2 minutes" },
       async () => runOneProbe({
         env,
         jobId: payload.jobId,
