@@ -34,6 +34,20 @@ jobs:
           body = []
           for line in src[index:]:
               body.append(line[10:] if line.startswith('          ') else line)
+          npm_index = next(i for i, line in enumerate(body) if line.startswith('npm ci '))
+          fix = [
+              "python - <<'PYFIX'",
+              "from pathlib import Path",
+              "p = Path('src/file-backed-text.ts')",
+              "s = p.read_text()",
+              "marker = 'export type CatalogueParityResult = {'",
+              "types = '''type CatalogueRecord = Record<string, unknown>;\ntype ParsedCsv = { records: CatalogueRecord[]; columns: string[] };\ntype FileBackedContext = { env: Env; userId: string };\ntype ExactVerification = {\n  item: VerifiedItem;\n  bytes: Uint8Array;\n  byteLength: number;\n  sha256: string;\n  verified: true;\n};\n\n'''",
+              "if 'type CatalogueRecord = Record<string, unknown>;' not in s:",
+              "    s = s.replace(marker, types + marker, 1)",
+              "p.write_text(s)",
+              "PYFIX",
+          ]
+          body[npm_index:npm_index] = fix
           body.insert(-4, 'rm -f .github/workflows/odl-req-023-pr-runner.yml .odl-req-023-trigger')
           Path('/tmp/odl23-apply.sh').write_text('\n'.join(body) + '\n')
           PY
