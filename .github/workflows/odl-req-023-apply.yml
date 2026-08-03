@@ -1,0 +1,580 @@
+name: ODL-REQ-023 apply
+
+on:
+  push:
+    branches:
+      - odl-req-023-chatgpt-file-params
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: odl-req-023-chatgpt-file-params
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
+          cache: npm
+      - name: Implement connector-file contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > src/connector-files.ts <<'EOF'
+          import { z } from "zod";
+          import { ConnectorError } from "./errors";
+          import { isAllowedTextFile, validateFileSignature } from "./file-types";
+          import { validateItemName } from "./graph-core";
+
+          const CONNECTOR_FILE_HOST_SUFFIXES = [
+            "openai.com",
+            "chatgpt.com",
+            "openaiusercontent.com",
+            "oaiusercontent.com",
+          ] as const;
+          const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+
+          export const connectorFileInputSchema = z.object({
+            download_url: z.string().min(1).max(20_000),
+            file_id: z.string().min(1).max(5_000),
+            mime_type: z.string().min(1).max(500).optional(),
+            file_name: z.string().min(1).max(255).optional(),
+          }).strict().describe("ChatGPT-authorized connector file reference.");
+
+          export type ConnectorFileReference = z.infer<typeof connectorFileInputSchema>;
+          export type SanitizedConnectorFileShape = {
+            type: string;
+            array: boolean;
+            keys: string[];
+            required: { downloadUrl: boolean; fileId: boolean };
+            filename: string | null;
+            mimeType: string | null;
+            declaredByteSize: number | null;
+          };
+          export type LoadedConnectorTextFile = {
+            bytes: Uint8Array;
+            text: string;
+            byteLength: number;
+            sha256: string;
+            fileName: string;
+            declaredMimeType: string | null;
+            sourceMimeType: string | null;
+            runtimeShape: SanitizedConnectorFileShape;
+          };
+
+          function boundaryError(
+            code: string,
+            message: string,
+            options: { retryable?: boolean; status?: number; details?: Record<string, unknown> } = {},
+          ): ConnectorError {
+            return new ConnectorError(code, message, {
+              retryable: options.retryable ?? false,
+              ...(options.status === undefined ? {} : { status: options.status }),
+              details: { mutationBegan: false, ...(options.details ?? {}) },
+            });
+          }
+
+          function objectRecord(value: unknown): Record<string, unknown> | null {
+            return value !== null && typeof value === "object" && !Array.isArray(value)
+              ? value as Record<string, unknown>
+              : null;
+          }
+
+          export function connectorFileRuntimeShape(value: unknown): SanitizedConnectorFileShape {
+            const record = objectRecord(value);
+            const filename = record && typeof record.file_name === "string" ? record.file_name : null;
+            const mimeType = record && typeof record.mime_type === "string" ? record.mime_type : null;
+            return {
+              type: value === null ? "null" : typeof value,
+              array: Array.isArray(value),
+              keys: record ? Object.keys(record).sort() : [],
+              required: {
+                downloadUrl: Boolean(record && typeof record.download_url === "string" && record.download_url.length > 0),
+                fileId: Boolean(record && typeof record.file_id === "string" && record.file_id.length > 0),
+              },
+              filename,
+              mimeType,
+              declaredByteSize: null,
+            };
+          }
+
+          export function normalizeConnectorFileReference(value: unknown): ConnectorFileReference {
+            const shape = connectorFileRuntimeShape(value);
+            const record = objectRecord(value);
+            if (!record) {
+              throw boundaryError("connector_file_reference_malformed", "The connector file reference must be an object.", { details: { runtimeShape: shape } });
+            }
+            if (typeof record.file_id !== "string" || !record.file_id.trim()) {
+              throw boundaryError("connector_file_metadata_missing", "The connector file reference is missing file_id metadata.", { details: { runtimeShape: shape } });
+            }
+            if (typeof record.download_url !== "string" || !record.download_url.trim()) {
+              throw boundaryError("connector_file_download_url_missing", "The connector file reference is missing download_url.", { details: { runtimeShape: shape } });
+            }
+            if (record.mime_type !== undefined && (typeof record.mime_type !== "string" || !record.mime_type.trim())) {
+              throw boundaryError("connector_file_reference_malformed", "The connector file MIME metadata is malformed.", { details: { runtimeShape: shape } });
+            }
+            if (record.file_name !== undefined && (typeof record.file_name !== "string" || !record.file_name.trim())) {
+              throw boundaryError("connector_file_reference_malformed", "The connector file name metadata is malformed.", { details: { runtimeShape: shape } });
+            }
+            const parsed = connectorFileInputSchema.safeParse(record);
+            if (!parsed.success) {
+              throw boundaryError("connector_file_reference_malformed", "The connector file reference does not match the supported ChatGPT file shape.", { details: { runtimeShape: shape } });
+            }
+            return parsed.data;
+          }
+
+          export function trustedConnectorFileUrl(reference: string): URL {
+            let url: URL;
+            try {
+              url = new URL(reference);
+            } catch {
+              throw boundaryError("connector_file_reference_malformed", "The connector file download URL is malformed.");
+            }
+            if (url.protocol !== "https:" || url.username || url.password) {
+              throw boundaryError("connector_file_download_forbidden", "The connector file download URL is not permitted.");
+            }
+            const host = url.hostname.toLocaleLowerCase("en");
+            const trusted = CONNECTOR_FILE_HOST_SUFFIXES.some((suffix) => host === suffix || host.endsWith(`.${suffix}`));
+            if (!trusted) {
+              throw boundaryError("connector_file_download_forbidden", "The connector file download host is not permitted.");
+            }
+            return url;
+          }
+
+          function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+            return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+          }
+
+          async function sha256Hex(bytes: Uint8Array): Promise<string> {
+            const digest = await crypto.subtle.digest("SHA-256", exactArrayBuffer(bytes));
+            return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+          }
+
+          function normalizedMime(value: string | null | undefined): string | null {
+            if (!value) return null;
+            const mime = value.split(";", 1)[0].trim().toLocaleLowerCase("en");
+            return mime || null;
+          }
+
+          function extension(name: string): string {
+            const index = name.lastIndexOf(".");
+            return index < 0 ? "" : name.slice(index + 1).toLocaleLowerCase("en");
+          }
+
+          function allowedMime(name: string, rawMime: string | null | undefined): boolean {
+            const mime = normalizedMime(rawMime);
+            if (!mime) return true;
+            const ext = extension(name);
+            if (ext === "csv") return new Set(["text/csv", "application/csv", "application/vnd.ms-excel", "text/plain"]).has(mime);
+            if (ext === "json") return new Set(["application/json", "text/json", "text/plain"]).has(mime);
+            return mime.startsWith("text/") || new Set(["application/xml", "application/yaml", "application/x-yaml", "application/toml", "application/javascript", "application/typescript"]).has(mime);
+          }
+
+          async function readBoundedResponse(response: Response, maximumBytes: number): Promise<Uint8Array> {
+            const declaredLength = Number(response.headers.get("content-length") ?? 0);
+            if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
+              await response.body?.cancel();
+              throw boundaryError("connector_file_too_large", "The connector file exceeds the configured byte ceiling.", { details: { maximumBytes, declaredByteSize: declaredLength } });
+            }
+            if (!response.body) {
+              const buffer = await response.arrayBuffer();
+              if (buffer.byteLength > maximumBytes) {
+                throw boundaryError("connector_file_too_large", "The connector file exceeds the configured byte ceiling.", { details: { maximumBytes, actualByteSize: buffer.byteLength } });
+              }
+              return new Uint8Array(buffer);
+            }
+            const reader = response.body.getReader();
+            const chunks: Uint8Array[] = [];
+            let total = 0;
+            try {
+              for (;;) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                if (!value) continue;
+                total += value.byteLength;
+                if (total > maximumBytes) {
+                  await reader.cancel();
+                  throw boundaryError("connector_file_too_large", "The connector file exceeds the configured byte ceiling.", { details: { maximumBytes, actualByteSizeAtAbort: total } });
+                }
+                chunks.push(value);
+              }
+            } finally {
+              reader.releaseLock();
+            }
+            const output = new Uint8Array(total);
+            let offset = 0;
+            for (const chunk of chunks) {
+              output.set(chunk, offset);
+              offset += chunk.byteLength;
+            }
+            return output;
+          }
+
+          export function decodeStrictUtf8(bytes: Uint8Array): string {
+            let text: string;
+            try {
+              text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+            } catch {
+              throw boundaryError("connector_file_content_invalid", "The connector file is not valid UTF-8 text.");
+            }
+            for (let index = 0; index < text.length; index += 1) {
+              const code = text.charCodeAt(index);
+              const disallowedC0 = code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d;
+              const disallowedC1 = code >= 0x7f && code <= 0x9f;
+              if (code === 0 || disallowedC0 || disallowedC1) {
+                throw boundaryError("connector_file_content_invalid", "The connector file contains binary or disallowed control bytes.");
+              }
+            }
+            return text;
+          }
+
+          export async function loadConnectorTextFile(
+            fileReference: unknown,
+            expectedFilename: string,
+            maximumBytes: number,
+            suppliedExpectedSha256?: string,
+            expectedByteLengthOrFetch?: number | typeof fetch,
+            fetchImplMaybe: typeof fetch = fetch,
+          ): Promise<LoadedConnectorTextFile> {
+            const reference = normalizeConnectorFileReference(fileReference);
+            const runtimeShape = connectorFileRuntimeShape(fileReference);
+            const expectedName = validateItemName(expectedFilename);
+            const fileName = validateItemName(reference.file_name ?? expectedName);
+            if (!isAllowedTextFile(expectedName) || !isAllowedTextFile(fileName)) {
+              throw boundaryError("connector_file_content_invalid", "The connector file extension is not allowlisted for textual publication.", { details: { runtimeShape } });
+            }
+            if (extension(expectedName) !== extension(fileName)) {
+              throw boundaryError("connector_file_content_invalid", "The connector file extension does not match the requested target format.", { details: { runtimeShape, expectedExtension: extension(expectedName), actualExtension: extension(fileName) } });
+            }
+            if (!allowedMime(fileName, reference.mime_type)) {
+              throw boundaryError("connector_file_mime_rejected", "The connector file MIME metadata is not allowed for this textual format.", { details: { runtimeShape } });
+            }
+            const url = trustedConnectorFileUrl(reference.download_url);
+            const expectedByteLength = typeof expectedByteLengthOrFetch === "number" ? expectedByteLengthOrFetch : undefined;
+            const fetchImpl = typeof expectedByteLengthOrFetch === "function" ? expectedByteLengthOrFetch : fetchImplMaybe;
+            let response: Response;
+            try {
+              response = await fetchImpl(url.href, {
+                method: "GET",
+                redirect: "manual",
+                headers: { Accept: "text/plain, text/csv, application/json" },
+              });
+            } catch {
+              throw boundaryError("connector_file_download_failed", "The connector file could not be downloaded.", { retryable: true });
+            }
+            if (response.status >= 300 && response.status < 400) {
+              await response.body?.cancel();
+              throw boundaryError("connector_file_download_forbidden", "Connector file redirects are not permitted.", { status: response.status, details: { redirectRejected: true } });
+            }
+            if (response.status === 401 || response.status === 403) {
+              await response.body?.cancel();
+              throw boundaryError("connector_file_download_forbidden", "The connector file download was forbidden.", { status: response.status });
+            }
+            if (response.status === 404 || response.status === 410) {
+              await response.body?.cancel();
+              throw boundaryError("connector_file_download_expired", "The connector file download authorization is missing or expired.", { status: response.status });
+            }
+            if (!response.ok) {
+              await response.body?.cancel();
+              throw boundaryError("connector_file_download_failed", "The connector file download failed.", { retryable: response.status >= 500, status: response.status });
+            }
+            const sourceMimeType = normalizedMime(response.headers.get("content-type"));
+            if (!allowedMime(fileName, sourceMimeType)) {
+              await response.body?.cancel();
+              throw boundaryError("connector_file_mime_rejected", "The downloaded connector file MIME type is not allowed for this textual format.", { details: { runtimeShape, responseMimeType: sourceMimeType } });
+            }
+            const bytes = await readBoundedResponse(response, maximumBytes);
+            if (expectedByteLength !== undefined && bytes.byteLength !== expectedByteLength) {
+              throw boundaryError("connector_file_content_invalid", "The connector file byte size does not match the expected value.", { details: { expectedByteLength, actualByteLength: bytes.byteLength } });
+            }
+            const text = decodeStrictUtf8(bytes);
+            const signature = validateFileSignature(fileName, exactArrayBuffer(bytes));
+            if (!signature.compatible) {
+              throw boundaryError("connector_file_content_invalid", "The connector file content does not match the requested textual format.", { details: { detected: signature.detected, reason: signature.reason ?? null } });
+            }
+            const sha256 = await sha256Hex(bytes);
+            if (suppliedExpectedSha256 !== undefined) {
+              const expected = suppliedExpectedSha256.trim().toLocaleLowerCase("en");
+              if (!SHA256_PATTERN.test(expected) || expected !== sha256) {
+                throw boundaryError("connector_file_hash_mismatch", "The connector file SHA-256 does not match the expected value.", { details: { expectedSha256: SHA256_PATTERN.test(expected) ? expected : null, actualSha256: sha256 } });
+              }
+            }
+            return {
+              bytes,
+              text,
+              byteLength: bytes.byteLength,
+              sha256,
+              fileName,
+              declaredMimeType: normalizedMime(reference.mime_type),
+              sourceMimeType,
+              runtimeShape: { ...runtimeShape, declaredByteSize: bytes.byteLength },
+            };
+          }
+          EOF
+
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src/file-backed-text.ts')
+          s = p.read_text()
+          import_line = 'import type { GraphDriveItem } from "./types";\n'
+          addition = '''import type { GraphDriveItem } from "./types";\nimport {\n  connectorFileInputSchema,\n  decodeStrictUtf8,\n  loadConnectorTextFile,\n  trustedConnectorFileUrl,\n  type LoadedConnectorTextFile,\n} from "./connector-files";\nexport {\n  connectorFileInputSchema,\n  connectorFileRuntimeShape,\n  loadConnectorTextFile,\n  normalizeConnectorFileReference,\n  trustedConnectorFileUrl,\n} from "./connector-files";\n'''
+          assert import_line in s
+          s = s.replace(import_line, addition, 1)
+          s = s.replace('const SHA256_PATTERN = /^[0-9a-f]{64}$/;\n', '', 1)
+          start = s.index('const CONNECTOR_FILE_HOST_SUFFIXES = [')
+          end = s.index('export type CatalogueParityResult = {')
+          s = s[:start] + s[end:]
+          start = s.index('function normalizeExpectedSha256(')
+          end = s.index('function requireExpectedETag(')
+          s = s[:start] + s[end:]
+          s = s.replace('  fileReference: string,\n', '  fileReference: unknown,\n', 2)
+          s = s.replace('    csvFile: string;\n    jsonFile: string;\n', '    csvFile: unknown;\n    jsonFile: unknown;\n', 1)
+          marker = 'export async function replaceCataloguePairFromConnectorFilesStrict('
+          validation = '''export async function validateCataloguePairFilesStrict(\n  input: {\n    csvFile: unknown;\n    jsonFile: unknown;\n    recordKeyField: string;\n    jsonRecordsPath?: string;\n    expectedRecordCount?: number;\n    expectedCsvByteSize?: number;\n    expectedCsvSha256?: string;\n    expectedJsonByteSize?: number;\n    expectedJsonSha256?: string;\n  },\n  maximumBytes = 4_194_304,\n  fetchImpl: typeof fetch = fetch,\n) {\n  const [csvIncoming, jsonIncoming] = await Promise.all([\n    loadConnectorTextFile(input.csvFile, "catalogue.csv", maximumBytes, input.expectedCsvSha256, input.expectedCsvByteSize, fetchImpl),\n    loadConnectorTextFile(input.jsonFile, "catalogue.json", maximumBytes, input.expectedJsonSha256, input.expectedJsonByteSize, fetchImpl),\n  ]);\n  const parity = validateCataloguePairBytes(\n    csvIncoming.text,\n    jsonIncoming.text,\n    input.recordKeyField,\n    input.jsonRecordsPath ?? "",\n    input.expectedRecordCount,\n  );\n  return {\n    validationReceiptVersion: "odl-req-023-v1",\n    files: {\n      csv: { filename: csvIncoming.fileName, bytes: csvIncoming.byteLength, sha256: csvIncoming.sha256, declaredMimeType: csvIncoming.declaredMimeType, sourceMimeType: csvIncoming.sourceMimeType },\n      json: { filename: jsonIncoming.fileName, bytes: jsonIncoming.byteLength, sha256: jsonIncoming.sha256, declaredMimeType: jsonIncoming.declaredMimeType, sourceMimeType: jsonIncoming.sourceMimeType },\n    },\n    parity,\n    runtimeReferenceShape: { csv: csvIncoming.runtimeShape, json: jsonIncoming.runtimeShape },\n    oneDriveCalled: false,\n    mutationBegan: false,\n  };\n}\n\n'''
+          assert marker in s
+          s = s.replace(marker, validation + marker, 1)
+          s = s.replace('  const mutating = {\n', '  const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } as const;\n  const mutating = {\n', 1)
+          s = s.replace('    annotations: mutating,\n  }, async (input: any) => {', '    annotations: mutating,\n    _meta: { "openai/fileParams": ["file"] },\n  }, async (input: any) => {', 1)
+          pos = s.index('  server.registerTool("replace_text_file_from_file"')
+          tail = s[pos:]
+          tail = tail.replace('    annotations: mutating,\n  }, async (input: any) => {', '    annotations: mutating,\n    _meta: { "openai/fileParams": ["file"] },\n  }, async (input: any) => {', 1)
+          s = s[:pos] + tail
+          pair_marker = '  server.registerTool("replace_catalogue_pair_from_files", {'
+          validate_registration = '''  server.registerTool("validate_catalogue_pair_files", {\n    title: "Validate CSV and JSON connector files",\n    description: "Resolve and validate a ChatGPT-authorized CSV/JSON catalogue pair without reading or mutating OneDrive.",\n    inputSchema: {\n      csvFile: connectorFileInputSchema,\n      jsonFile: connectorFileInputSchema,\n      recordKeyField: z.string().min(1).max(200),\n      jsonRecordsPath: z.string().max(1000).default(""),\n      expectedRecordCount: z.number().int().min(0).optional(),\n      expectedCsvByteSize: z.number().int().min(0).optional(),\n      expectedCsvSha256: z.string().regex(/^[0-9a-fA-F]{64}$/).optional(),\n      expectedJsonByteSize: z.number().int().min(0).optional(),\n      expectedJsonSha256: z.string().regex(/^[0-9a-fA-F]{64}$/).optional(),\n    },\n    annotations: readOnly,\n    _meta: { "openai/fileParams": ["csvFile", "jsonFile"] },\n  }, async (input: any) => {\n    const context = contextFactory();\n    try {\n      const config = getRuntimeConfig(context.env);\n      return textResult(await validateCataloguePairFilesStrict(input, config.maxTextWriteBytes));\n    } catch (error) { return errorResult(error); }\n  });\n\n'''
+          assert pair_marker in s
+          s = s.replace(pair_marker, validate_registration + pair_marker, 1)
+          pair_pos = s.index(pair_marker)
+          pair_tail = s[pair_pos:]
+          pair_tail = pair_tail.replace('    annotations: mutating,\n  }, async (input: any) => {', '    annotations: mutating,\n    _meta: { "openai/fileParams": ["csvFile", "jsonFile"] },\n  }, async (input: any) => {', 1)
+          s = s[:pair_pos] + pair_tail
+          p.write_text(s)
+
+          t = Path('test/file-backed-text.test.ts')
+          x = t.read_text()
+          x = x.replace('const connectorReference = "https://files.openaiusercontent.com/connector/fixture";', 'const connectorReference = { download_url: "https://files.openaiusercontent.com/connector/fixture", file_id: "file_fixture", mime_type: "text/plain", file_name: "fixture.txt" };')
+          old = '''test("file inputs are emitted as top-level binary connector parameters", () => {\n  const schema = z.toJSONSchema(connectorFileInputSchema) as Record<string, unknown>;\n  assert.equal(schema.type, "string");\n  assert.equal(schema.format, "binary");\n  assert.equal(schema.contentMediaType, "application/octet-stream");\n});'''
+          new = '''test("file inputs use the supported ChatGPT connector-file object schema", () => {\n  const schema = z.toJSONSchema(connectorFileInputSchema) as any;\n  assert.equal(schema.type, "object");\n  assert.deepEqual(schema.required, ["download_url", "file_id"]);\n  assert.deepEqual(Object.keys(schema.properties).sort(), ["download_url", "file_id", "file_name", "mime_type"]);\n  assert.equal(schema.additionalProperties, false);\n});'''
+          assert old in x
+          x = x.replace(old, new)
+          x = x.replace('trustedConnectorFileUrl(connectorReference)', 'trustedConnectorFileUrl(connectorReference.download_url)')
+          x = x.replace('error.code === "untrusted_connector_file"', 'error.code === "connector_file_download_forbidden"')
+          x = x.replace('error.code === "invalid_connector_file"', 'error.code === "connector_file_reference_malformed"')
+          x = x.replace('error.code === "sha256_mismatch"', 'error.code === "connector_file_hash_mismatch"')
+          x = x.replace('error.code === "text_not_utf8"', 'error.code === "connector_file_content_invalid"')
+          x = x.replace('error.code === "binary_file_rejected"', 'error.code === "connector_file_content_invalid"')
+          x = x.replace('error.code === "text_too_large"', 'error.code === "connector_file_too_large"')
+          x = x.replace('function responseFor(bytes: Uint8Array, contentType = "application/octet-stream")', 'function responseFor(bytes: Uint8Array, contentType = "text/plain")')
+          t.write_text(x)
+
+          ci = Path('.github/workflows/ci.yml')
+          c = ci.read_text()
+          c = c.replace('OPENING_VERSION_ID: 8b0ca778-3581-4d25-bba9-9e0989c0848d', 'OPENING_VERSION_ID: 8b57490f-6720-4323-8542-5ba7716dafe0')
+          c = c.replace('OPENING_DEPLOYMENT_ID: 6ff73d96-9742-49d2-b82e-f062eaa2bd28', 'OPENING_DEPLOYMENT_ID: 0ba7d0c4-e694-4681-8e5a-f90917e0a43b')
+          c = c.replace('Deploy ODL-REQ-022 exact main', 'Deploy ODL-REQ-023 exact main')
+          c = c.replace('odl-req-022-${GITHUB_SHA:0:12}', 'odl-req-023-${GITHUB_SHA:0:12}')
+          c = c.replace('odl-req-022-deployment-evidence', 'odl-req-023-deployment-evidence')
+          ci.write_text(c)
+          PY
+
+          cat > test/connector-file-contract.test.ts <<'EOF'
+          import test, { after, before } from "node:test";
+          import assert from "node:assert/strict";
+          import http from "node:http";
+          import { z } from "zod";
+          import { ConnectorError, safeErrorResult } from "../src/errors";
+          import {
+            connectorFileInputSchema,
+            loadConnectorTextFile,
+            normalizeConnectorFileReference,
+            registerFileBackedTextTools,
+            replaceCataloguePairFromConnectorFilesStrict,
+            sha256HexBytes,
+            validateCataloguePairFilesStrict,
+          } from "../src/file-backed-text";
+
+          const encoder = new TextEncoder();
+          const csv = encoder.encode("source_record_id,name\nACA-0001,A\nACA-0002,B\n");
+          const json = encoder.encode(JSON.stringify([
+            { source_record_id: "ACA-0001", name: "A" },
+            { source_record_id: "ACA-0002", name: "B" },
+          ]));
+          let base = "";
+          let server: http.Server;
+
+          before(async () => {
+            server = http.createServer((request, response) => {
+              const path = request.url ?? "/";
+              const send = (status: number, body: Uint8Array | string, type: string) => {
+                const bytes = typeof body === "string" ? encoder.encode(body) : body;
+                response.writeHead(status, { "content-type": type, "content-length": String(bytes.byteLength) });
+                response.end(bytes);
+              };
+              if (path === "/csv") return send(200, csv, "text/csv");
+              if (path === "/json") return send(200, json, "application/json");
+              if (path === "/forbidden") return send(403, "forbidden", "text/plain");
+              if (path === "/expired") return send(410, "expired", "text/plain");
+              if (path === "/failed") return send(500, "failed", "text/plain");
+              if (path === "/redirect") { response.writeHead(302, { location: "/csv" }); return response.end(); }
+              if (path === "/oversize") return send(200, "1234567890", "text/plain");
+              if (path === "/badmime") return send(200, csv, "application/pdf");
+              if (path === "/binary") return send(200, Uint8Array.from([0x41, 0x00, 0x42]), "text/plain");
+              if (path === "/badcsv") return send(200, 'source_record_id,name\n"ACA-0001,A\n', "text/csv");
+              if (path === "/badjson") return send(200, "{not-json", "application/json");
+              return send(404, "missing", "text/plain");
+            });
+            await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+            const address = server.address();
+            if (!address || typeof address === "string") throw new Error("mock server did not bind");
+            base = `http://127.0.0.1:${address.port}`;
+          });
+
+          after(async () => { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); });
+
+          const mappedFetch: typeof fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+            const raw = input instanceof URL ? input.href : typeof input === "string" ? input : input.url;
+            const url = new URL(raw);
+            return fetch(`${base}${url.pathname}${url.search}`, init);
+          }) as typeof fetch;
+
+          function ref(path: string, fileName: string, mimeType: string) {
+            return { download_url: `https://files.openaiusercontent.com${path}`, file_id: `file_${path.slice(1)}`, file_name: fileName, mime_type: mimeType };
+          }
+
+          test("raw registered descriptors expose exact fileParams metadata and top-level fields", () => {
+            const tools: Record<string, any> = {};
+            const fake = { registerTool(name: string, config: unknown, callback: unknown) { tools[name] = { config, callback }; } };
+            registerFileBackedTextTools(fake as any, () => ({ env: {} as Env, userId: "user" }));
+            for (const name of ["validate_catalogue_pair_files", "replace_catalogue_pair_from_files"]) {
+              assert.deepEqual(tools[name].config._meta["openai/fileParams"], ["csvFile", "jsonFile"]);
+              const schema = z.toJSONSchema(z.object(tools[name].config.inputSchema)) as any;
+              assert.equal(schema.properties.csvFile.type, "object");
+              assert.equal(schema.properties.jsonFile.type, "object");
+              assert.deepEqual(schema.properties.csvFile.required, ["download_url", "file_id"]);
+              assert.deepEqual(Object.keys(schema.properties.csvFile.properties).sort(), ["download_url", "file_id", "file_name", "mime_type"]);
+            }
+            assert.deepEqual(tools.create_text_file_from_file.config._meta["openai/fileParams"], ["file"]);
+            assert.deepEqual(tools.replace_text_file_from_file.config._meta["openai/fileParams"], ["file"]);
+          });
+
+          test("valid ChatGPT file-reference objects normalize without exposing values", () => {
+            const value = normalizeConnectorFileReference(ref("/csv", "catalogue.csv", "text/csv"));
+            assert.equal(value.file_name, "catalogue.csv");
+            assert.equal(value.mime_type, "text/csv");
+          });
+
+          test("missing download_url has a precise sanitized error", () => {
+            assert.throws(() => normalizeConnectorFileReference({ file_id: "file_x" }), (error: unknown) => error instanceof ConnectorError && error.code === "connector_file_download_url_missing");
+          });
+
+          test("missing file_id has a precise sanitized error", () => {
+            assert.throws(() => normalizeConnectorFileReference({ download_url: "https://files.openaiusercontent.com/csv" }), (error: unknown) => error instanceof ConnectorError && error.code === "connector_file_metadata_missing");
+          });
+
+          test("malformed values are rejected", () => {
+            assert.throws(() => normalizeConnectorFileReference("/mnt/data/catalogue.csv"), (error: unknown) => error instanceof ConnectorError && error.code === "connector_file_reference_malformed");
+          });
+
+          test("authorized temporary download returns exact bytes and SHA-256", async () => {
+            const loaded = await loadConnectorTextFile(ref("/csv", "catalogue.csv", "text/csv"), "target.csv", 1024, undefined, undefined, mappedFetch);
+            assert.deepEqual(loaded.bytes, csv);
+            assert.equal(loaded.sha256, await sha256HexBytes(csv));
+          });
+
+          test("forbidden, expired and non-2xx downloads are distinct", async () => {
+            await assert.rejects(() => loadConnectorTextFile(ref("/forbidden", "catalogue.csv", "text/csv"), "target.csv", 1024, undefined, undefined, mappedFetch), (e: unknown) => e instanceof ConnectorError && e.code === "connector_file_download_forbidden");
+            await assert.rejects(() => loadConnectorTextFile(ref("/expired", "catalogue.csv", "text/csv"), "target.csv", 1024, undefined, undefined, mappedFetch), (e: unknown) => e instanceof ConnectorError && e.code === "connector_file_download_expired");
+            await assert.rejects(() => loadConnectorTextFile(ref("/failed", "catalogue.csv", "text/csv"), "target.csv", 1024, undefined, undefined, mappedFetch), (e: unknown) => e instanceof ConnectorError && e.code === "connector_file_download_failed");
+          });
+
+          test("redirect policy is fail-closed", async () => {
+            await assert.rejects(() => loadConnectorTextFile(ref("/redirect", "catalogue.csv", "text/csv"), "target.csv", 1024, undefined, undefined, mappedFetch), (e: unknown) => e instanceof ConnectorError && e.code === "connector_file_download_forbidden");
+          });
+
+          test("oversized attachments fail before content parsing", async () => {
+            await assert.rejects(() => loadConnectorTextFile(ref("/oversize", "catalogue.csv", "text/csv"), "target.csv", 4, undefined, undefined, mappedFetch), (e: unknown) => e instanceof ConnectorError && e.code === "connector_file_too_large");
+          });
+
+          test("declared and response MIME mismatches are rejected", async () => {
+            await assert.rejects(() => loadConnectorTextFile(ref("/csv", "catalogue.csv", "application/pdf"), "target.csv", 1024, undefined, undefined, mappedFetch), (e: unknown) => e instanceof ConnectorError && e.code === "connector_file_mime_rejected");
+            await assert.rejects(() => loadConnectorTextFile(ref("/badmime", "catalogue.csv", "text/csv"), "target.csv", 1024, undefined, undefined, mappedFetch), (e: unknown) => e instanceof ConnectorError && e.code === "connector_file_mime_rejected");
+          });
+
+          test("content sniffing rejects binary bytes despite textual MIME", async () => {
+            await assert.rejects(() => loadConnectorTextFile(ref("/binary", "catalogue.csv", "text/csv"), "target.csv", 1024, undefined, undefined, mappedFetch), (e: unknown) => e instanceof ConnectorError && e.code === "connector_file_content_invalid");
+          });
+
+          test("hash and byte-size mismatches are precise", async () => {
+            await assert.rejects(() => loadConnectorTextFile(ref("/csv", "catalogue.csv", "text/csv"), "target.csv", 1024, "0".repeat(64), undefined, mappedFetch), (e: unknown) => e instanceof ConnectorError && e.code === "connector_file_hash_mismatch");
+            await assert.rejects(() => loadConnectorTextFile(ref("/csv", "catalogue.csv", "text/csv"), "target.csv", 1024, undefined, 999, mappedFetch), (e: unknown) => e instanceof ConnectorError && e.code === "connector_file_content_invalid");
+          });
+
+          test("validation-only tool handles root-array JSON and performs no OneDrive call", async () => {
+            const receipt = await validateCataloguePairFilesStrict({
+              csvFile: ref("/csv", "academic_sources_master_batch017_repaired.csv", "text/csv"),
+              jsonFile: ref("/json", "academic_sources_master_batch017_repaired.json", "application/json"),
+              recordKeyField: "source_record_id",
+              jsonRecordsPath: "",
+              expectedRecordCount: 2,
+              expectedCsvByteSize: csv.byteLength,
+              expectedCsvSha256: await sha256HexBytes(csv),
+              expectedJsonByteSize: json.byteLength,
+              expectedJsonSha256: await sha256HexBytes(json),
+            }, 1024, mappedFetch);
+            assert.equal(receipt.parity.recordCount, 2);
+            assert.equal(receipt.oneDriveCalled, false);
+            assert.equal(receipt.mutationBegan, false);
+          });
+
+          test("CSV and JSON parse failures remain explicit", async () => {
+            await assert.rejects(() => validateCataloguePairFilesStrict({ csvFile: ref("/badcsv", "x.csv", "text/csv"), jsonFile: ref("/json", "x.json", "application/json"), recordKeyField: "source_record_id" }, 1024, mappedFetch), (e: unknown) => e instanceof ConnectorError && e.code === "malformed_csv");
+            await assert.rejects(() => validateCataloguePairFilesStrict({ csvFile: ref("/csv", "x.csv", "text/csv"), jsonFile: ref("/badjson", "x.json", "application/json"), recordKeyField: "source_record_id" }, 1024, mappedFetch), (e: unknown) => e instanceof ConnectorError && e.code === "invalid_json_catalogue");
+          });
+
+          test("stable-key and record-count mismatches fail closed", async () => {
+            const mismatchedJson = encoder.encode(JSON.stringify([{ source_record_id: "ACA-9999", name: "A" }, { source_record_id: "ACA-0002", name: "B" }]));
+            const customFetch: typeof fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+              const raw = input instanceof URL ? input.href : typeof input === "string" ? input : input.url;
+              if (new URL(raw).pathname === "/mismatch") return new Response(mismatchedJson, { status: 200, headers: { "content-type": "application/json", "content-length": String(mismatchedJson.byteLength) } });
+              return mappedFetch(input, init);
+            }) as typeof fetch;
+            await assert.rejects(() => validateCataloguePairFilesStrict({ csvFile: ref("/csv", "x.csv", "text/csv"), jsonFile: ref("/mismatch", "x.json", "application/json"), recordKeyField: "source_record_id" }, 1024, customFetch), (e: unknown) => e instanceof ConnectorError && e.code === "catalogue_key_set_mismatch");
+            await assert.rejects(() => validateCataloguePairFilesStrict({ csvFile: ref("/csv", "x.csv", "text/csv"), jsonFile: ref("/json", "x.json", "application/json"), recordKeyField: "source_record_id", expectedRecordCount: 3 }, 1024, mappedFetch), (e: unknown) => e instanceof ConnectorError && e.code === "record_count_mismatch");
+          });
+
+          test("errors never leak download URLs, file IDs or content", async () => {
+            const secretRef = { download_url: "https://files.openaiusercontent.com/forbidden?token=SECRET", file_id: "file_SECRET", file_name: "x.csv", mime_type: "text/csv" };
+            let caught: unknown;
+            try { await loadConnectorTextFile(secretRef, "x.csv", 1024, undefined, undefined, mappedFetch); } catch (error) { caught = error; }
+            const rendered = JSON.stringify(safeErrorResult(caught));
+            assert.equal(rendered.includes("SECRET"), false);
+            assert.equal(rendered.includes("download_url"), false);
+          });
+
+          test("replacement source orders both file validations before mutation coordinator", () => {
+            const source = replaceCataloguePairFromConnectorFilesStrict.toString();
+            assert.ok(source.indexOf("loadConnectorTextFile") >= 0);
+            assert.ok(source.indexOf("coordinatePairReplacement") > source.indexOf("loadConnectorTextFile"));
+          });
+
+          test("standalone schema exactly follows the official four-property contract", () => {
+            const schema = z.toJSONSchema(connectorFileInputSchema) as any;
+            assert.deepEqual(schema.required, ["download_url", "file_id"]);
+            assert.deepEqual(Object.keys(schema.properties).sort(), ["download_url", "file_id", "file_name", "mime_type"]);
+            assert.equal(schema.additionalProperties, false);
+          });
+          EOF
+
+          rm .github/workflows/odl-req-023-apply.yml
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Repair ChatGPT connector file binding"
+          git push origin HEAD:odl-req-023-chatgpt-file-params
