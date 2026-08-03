@@ -14,8 +14,12 @@ type RenderCacheEntry = {
   expiresAt: number;
 };
 
-const RENDER_CACHE_MAX_BYTES = 25 * 1024 * 1024;
+export const RENDER_CACHE_MAX_BYTES = 32 * 1024 * 1024;
 const RENDER_ID_PATTERN = /^[0-9a-zA-Z-]{1,200}$/;
+
+export function renderCacheSizeAccepted(byteLength: number): boolean {
+  return Number.isInteger(byteLength) && byteLength >= 5 && byteLength <= RENDER_CACHE_MAX_BYTES;
+}
 
 /**
  * Strongly consistent OAuth/session and integrated-workflow storage.
@@ -134,7 +138,7 @@ export class AuthState extends DurableObject {
       });
     }
     const bytes = await request.arrayBuffer();
-    if (bytes.byteLength < 5 || bytes.byteLength > RENDER_CACHE_MAX_BYTES) {
+    if (!renderCacheSizeAccepted(bytes.byteLength)) {
       return Response.json({ ok: false, found: false, stage: "render_cache_size_invalid" }, {
         status: 413,
       });
