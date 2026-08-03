@@ -75,6 +75,11 @@ export function registerODLReq021VisibleBridge(server: McpServer): void {
     const hiddenGetCapability = getCapability.handler;
     getVisual.handler = async (input, extra) => {
       const result = await originalGetVisual(input, extra);
+      const toolName = String(result.structuredContent?.toolName ?? "");
+      if (!result.isError && toolName === "start_visual_classifier_capability_job") {
+        const capabilityResult = await hiddenGetCapability(input, extra);
+        return capabilityResult.isError ? result : addCompatibilityRoute(capabilityResult);
+      }
       const code = resultErrorCode(result);
       if (!result.isError || !["artifact_not_found", "visual_job_not_found", "job_not_found"].includes(String(code))) {
         return result;
