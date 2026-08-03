@@ -8,8 +8,13 @@ import { registerStructuredPreparationTools } from "./structured-preparation";
 import { registerComposedPreparedPlanTool } from "./composed-prepared-plan";
 import { registerVisualPhase2Tools } from "./visual-phase2";
 import { registerAccessVerificationValidator } from "./access-verification-validator";
-import { registerVisualCatalogueCompilerTools, VisualCatalogueWorkflow } from "./visual-catalogue-tools";
+import { registerVisualCatalogueCompilerTools, VisualCatalogueWorkflow as BaseVisualCatalogueWorkflow } from "./visual-catalogue-tools";
 import { createIntegratedStateStorage } from "./version20-hotfix";
+import {
+  isCapabilityWorkflowPayload,
+  registerODLReq021Tools,
+  runVisualClassifierCapabilityWorkflow,
+} from "./visual-classifier-capability";
 
 const prototype = OneDriveMCP.prototype as any;
 if (!prototype.__finalEngineeringCloseoutApplied) {
@@ -29,6 +34,7 @@ if (!prototype.__finalEngineeringCloseoutApplied) {
     registerVisualPhase2Tools(actual, contextFactory);
     registerAccessVerificationValidator(actual, contextFactory);
     registerVisualCatalogueCompilerTools(actual, contextFactory);
+    registerODLReq021Tools(actual, contextFactory);
   };
   Object.defineProperty(prototype, "__finalEngineeringCloseoutApplied", {
     value: true,
@@ -38,5 +44,14 @@ if (!prototype.__finalEngineeringCloseoutApplied) {
   });
 }
 
-export { AuthState, OneDriveMCP, PaidCoordinator, PaidConnectorWorkflow, VisualCatalogueWorkflow };
+export class VisualCatalogueWorkflow extends BaseVisualCatalogueWorkflow {
+  async run(event: any, step: any): Promise<Record<string, unknown>> {
+    if (isCapabilityWorkflowPayload(event.payload)) {
+      return runVisualClassifierCapabilityWorkflow(this.env, event.payload, step);
+    }
+    return super.run(event, step);
+  }
+}
+
+export { AuthState, OneDriveMCP, PaidCoordinator, PaidConnectorWorkflow };
 export default patchedDefault;
