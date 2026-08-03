@@ -49,8 +49,18 @@ test("production runbook requires forward recovery and plugin refresh", () => {
   assert.match(runbook, /Never create replacement production resources/);
 });
 
-test("no deployment workflow was added", () => {
+test("ODL-REQ-022 deployment is exact-main, post-CI, leased, and non-interactive", () => {
   const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
-  assert.doesNotMatch(workflow, /wrangler deploy(?! --dry-run)/);
+  assert.match(workflow, /deploy-production:/);
+  assert.match(workflow, /if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/);
+  assert.match(workflow, /needs: validate/);
+  assert.match(workflow, /test "\$\(git rev-parse HEAD\)" = "\$GITHUB_SHA"/);
+  assert.match(workflow, /OPENING_VERSION_ID: 8b0ca778-3581-4d25-bba9-9e0989c0848d/);
+  assert.match(workflow, /OPENING_DEPLOYMENT_ID: 6ff73d96-9742-49d2-b82e-f062eaa2bd28/);
+  assert.match(workflow, /npx wrangler deploy --config wrangler\.production\.json/);
+  assert.match(workflow, /\.result\.deployments\[0\]\.versions\[0\]\.percentage==100/);
+  assert.match(workflow, /cmp pre-bindings\.json post-bindings\.json/);
+  assert.match(workflow, /cmp pre-secret-bindings\.json post-secret-bindings\.json/);
+  assert.match(workflow, /healthHttp200:true/);
   assert.doesNotMatch(workflow, /workflow_dispatch|deployment-only|transport branch/i);
 });

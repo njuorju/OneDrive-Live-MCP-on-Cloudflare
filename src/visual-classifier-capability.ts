@@ -1,6 +1,16 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { WorkflowStep } from "cloudflare:workers";
 import { z } from "zod";
+import {
+  normalizedResponseClass,
+  parseRetryAfterSeconds,
+  responseClassRetryable,
+  sanitizeProviderError,
+  type CapabilityStage,
+  type NormalizedResponseClass,
+} from "./visual-classifier-capability-common";
+export { normalizedResponseClass, parseRetryAfterSeconds, responseClassRetryable, sanitizeProviderError };
+export type { CapabilityStage, NormalizedResponseClass };
 import { ConnectorError } from "./errors";
 import { bytesToBase64, sha256Bytes } from "./integrated-core";
 import {
@@ -34,6 +44,16 @@ import {
   type StartVisualCatalogueInput,
   type VisualWorkflowPayload,
 } from "./visual-catalogue-runtime";
+import {
+  OPENCODE_GO_MODE,
+  OPENCODE_GO_MODEL,
+  OPENCODE_GO_PROVIDER,
+} from "./visual-catalogue-opencode-go";
+import {
+  getOpenCodeGoCapabilityJob,
+  readSuccessfulOpenCodeGoCapabilityReceipt,
+  startOpenCodeGoCapabilityJob,
+} from "./visual-classifier-capability-go";
 import { syntheticVisionProbeJpegBytes } from "./visual-catalogue-probe-fixture";
 
 export const ODL_REQ_021_PROBE_VERSION = "odl-req-021-capability-v1";
@@ -52,27 +72,6 @@ const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: 
 const NON_DESTRUCTIVE = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } as const;
 const UUID = z.string().uuid();
 const SHA256 = /^[0-9a-f]{64}$/;
-
-export type CapabilityStage =
-  | "model_discovery"
-  | "text_structured_output"
-  | "vision_unstructured"
-  | "vision_structured_output";
-
-export type NormalizedResponseClass =
-  | "success"
-  | "authentication_failed"
-  | "authorization_failed"
-  | "model_missing"
-  | "unsupported_media"
-  | "invalid_request"
-  | "rate_limited"
-  | "provider_server_error"
-  | "network_failure"
-  | "timeout"
-  | "malformed_success_response"
-  | "structured_output_failure"
-  | "unknown_provider_failure";
 
 export type CapabilityAttemptReceipt = {
   version: 1;
@@ -223,67 +222,6 @@ async function writeCapabilityManifest(env: Env, manifest: CapabilityJobManifest
 
 function capabilityIdentity(): string {
   return `opencode_zen|opencode_chat_completions|${OPENCODE_ZEN_MODEL}|${ODL_REQ_021_PROBE_VERSION}`;
-}
-
-export function parseRetryAfterSeconds(raw: string | null, nowMilliseconds = Date.now(), maximumSeconds = ODL_REQ_021_MAX_RETRY_DELAY_SECONDS): number | null {
-  if (!raw) return null;
-  const seconds = Number(raw.trim());
-  if (Number.isFinite(seconds)) return seconds >= 0 ? Math.min(maximumSeconds, Math.ceil(seconds)) : null;
-  const date = Date.parse(raw);
-  if (!Number.isFinite(date)) return null;
-  return Math.min(maximumSeconds, Math.max(0, Math.ceil((date - nowMilliseconds) / 1000)));
-}
-
-export function normalizedResponseClass(status: number | null, options: {
-  networkFailure?: boolean;
-  timeout?: boolean;
-  modelMissing?: boolean;
-  unsupportedMedia?: boolean;
-  malformedSuccess?: boolean;
-  structuredFailure?: boolean;
-} = {}): NormalizedResponseClass {
-  if (options.timeout) return "timeout";
-  if (options.networkFailure) return "network_failure";
-  if (options.modelMissing) return "model_missing";
-  if (options.unsupportedMedia) return "unsupported_media";
-  if (options.malformedSuccess) return "malformed_success_response";
-  if (options.structuredFailure) return "structured_output_failure";
-  if (status !== null && status >= 200 && status < 300) return "success";
-  if (status === 401) return "authentication_failed";
-  if (status === 403) return "authorization_failed";
-  if (status === 415 || status === 422) return "unsupported_media";
-  if (status === 400) return "invalid_request";
-  if (status === 404) return "model_missing";
-  if (status === 429) return "rate_limited";
-  if (status !== null && status >= 500 && status <= 599) return "provider_server_error";
-  return "unknown_provider_failure";
-}
-
-export function responseClassRetryable(value: NormalizedResponseClass): boolean {
-  return value === "rate_limited" || value === "provider_server_error" || value === "network_failure" || value === "timeout";
-}
-
-export function sanitizeProviderError(value: unknown): { code: string | null; message: string | null } {
-  const object = value && typeof value === "object" ? value as Record<string, unknown> : {};
-  const nested = object.error && typeof object.error === "object" ? object.error as Record<string, unknown> : object;
-  const clean = (raw: unknown, maximum: number): string | null => {
-    if (raw === null || raw === undefined) return null;
-    let text = String(raw);
-    text = text
-      .replace(/(?:bearer|authorization|api[-_ ]?key|token|secret)\s*[:=]?\s*[^\s,;]+/gi, "[redacted]")
-      .replace(/\bsk-[A-Za-z0-9._-]+\b/gi, "[redacted]")
-      .replace(/https?:\/\/[^\s"'<>]+/gi, "[redacted-url]")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/(?:cookie|set-cookie|x-api-key|authorization)\s*:[^\r\n]+/gi, "[redacted-header]")
-      .replace(/[\r\n\t]+/g, " ")
-      .replace(/\s{2,}/g, " ")
-      .trim();
-    return text ? text.slice(0, maximum) : null;
-  };
-  return {
-    code: clean(nested.code ?? nested.type ?? object.code, 120),
-    message: clean(nested.message ?? object.message, 500),
-  };
 }
 
 function usageFromBody(body: Record<string, unknown>): CapabilityAttemptReceipt["usage"] {
@@ -912,7 +850,8 @@ function tool(server: McpServer, name: string): any {
 }
 
 function capabilityInputIsOpenCode(raw: Record<string, unknown>): boolean {
-  return raw.classifierProvider === "opencode_zen" || raw.classifierMode === "opencode_chat_completions";
+  return raw.classifierProvider === "opencode_zen" || raw.classifierMode === "opencode_chat_completions"
+    || raw.classifierProvider === OPENCODE_GO_PROVIDER || raw.classifierMode === OPENCODE_GO_MODE;
 }
 
 export function registerODLReq021Tools(server: McpServer, contextFactory: () => HotfixContext): void {
@@ -921,15 +860,24 @@ export function registerODLReq021Tools(server: McpServer, contextFactory: () => 
       title: "Start durable visual classifier capability job",
       description: "Reserve and start a non-mutating four-stage OpenCode Zen capability job with durable sanitized attempt receipts and delayed retries.",
       inputSchema: {
-        provider: z.literal("opencode_zen").default("opencode_zen"),
-        mode: z.literal("opencode_chat_completions").default("opencode_chat_completions"),
-        model: z.literal(OPENCODE_ZEN_MODEL).default(OPENCODE_ZEN_MODEL),
+        provider: z.enum(["opencode_zen", "opencode_go"]).default("opencode_zen"),
+        mode: z.enum(["opencode_chat_completions", "opencode_go_chat_completions"]).default("opencode_chat_completions"),
+        model: z.string().min(1).max(100).default(OPENCODE_ZEN_MODEL),
         forceFresh: z.boolean().default(false),
+        maxBillableRequests: z.number().int().min(1).max(75).optional(),
+        maxEstimatedSpendUsd: z.number().positive().max(1).optional(),
       },
       annotations: NON_DESTRUCTIVE,
-    }, async ({ forceFresh }) => {
+    }, async (raw) => {
       const context = contextFactory();
       try {
+        if (raw.provider === OPENCODE_GO_PROVIDER || raw.mode === OPENCODE_GO_MODE) {
+          return await startOpenCodeGoCapabilityJob(context, raw);
+        }
+        const forceFresh = Boolean(raw.forceFresh);
+        if (raw.provider !== "opencode_zen" || raw.mode !== "opencode_chat_completions" || raw.model !== OPENCODE_ZEN_MODEL) {
+          throw new ConnectorError("classifier_configuration_invalid", "OpenCode Zen capability jobs require the exact free provider, mode, and model identity.");
+        }
         if (!String(context.env.OPENCODE_ZEN_API_KEY ?? "")) throw new ConnectorError("provider_secret_missing", "OPENCODE_ZEN_API_KEY is not configured.");
         const index = await readJsonIfPresent<CapabilityIndex>(context.env, CAPABILITY_INDEX_KEY);
         if (index) {
@@ -1020,6 +968,8 @@ export function registerODLReq021Tools(server: McpServer, contextFactory: () => 
     }, async ({ jobId }) => {
       const context = contextFactory();
       try {
+        const goResult = await getOpenCodeGoCapabilityJob(context, jobId);
+        if (goResult) return goResult;
         const job = await coordinatorRequest<PaidJobRecord | null>(context.env, context.userId, "/jobs/get", { jobId });
         if (!job) throw new ConnectorError("job_not_found", "The capability job was not found.");
         const manifest = await readJson<CapabilityJobManifest>(context.env, capabilityManifestKey(jobId));
@@ -1081,10 +1031,19 @@ export function registerODLReq021Tools(server: McpServer, contextFactory: () => 
       const context = contextFactory();
       if (capabilityInputIsOpenCode(raw)) {
         try {
-          const receipt = await readSuccessfulCapabilityReceipt(context.env);
-          if (!receipt) throw new ConnectorError("provider_capability_receipt_required", `A successful, unexpired ${ODL_REQ_021_PROBE_VERSION} capability receipt is required before OpenCode candidate classification.`);
-          if (raw.allowPaidFallback === true) throw new ConnectorError("paid_fallback_forbidden", "Paid fallback remains disabled.");
-          if (String(raw.model ?? OPENCODE_ZEN_MODEL) !== OPENCODE_ZEN_MODEL) throw new ConnectorError("provider_model_not_allowed", `The exact model ${OPENCODE_ZEN_MODEL} is required.`);
+          if (raw.allowPaidFallback === true) throw new ConnectorError("paid_fallback_forbidden", "Automatic provider fallback remains disabled.");
+          if (raw.classifierProvider === OPENCODE_GO_PROVIDER || raw.classifierMode === OPENCODE_GO_MODE) {
+            if (String(raw.model ?? OPENCODE_GO_MODEL) !== OPENCODE_GO_MODEL) throw new ConnectorError("provider_model_not_allowed", `The exact model ${OPENCODE_GO_MODEL} is required for OpenCode Go.`);
+            const receipt = await readSuccessfulOpenCodeGoCapabilityReceipt(context.env, {
+              maxBillableRequests: Number(raw.maxBillableRequests),
+              maxEstimatedSpendUsd: Number(raw.maxEstimatedSpendUsd),
+            });
+            if (!receipt) throw new ConnectorError("provider_capability_receipt_required", "A successful, unexpired ODL-REQ-022 OpenCode Go capability receipt with the exact credential and budget identity is required before candidate classification.");
+          } else {
+            const receipt = await readSuccessfulCapabilityReceipt(context.env);
+            if (!receipt) throw new ConnectorError("provider_capability_receipt_required", `A successful, unexpired ${ODL_REQ_021_PROBE_VERSION} capability receipt is required before OpenCode candidate classification.`);
+            if (String(raw.model ?? OPENCODE_ZEN_MODEL) !== OPENCODE_ZEN_MODEL) throw new ConnectorError("provider_model_not_allowed", `The exact model ${OPENCODE_ZEN_MODEL} is required.`);
+          }
         } catch (error) {
           return errorResult(error);
         }
