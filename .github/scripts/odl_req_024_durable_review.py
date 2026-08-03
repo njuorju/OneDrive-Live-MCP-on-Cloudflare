@@ -183,6 +183,7 @@ replace_once(
           outputModalities: model.outputModalities,
           pricingMetadataPresent: model.pricingMetadataPresent,''')
 
-if "parsedBody:" in text or "finalContent," in text.split("type ProbeInternal", 1)[1].split("function boundedKeys", 1)[0]:
+probe_type = text.split("type ProbeInternal", 1)[1].split("function boundedKeys", 1)[0]
+if "parsedBody" in probe_type or "finalContent" in probe_type:
     raise SystemExit("raw provider content remains in durable ProbeInternal")
 path.write_text(text)
