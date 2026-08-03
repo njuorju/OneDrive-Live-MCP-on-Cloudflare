@@ -150,10 +150,20 @@ type BuiltRequest = {
   image: Uint8Array | null;
 };
 
+type SanitizedModelMetadata = {
+  id: string;
+  object: string | null;
+  created: number | null;
+  ownedBy: string | null;
+  contextLength: number | null;
+  inputModalities: string[];
+  outputModalities: string[];
+  pricingMetadataPresent: boolean;
+};
+
 type ProbeInternal = {
   receipt: GoDiagnosticProbeReceipt;
-  finalContent: string | null;
-  parsedBody: Record<string, unknown>;
+  modelMetadata: SanitizedModelMetadata | null;
 };
 
 function boundedKeys(value: unknown): string[] {
@@ -463,6 +473,22 @@ function textStructuredMatched(content: string | null): boolean {
   }
 }
 
+function sanitizedModelMetadata(body: Record<string, unknown>): SanitizedModelMetadata | null {
+  const models = Array.isArray(body.data) ? body.data as Record<string, unknown>[] : [];
+  const model = models.find((entry) => String(entry?.id ?? entry?.name ?? "") === OPENCODE_GO_MODEL);
+  if (!model) return null;
+  return {
+    id: String(model.id ?? model.name ?? OPENCODE_GO_MODEL).slice(0, 100),
+    object: model.object === undefined || model.object === null ? null : String(model.object).slice(0, 100),
+    created: Number.isFinite(Number(model.created)) ? Number(model.created) : null,
+    ownedBy: model.owned_by === undefined || model.owned_by === null ? null : String(model.owned_by).slice(0, 100),
+    contextLength: Number.isFinite(Number(model.context_length)) ? Number(model.context_length) : null,
+    inputModalities: Array.isArray(model.input_modalities) ? model.input_modalities.map(String).slice(0, 16) : [],
+    outputModalities: Array.isArray(model.output_modalities) ? model.output_modalities.map(String).slice(0, 16) : [],
+    pricingMetadataPresent: Boolean(model.pricing && typeof model.pricing === "object"),
+  };
+}
+
 async function runProbe(input: {
   env: Env;
   probe: GoDiagnosticProbeName;
@@ -546,8 +572,7 @@ async function runProbe(input: {
           : visual;
 
   return {
-    finalContent,
-    parsedBody,
+    modelMetadata: input.probe === "model_discovery" ? sanitizedModelMetadata(parsedBody) : null,
     receipt: {
       probe: input.probe,
       attempt: input.attempt,
@@ -578,9 +603,9 @@ function retryableProbe(receipt: GoDiagnosticProbeReceipt): boolean {
   ]).has(receipt.responseShape.successEnvelopeClass ?? "unknown_success_envelope");
 }
 
-async function boundedBackoff(attempt: number): Promise<void> {
-  const milliseconds = Math.min(4_000, 500 * (2 ** Math.max(0, attempt - 1)));
-  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+async function boundedBackoff(step: WorkflowStep, label: string, attempt: number): Promise<void> {
+  const seconds = Math.min(4, 2 ** Math.max(0, attempt - 1));
+  await step.sleep(`${label} bounded backoff ${attempt}`, `${seconds} seconds`);
 }
 
 function distribution<T extends string>(values: T[]): Record<string, number> {
@@ -641,15 +666,19 @@ export async function runOpenCodeGoVisionDiagnosticWorkflow(
 
   const diagnostics: GoDiagnosticProbeReceipt[] = [];
   const doProbe = async (probe: GoDiagnosticProbeName, attempt: number, retryReason: string | null = null) => {
-    const result = await runProbe({
-      env,
-      probe,
-      attempt,
-      fixture,
-      credentialBindingName,
-      spendLedgerKey: diagnosticLedger.key,
-      retryReason,
-    });
+    const result = await step.do(
+      `ODL-REQ-024 diagnostic ${probe} attempt ${attempt}`,
+      { retries: { limit: 0, delay: "1 second", backoff: "constant" }, timeout: "2 minutes" },
+      async () => runProbe({
+        env,
+        probe,
+        attempt,
+        fixture,
+        credentialBindingName,
+        spendLedgerKey: diagnosticLedger.key,
+        retryReason,
+      }),
+    );
     diagnostics.push(result.receipt);
     return result;
   };
@@ -661,7 +690,7 @@ export async function runOpenCodeGoVisionDiagnosticWorkflow(
     const result = await doProbe("canonical_vision_payload", attempt, attempt > 1 ? "bounded_retry_after_transient_or_incomplete_response" : null);
     canonicalAttempts.push(result);
     if (result.receipt.usableFinalContent || !retryableProbe(result.receipt)) break;
-    if (attempt < 3) await boundedBackoff(attempt);
+    if (attempt < 3) await boundedBackoff(step, "ODL-REQ-024 diagnostic canonical vision", attempt);
   }
 
   let successfulCanonical = canonicalAttempts.find((entry) => entry.receipt.usableFinalContent) ?? null;
@@ -765,20 +794,24 @@ export async function runOpenCodeGoVisionDiagnosticWorkflow(
     const capabilityProbe = async (probe: GoDiagnosticProbeName, maximumAttempts: number) => {
       let last: ProbeInternal | null = null;
       for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
-        const result = await runProbe({
-          env,
-          probe,
-          attempt,
-          fixture,
-          credentialBindingName,
-          spendLedgerKey: capabilityLedger.key,
-          retryReason: attempt > 1 ? "bounded_capability_retry" : null,
-        });
+        const result = await step.do(
+          `ODL-REQ-024 capability ${probe} attempt ${attempt}`,
+          { retries: { limit: 0, delay: "1 second", backoff: "constant" }, timeout: "2 minutes" },
+          async () => runProbe({
+            env,
+            probe,
+            attempt,
+            fixture,
+            credentialBindingName,
+            spendLedgerKey: capabilityLedger.key,
+            retryReason: attempt > 1 ? "bounded_capability_retry" : null,
+          }),
+        );
         capabilityAttempts.push(result.receipt);
         last = result;
         if (result.receipt.usableFinalContent) return result;
         if (!retryableProbe(result.receipt) || attempt >= maximumAttempts) return result;
-        await boundedBackoff(attempt);
+        await boundedBackoff(step, `ODL-REQ-024 capability ${probe}`, attempt);
       }
       return last as ProbeInternal;
     };
@@ -825,9 +858,16 @@ export async function runOpenCodeGoVisionDiagnosticWorkflow(
     };
 
     if (passed && visionStructured) {
-      const modelBody = modelDiscovery.parsedBody;
-      const models = Array.isArray(modelBody.data) ? modelBody.data as Record<string, unknown>[] : [];
-      const model = models.find((entry) => String(entry?.id ?? entry?.name ?? "") === OPENCODE_GO_MODEL) ?? {};
+      const model = modelDiscovery.modelMetadata ?? {
+        id: OPENCODE_GO_MODEL,
+        object: null,
+        created: null,
+        ownedBy: null,
+        contextLength: null,
+        inputModalities: [],
+        outputModalities: [],
+        pricingMetadataPresent: false,
+      };
       const cache: OpenCodeGoCapabilityReceipt = {
         provider: OPENCODE_GO_PROVIDER,
         mode: OPENCODE_GO_MODE,
@@ -839,14 +879,14 @@ export async function runOpenCodeGoVisionDiagnosticWorkflow(
         discoveryCacheHit: false,
         modelPresent: true,
         modelMetadata: {
-          id: String(model.id ?? model.name ?? OPENCODE_GO_MODEL).slice(0, 100),
-          object: model.object === undefined || model.object === null ? null : String(model.object).slice(0, 100),
-          created: Number.isFinite(Number(model.created)) ? Number(model.created) : null,
-          ownedBy: model.owned_by === undefined || model.owned_by === null ? null : String(model.owned_by).slice(0, 100),
-          contextLength: Number.isFinite(Number(model.context_length)) ? Number(model.context_length) : null,
-          inputModalities: Array.isArray(model.input_modalities) ? model.input_modalities.map(String).slice(0, 16) : [],
-          outputModalities: Array.isArray(model.output_modalities) ? model.output_modalities.map(String).slice(0, 16) : [],
-          pricingMetadataPresent: Boolean(model.pricing && typeof model.pricing === "object"),
+          id: model.id,
+          object: model.object,
+          created: model.created,
+          ownedBy: model.ownedBy,
+          contextLength: model.contextLength,
+          inputModalities: model.inputModalities,
+          outputModalities: model.outputModalities,
+          pricingMetadataPresent: model.pricingMetadataPresent,
           pricing: capabilityAccounting.pricing,
         },
         visionProbe: {
