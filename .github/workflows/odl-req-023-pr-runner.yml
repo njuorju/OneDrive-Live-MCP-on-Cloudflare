@@ -53,6 +53,7 @@ jobs:
               "n = Path('test/connector-file-contract.test.ts')",
               "v = n.read_text()",
               "v = v.replace('source_record_id,name\\\\n\\\"ACA-0001,A\\\\n', 'source_record_id,name\\\\n\\\"ACA-0001,A')",
+              "v = v.replace('e.code === \\\"invalid_json_catalogue\\\"', 'e.code === \\\"malformed_catalogue\\\"')",
               "n.write_text(v)",
               "r = Path('test/production-rollout.test.ts')",
               "y = r.read_text()",
