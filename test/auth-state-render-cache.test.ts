@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { RENDER_CACHE_MAX_BYTES, renderCacheSizeAccepted } from "../src/auth-state";
+import { RENDER_CACHE_MAX_BYTES, renderCacheSizeAccepted } from "../src/render-cache-policy";
 
 test("render cache admits the fixed 27,389,891-byte calibration PDF", () => {
   assert.equal(RENDER_CACHE_MAX_BYTES, 32 * 1024 * 1024);
