@@ -1,17 +1,16 @@
 name: ODL-REQ-024 apply
 
 on:
-  push:
+  pull_request:
     branches:
-      - odl-req-024-opencode-go-vision-contract
-    paths:
-      - .odl-req-024-trigger
+      - main
 
 permissions:
   contents: write
 
 jobs:
   apply:
+    if: github.head_ref == 'odl-req-024-opencode-go-vision-contract'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -30,6 +29,11 @@ jobs:
           python - <<'PY'
           from pathlib import Path
 
+          go = Path("src/visual-catalogue-opencode-go.ts")
+          if "CAPABILITY_CACHE_KEY_V2" in go.read_text():
+              Path(".odl-req-024-already-applied").write_text("yes\n")
+              raise SystemExit(0)
+
           def replace_once(path, old, new):
               p = Path(path)
               text = p.read_text()
@@ -38,7 +42,6 @@ jobs:
                   raise SystemExit(f"{path}: expected one match, got {count}")
               p.write_text(text.replace(old, new, 1))
 
-          go = "src/visual-catalogue-opencode-go.ts"
           replace_once(
               go,
               'export const ODL_REQ_022_GO_PROBE_VERSION = "odl-req-022-go-capability-v1" as const;\n',
@@ -92,7 +95,7 @@ jobs:
 }'''
           replace_once(go, old_read, new_read)
 
-          diagnostic = "src/visual-classifier-capability-go-diagnostic.ts"
+          diagnostic = Path("src/visual-classifier-capability-go-diagnostic.ts")
           replace_once(
               diagnostic,
               '  OPENCODE_GO_MODELS_ENDPOINT,\n  OPENCODE_GO_PROVIDER,\n',
@@ -105,11 +108,61 @@ jobs:
           )
           replace_once(
               diagnostic,
+              '''    const result = await step.do(
+      `ODL-REQ-024 ${probe} attempt ${attempt}`,
+      { retries: { limit: 0, delay: "1 second", backoff: "constant" }, timeout: "2 minutes" },
+      async () => runProbe({
+        env,
+        probe,
+        attempt,
+        fixture,
+        credentialBindingName,
+        spendLedgerKey: diagnosticLedger.key,
+        retryReason,
+      }),
+    );''',
+              '''    const result = await runProbe({
+      env,
+      probe,
+      attempt,
+      fixture,
+      credentialBindingName,
+      spendLedgerKey: diagnosticLedger.key,
+      retryReason,
+    });''',
+          )
+          replace_once(
+              diagnostic,
+              '''        const result = await step.do(
+          `ODL-REQ-024 capability ${probe} attempt ${attempt}`,
+          { retries: { limit: 0, delay: "1 second", backoff: "constant" }, timeout: "2 minutes" },
+          async () => runProbe({
+            env,
+            probe,
+            attempt,
+            fixture,
+            credentialBindingName,
+            spendLedgerKey: capabilityLedger.key,
+            retryReason: attempt > 1 ? "bounded_capability_retry" : null,
+          }),
+        );''',
+              '''        const result = await runProbe({
+          env,
+          probe,
+          attempt,
+          fixture,
+          credentialBindingName,
+          spendLedgerKey: capabilityLedger.key,
+          retryReason: attempt > 1 ? "bounded_capability_retry" : null,
+        });''',
+          )
+          replace_once(
+              diagnostic,
               '  let capabilityReceipt: Record<string, unknown> | null = null;\n',
               '  let capabilityReceipt: ({ status: "passed" | "failed" } & Record<string, unknown>) | null = null;\n',
           )
 
-          capability = "src/visual-classifier-capability-go.ts"
+          capability = Path("src/visual-classifier-capability-go.ts")
           replace_once(
               capability,
               '  ODL_REQ_022_GO_PROBE_VERSION,\n',
@@ -121,7 +174,7 @@ jobs:
               '  const budgets = validateOpenCodeGoBudgets(expected?.maxBillableRequests, expected?.maxEstimatedSpendUsd);\n  const currentCache = await import("./visual-catalogue-opencode-go").then((module) => module.readOpenCodeGoCapabilityCache(env));\n  if (currentCache\n    && currentCache.probeVersion === ODL_REQ_024_GO_PROBE_VERSION\n    && currentCache.maxBillableRequests === budgets.maxBillableRequests\n    && currentCache.maxEstimatedSpendUsd === budgets.maxEstimatedSpendUsd) return currentCache;\n  const index = await readJsonIfPresent<CapabilityIndex>(env, indexKey(credentialBindingName, budgets.maxBillableRequests, budgets.maxEstimatedSpendUsd));\n',
           )
 
-          classifier = "src/visual-catalogue-opencode.ts"
+          classifier = Path("src/visual-catalogue-opencode.ts")
           replace_once(
               classifier,
               '  const request: Record<string, unknown> = { model: message.model, messages, max_tokens: 1400, temperature: 0 };\n  if (message.capability.structuredOutput.responseFormatAccepted) request.response_format = { type: "json_object" };\n',
@@ -129,6 +182,7 @@ jobs:
           )
           PY
       - name: Install and verify
+        if: hashFiles('.odl-req-024-already-applied') == ''
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           npm run type-check
@@ -136,6 +190,7 @@ jobs:
         env:
           NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
       - name: Commit focused implementation
+        if: hashFiles('.odl-req-024-already-applied') == ''
         shell: bash
         run: |
           set -euo pipefail
