@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   apply:
-    if: github.event.pull_request.head.ref == 'odl-req-023-chatgpt-file-params'
+    if: github.event.pull_request.head.ref == 'odl-req-023-chatgpt-file-params' && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -65,7 +65,8 @@ jobs:
               "PYFIX",
           ]
           body[npm_index:npm_index] = fix
-          body.insert(-4, 'rm -f .github/workflows/odl-req-023-pr-runner.yml .odl-req-023-trigger')
+          git_add_index = next(i for i, line in enumerate(body) if line == 'git add -A')
+          body.insert(git_add_index, 'git checkout -- .github/workflows/ci.yml .github/workflows/odl-req-023-apply.yml .github/workflows/odl-req-023-pr-runner.yml .odl-req-023-trigger')
           Path('/tmp/odl23-apply.sh').write_text('\n'.join(body) + '\n')
           PY
           bash /tmp/odl23-apply.sh
