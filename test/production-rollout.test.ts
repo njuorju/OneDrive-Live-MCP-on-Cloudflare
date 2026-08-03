@@ -55,12 +55,12 @@ test("ODL-REQ-024 deployment is exact-main, post-CI, leased, and runs only the s
   assert.match(workflow, /if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/);
   assert.match(workflow, /needs: validate/);
   assert.match(workflow, /test "\$\(git rev-parse HEAD\)" = "\$GITHUB_SHA"/);
-  assert.match(workflow, /OPENING_VERSION_ID: da5558f0-fe88-455c-a4e1-803e2dd279d3/);
-  assert.match(workflow, /OPENING_DEPLOYMENT_ID: c2ce8604-3751-4c24-bfb8-76b80c0f81f6/);
+  assert.match(workflow, /OPENING_VERSION_ID: e55f3e0d-b406-49c0-ab32-ce59e06cc041/);
+  assert.match(workflow, /OPENING_DEPLOYMENT_ID: 5ae11025-b08e-4528-95d4-6acb9617a0ec/);
   assert.match(workflow, /npx wrangler deploy --config wrangler\.production\.json/);
   assert.match(workflow, /odl-req-024-go-vision-contract-v1/);
   assert.match(workflow, /__odlReq024GoVisionDiagnostic/);
-  assert.match(workflow, /maxBillableRequests.*8/);
+  assert.match(workflow, /maxBillableRequests.*5/);
   assert.match(workflow, /maxEstimatedSpendUsd.*0\.05/);
   assert.match(workflow, /oneDriveAccessed == false/);
   assert.match(workflow, /sourcePdfRead == false/);
