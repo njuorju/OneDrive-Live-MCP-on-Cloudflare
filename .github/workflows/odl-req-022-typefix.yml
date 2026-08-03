@@ -1,0 +1,42 @@
+name: ODL-REQ-022 type correction
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.head_ref == 'work/odl-req-022-opencode-go-mimo-paid'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 1
+      - name: Narrow the classified-response union
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('src/visual-catalogue-opencode.ts')
+          source = path.read_text()
+          old = '''    const usage = isGo
+                ? { inputTokens: response.usage.inputTokens ?? 0, outputTokens: response.usage.outputTokens ?? 0, totalTokens: response.usage.totalTokens ?? 0, cachedReadTokens: response.usage.cachedReadTokens ?? 0, usageReported: response.usage.reported }
+                : safeUsage(response.body);'''
+          new = '''    const usage: OpenCodeUsage = "usage" in response
+                ? { inputTokens: response.usage.inputTokens ?? 0, outputTokens: response.usage.outputTokens ?? 0, totalTokens: response.usage.totalTokens ?? 0, cachedReadTokens: response.usage.cachedReadTokens ?? 0, usageReported: response.usage.reported }
+                : safeUsage(response.body);'''
+          if old not in source:
+              raise SystemExit('expected union expression not found')
+          path.write_text(source.replace(old, new, 1))
+          PY
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/visual-catalogue-opencode.ts
+          git commit -m 'Narrow OpenCode classifier response usage type'
+          git push origin HEAD:${{ github.head_ref }}
