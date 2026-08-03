@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - fix/odl-req-020-synthetic-vision-probe
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
