@@ -1,0 +1,48 @@
+name: ODL-REQ-024 validate Probe D continuation
+
+on:
+  push:
+    branches:
+      - odl-req-024-opencode-go-vision-contract
+    paths:
+      - .odl-req-024-probe-d
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: odl-req-024-opencode-go-vision-contract
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
+          cache: npm
+      - name: Apply exact Probe D continuation patch
+        run: python .github/scripts/odl_req_024_probe_d.py
+      - name: Install and validate
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run type-check
+          npm test
+          npm audit --audit-level=high --omit=dev
+          cp wrangler.jsonc wrangler.ci.jsonc
+          sed -i 's/REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER/CI_TEST_ROOT/g' wrangler.ci.jsonc
+          sed -i 's/REPLACE_WITH_KV_NAMESPACE_ID/00000000000000000000000000000000/g' wrangler.ci.jsonc
+          npx wrangler deploy --dry-run --config wrangler.ci.jsonc --outdir dist
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+      - name: Commit verified continuation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .github/workflows/ci.yml src/visual-classifier-capability-go-diagnostic.ts test/production-rollout.test.ts test/visual-opencode-go-diagnostic.test.ts
+          git commit -m "Run mandatory Probe D within remaining budget"
+          git push origin HEAD:odl-req-024-opencode-go-vision-contract
