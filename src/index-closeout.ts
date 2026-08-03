@@ -15,6 +15,7 @@ import {
   registerODLReq021Tools,
   runVisualClassifierCapabilityWorkflow,
 } from "./visual-classifier-capability";
+import { registerODLReq021VisibleBridge } from "./visual-capability-visible-bridge";
 
 const prototype = OneDriveMCP.prototype as any;
 if (!prototype.__finalEngineeringCloseoutApplied) {
@@ -35,6 +36,7 @@ if (!prototype.__finalEngineeringCloseoutApplied) {
     registerAccessVerificationValidator(actual, contextFactory);
     registerVisualCatalogueCompilerTools(actual, contextFactory);
     registerODLReq021Tools(actual, contextFactory);
+    registerODLReq021VisibleBridge(actual);
   };
   Object.defineProperty(prototype, "__finalEngineeringCloseoutApplied", {
     value: true,
