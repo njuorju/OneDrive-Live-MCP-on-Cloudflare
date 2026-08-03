@@ -8,13 +8,13 @@ import {
   type StoredEnvelope,
 } from "./auth-store";
 import { processIntegrityCoordination, type CoordinationRequest } from "./integrity-coordination";
+import { renderCacheSizeAccepted } from "./render-cache-policy";
 
 type RenderCacheEntry = {
   bytes: ArrayBuffer;
   expiresAt: number;
 };
 
-const RENDER_CACHE_MAX_BYTES = 25 * 1024 * 1024;
 const RENDER_ID_PATTERN = /^[0-9a-zA-Z-]{1,200}$/;
 
 /**
@@ -134,7 +134,7 @@ export class AuthState extends DurableObject {
       });
     }
     const bytes = await request.arrayBuffer();
-    if (bytes.byteLength < 5 || bytes.byteLength > RENDER_CACHE_MAX_BYTES) {
+    if (!renderCacheSizeAccepted(bytes.byteLength)) {
       return Response.json({ ok: false, found: false, stage: "render_cache_size_invalid" }, {
         status: 413,
       });
