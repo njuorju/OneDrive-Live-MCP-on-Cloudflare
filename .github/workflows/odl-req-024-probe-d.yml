@@ -37,12 +37,12 @@ jobs:
           npx wrangler deploy --dry-run --config wrangler.ci.jsonc --outdir dist
         env:
           NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
-      - name: Commit verified continuation
+      - name: Commit verified source continuation
         shell: bash
         run: |
           set -euo pipefail
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add .github/workflows/ci.yml src/visual-classifier-capability-go-diagnostic.ts test/production-rollout.test.ts test/visual-opencode-go-diagnostic.test.ts
+          git add src/visual-classifier-capability-go-diagnostic.ts test/visual-opencode-go-diagnostic.test.ts
           git commit -m "Run mandatory Probe D within remaining budget"
           git push origin HEAD:odl-req-024-opencode-go-vision-contract
