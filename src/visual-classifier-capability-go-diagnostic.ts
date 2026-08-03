@@ -243,7 +243,7 @@ export function buildOpenCodeGoDiagnosticRequest(
         model: OPENCODE_GO_MODEL,
         stream: false,
         messages: [{ role: "user", content: "Reply with the exact bounded phrase: ODL-REQ-024 TEXT CONTROL." }],
-        max_tokens: 80,
+        max_tokens: 256,
         temperature: 0,
       },
     };
@@ -603,6 +603,15 @@ function retryableProbe(receipt: GoDiagnosticProbeReceipt): boolean {
   ]).has(receipt.responseShape.successEnvelopeClass ?? "unknown_success_envelope");
 }
 
+export function shouldRunOpenCodeGoTokenControl(receipt: GoDiagnosticProbeReceipt): boolean {
+  if (receipt.usableFinalContent || receipt.responseShape.httpStatus !== 200) return false;
+  if (receipt.responseShape.finishReason === "length") return true;
+  return new Set<GoSuccessEnvelopeClass>([
+    "finish_reason_length_without_content",
+    "empty_message_content",
+  ]).has(receipt.responseShape.successEnvelopeClass ?? "unknown_success_envelope");
+}
+
 async function boundedBackoff(step: WorkflowStep, label: string, attempt: number): Promise<void> {
   const seconds = Math.min(4, 2 ** Math.max(0, attempt - 1));
   await step.sleep(`${label} bounded backoff ${attempt}`, `${seconds} seconds`);
@@ -696,12 +705,7 @@ export async function runOpenCodeGoVisionDiagnosticWorkflow(
   let successfulCanonical = canonicalAttempts.find((entry) => entry.receipt.usableFinalContent) ?? null;
   let tokenControl: ProbeInternal | null = null;
   const lastCanonical = canonicalAttempts.at(-1) ?? null;
-  if (
-    !successfulCanonical
-    && lastCanonical?.receipt.responseShape.httpStatus === 200
-    && new Set<GoSuccessEnvelopeClass>(["finish_reason_length_without_content", "empty_message_content"])
-      .has(lastCanonical.receipt.responseShape.successEnvelopeClass ?? "unknown_success_envelope")
-  ) {
+  if (lastCanonical && shouldRunOpenCodeGoTokenControl(lastCanonical.receipt)) {
     tokenControl = await doProbe("minimal_token_control", 1, "bounded_output_token_control");
     if (tokenControl.receipt.usableFinalContent) successfulCanonical = tokenControl;
   }

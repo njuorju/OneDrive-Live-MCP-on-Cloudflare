@@ -11,6 +11,7 @@ import {
   extractOpenCodeGoFinalContent,
   openCodeGoRequestShapeReceipt,
   openCodeGoResponseShapeReceipt,
+  shouldRunOpenCodeGoTokenControl,
   verifyOpenCodeGoDiagnosticFixture,
 } from "../src/visual-classifier-capability-go-diagnostic";
 import {
@@ -112,6 +113,31 @@ test("response structural receipt excludes generated and reasoning content", asy
   assert.equal(receipt.fieldPresenceTypes.reasoning_content, "string");
   assert.match(receipt.bodySha256 ?? "", /^[0-9a-f]{64}$/);
   assert.match(receipt.responseShapeFingerprint, /^[0-9a-f]{64}$/);
+});
+
+test("Probe D runs after a non-usable length-truncated content string, but not after HTTP 500", () => {
+  const receipt = {
+    probe: "canonical_vision_payload",
+    attempt: 1,
+    startedAt: "2026-08-03T00:00:00.000Z",
+    completedAt: "2026-08-03T00:00:01.000Z",
+    latencyMilliseconds: 1000,
+    requestShape: {} as any,
+    responseShape: {
+      httpStatus: 200,
+      finishReason: "length",
+      successEnvelopeClass: "openai_message_content_string",
+    } as any,
+    usage: null,
+    accounting: {} as any,
+    usableFinalContent: false,
+    visualFixtureMatched: false,
+    structuredFixtureMatched: false,
+    retryReason: null,
+  } as any;
+  assert.equal(shouldRunOpenCodeGoTokenControl(receipt), true);
+  assert.equal(shouldRunOpenCodeGoTokenControl({ ...receipt, responseShape: { ...receipt.responseShape, httpStatus: 500 } }), false);
+  assert.equal(shouldRunOpenCodeGoTokenControl({ ...receipt, usableFinalContent: true }), false);
 });
 
 test("diagnostic and capability ceilings are immutable", () => {
