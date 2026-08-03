@@ -228,7 +228,7 @@ function capabilityIdentity(): string {
 export function parseRetryAfterSeconds(raw: string | null, nowMilliseconds = Date.now(), maximumSeconds = ODL_REQ_021_MAX_RETRY_DELAY_SECONDS): number | null {
   if (!raw) return null;
   const seconds = Number(raw.trim());
-  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(maximumSeconds, Math.ceil(seconds));
+  if (Number.isFinite(seconds)) return seconds >= 0 ? Math.min(maximumSeconds, Math.ceil(seconds)) : null;
   const date = Date.parse(raw);
   if (!Number.isFinite(date)) return null;
   return Math.min(maximumSeconds, Math.max(0, Math.ceil((date - nowMilliseconds) / 1000)));
