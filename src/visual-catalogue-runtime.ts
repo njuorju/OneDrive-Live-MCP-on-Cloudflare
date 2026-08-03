@@ -56,6 +56,7 @@ import {
   openCodePolicyReceipt,
   resolveClassifierSelection,
   safeOpenCodePrompt,
+  type AnyOpenCodeCapabilityReceipt,
   type OpenCodeCapabilityReceipt,
   type OpenCodeClassifiedCandidate,
   type OpenCodePolicyReceipt,
@@ -63,6 +64,12 @@ import {
   type VisualClassifierProvider,
   type VisualDataSensitivity,
 } from "./visual-catalogue-opencode";
+import {
+  OPENCODE_GO_MODEL,
+  readOpenCodeGoCapabilityCache,
+  readOpenCodeGoSpendLedger,
+  type OpenCodeGoCapabilityReceipt,
+} from "./visual-catalogue-opencode-go";
 
 export type ClassifierProvider = VisualClassifierProvider;
 export type ClassifierMode = VisualClassifierMode;
@@ -83,6 +90,8 @@ export type StartVisualCatalogueInput = {
   allowPaidFallback?: boolean;
   dataSensitivity?: VisualDataSensitivity;
   freeProviderDataPolicyAcknowledged?: boolean;
+  maxBillableRequests?: number;
+  maxEstimatedSpendUsd?: number;
   classifierConcurrency?: number;
   classifierMaxDimension?: number;
   classifierJpegQuality?: number;
@@ -124,6 +133,13 @@ export type CompilerMetrics = {
   idempotentCandidateReplays: number;
   inputTokens: number;
   outputTokens: number;
+  cachedReadTokens: number;
+  usageNotReportedResponses: number;
+  billableRequestCount: number;
+  remainingRequestAllowance: number | null;
+  remainingEstimatedDollarAllowance: number | null;
+  pricingSource: string | null;
+  pricingVersion: string | null;
   estimatedCostUsd: number | null;
   costClassification: string | null;
   startedAt: string;
@@ -155,7 +171,7 @@ export type CompilerJobManifest = {
   resultCounts: Record<PreparedOutcome, number> | null;
   classifierProvider: ClassifierProvider | null;
   providerPolicyReceipt: OpenCodePolicyReceipt | null;
-  providerCapabilities: OpenCodeCapabilityReceipt | null;
+  providerCapabilities: AnyOpenCodeCapabilityReceipt | null;
   calibration: CalibrationEvaluation | null;
   metrics: CompilerMetrics;
   errors: Array<{ stage: string; code: string; message: string }>;
@@ -1086,7 +1102,7 @@ async function classifyOpenCodeViaQueue(input: {
   promptVersion: string;
   passNumber: 1 | 2;
   confidenceThreshold: number;
-  capability: OpenCodeCapabilityReceipt;
+  capability: AnyOpenCodeCapabilityReceipt;
   classifierMaxDimension: number;
   classifierQuality: number;
   highDetail: boolean;
@@ -1154,7 +1170,7 @@ function calibrationBinary(outcome: PreparedOutcome): "retain" | "reject" | "rev
 }
 
 function routeDeterministicQualityControl(results: VisualResultRecord[], provider: ClassifierProvider, sampleSize = 4): VisualResultRecord[] {
-  if (provider !== "opencode_zen" || sampleSize <= 0) return results;
+  if (!["opencode_zen", "opencode_go"].includes(provider) || sampleSize <= 0) return results;
   const eligible = results
     .filter((record) => record.outcome !== "needs_review" && !record.disagreement && record.confidence >= 0.9)
     .sort((left, right) => left.stableVisualId.localeCompare(right.stableVisualId));
@@ -1175,7 +1191,7 @@ function evaluateCalibration(input: {
   gold: Map<string, GoldDecision>;
   rawResults: VisualResultRecord[];
   finalResults: VisualResultRecord[];
-  capabilities: OpenCodeCapabilityReceipt | null;
+  capabilities: AnyOpenCodeCapabilityReceipt | null;
   persistentMalformedResponses: number;
   detectedSeries: SeriesRecord[];
   contactSheetAvailable: boolean;
@@ -1285,7 +1301,8 @@ export async function runVisualCompileWorkflow(
       inventoriedCandidates: 0, renderedArtifacts: 0, embeddedArtifacts: 0, cacheHits: 0, renderMisses: 0,
       classifierRequests: 0, secondPassRequests: 0, schemaValidFirstResponses: 0, schemaValidAfterRetry: 0,
       persistentMalformedResponses: 0, rateLimitEvents: 0, retries: 0, classifierArtifacts: 0,
-      classifierArtifactCacheHits: 0, idempotentCandidateReplays: 0, inputTokens: 0, outputTokens: 0,
+      classifierArtifactCacheHits: 0, idempotentCandidateReplays: 0, inputTokens: 0, outputTokens: 0, cachedReadTokens: 0,
+      usageNotReportedResponses: 0, billableRequestCount: 0, remainingRequestAllowance: null, remainingEstimatedDollarAllowance: null, pricingSource: null, pricingVersion: null,
       estimatedCostUsd: null, costClassification: null,
       startedAt: nowIso(), completedAt: null, elapsedMilliseconds: null,
     },
@@ -1391,18 +1408,29 @@ export async function runVisualCompileWorkflow(
     const rubricVersion = String(input.rubricVersion ?? env.VISUAL_RUBRIC_VERSION ?? VISUAL_RUBRIC_VERSION);
     const promptVersion = String(input.promptVersion ?? env.VISUAL_PROMPT_VERSION ?? VISUAL_PROMPT_VERSION);
     const highConfidenceRejectThreshold = Number(input.highConfidenceRejectThreshold ?? 0.94);
-    const classifierConcurrency = Math.min(8, Math.max(1, Number(input.classifierConcurrency ?? env.VISUAL_CLASSIFIER_CONCURRENCY ?? 2)));
+    const classifierConcurrency = selection.provider === "opencode_go" ? 1 : Math.min(8, Math.max(1, Number(input.classifierConcurrency ?? env.VISUAL_CLASSIFIER_CONCURRENCY ?? 2)));
     const classifierMaxDimension = Math.min(3000, Math.max(256, Number(input.classifierMaxDimension ?? env.VISUAL_CLASSIFIER_MAX_DIMENSION ?? 1280)));
     const classifierJpegQuality = Math.min(100, Math.max(1, Number(input.classifierJpegQuality ?? env.VISUAL_CLASSIFIER_JPEG_QUALITY ?? 82)));
 
-    let capability: OpenCodeCapabilityReceipt | null = null;
+    let capability: AnyOpenCodeCapabilityReceipt | null = null;
     if (selection.provider === "opencode_zen") {
       manifest.stage = "discovering_opencode_capabilities";
       await writeManifest(env, manifest);
-      const discoveredCapability = await step.do("discover OpenCode Zen model and vision capability", { retries: { limit: 3, delay: "10 seconds", backoff: "exponential" }, timeout: "5 minutes" }, async () => discoverOpenCodeCapabilities(env));
+      const discoveredCapability = await step.do("read OpenCode Zen capability receipt", async () => discoverOpenCodeCapabilities(env));
       capability = discoveredCapability;
       manifest.providerCapabilities = discoveredCapability;
       manifest.metrics.costClassification = discoveredCapability.costClassification;
+      await writeManifest(env, manifest);
+    } else if (selection.provider === "opencode_go") {
+      manifest.stage = "reading_opencode_go_capability";
+      await writeManifest(env, manifest);
+      const paidCapability = await step.do("read successful OpenCode Go capability receipt", async () => readOpenCodeGoCapabilityCache(env));
+      if (!paidCapability || paidCapability.maxBillableRequests !== selection.maxBillableRequests || paidCapability.maxEstimatedSpendUsd !== selection.maxEstimatedSpendUsd) {
+        throw new ConnectorError("provider_capability_receipt_required", "A successful, unexpired OpenCode Go capability receipt with the exact paid budget identity is required before candidate classification.");
+      }
+      capability = paidCapability;
+      manifest.providerCapabilities = paidCapability;
+      manifest.metrics.costClassification = paidCapability.costClassification;
       await writeManifest(env, manifest);
     }
 
@@ -1484,7 +1512,7 @@ export async function runVisualCompileWorkflow(
         await deleteOpenAIFile(env, String(status.output_file_id));
       }
     } else {
-      if (!capability) throw new ConnectorError("provider_capability_missing", "OpenCode Zen capability discovery did not complete.");
+      if (!capability) throw new ConnectorError("provider_capability_missing", "The selected OpenCode capability receipt is unavailable.");
       for (let chunkStart = 0; chunkStart < inventory.candidates.length; chunkStart += classifierConcurrency) {
         const chunk = inventory.candidates.slice(chunkStart, chunkStart + classifierConcurrency);
         const values = await Promise.all(chunk.map((candidate, offset) => {
@@ -1539,7 +1567,7 @@ export async function runVisualCompileWorkflow(
         const adjacent = inventory.candidates
           .filter((other) => other.pageOrSlide !== null && candidate.pageOrSlide !== null && Math.abs(other.pageOrSlide - candidate.pageOrSlide) === 1)
           .map((other) => ({ stableKey: other.stableKey, pageOrSlide: other.pageOrSlide, description: preliminary.find((record) => record.stableKey === other.stableKey)?.conciseDescription }));
-        if (selection.provider === "opencode_zen") {
+        if (["opencode_zen", "opencode_go"].includes(selection.provider)) {
           if (!capability || !isOpenCodeResult(classifiedValue)) throw new ConnectorError("provider_result_invalid", "OpenCode pass 1 result is unavailable for the conservative second pass.");
           const second = await classifyOpenCodeViaQueue({
             env,
@@ -1672,7 +1700,7 @@ export async function runVisualCompileWorkflow(
     manifest.contactSheetKey = await step.do("render compact review contact sheet", { retries: { limit: 3, delay: "10 seconds", backoff: "exponential" }, timeout: "10 minutes" }, async () => buildContactSheet(env, payload.jobId, results, [...selected.reviewVisualIds, ...selected.sampleVisualIds]));
 
     let cacheReuseVerified: boolean | null = null;
-    if (selection.provider === "opencode_zen" && capability) {
+    if (["opencode_zen", "opencode_go"].includes(selection.provider) && capability) {
       const sample = inventory.candidates.slice(0, Math.min(3, inventory.candidates.length));
       const checks = await Promise.all(sample.map(async (candidate) => {
         const first = classified.get(candidate.stableVisualId);
@@ -1695,6 +1723,20 @@ export async function runVisualCompileWorkflow(
     manifest.resultCounts = outcomeCounts(results);
     manifest.metrics.estimatedCostUsd = selection.provider === "openai" ? estimatedCost(model, manifest.metrics.inputTokens, manifest.metrics.outputTokens, mode === "openai_batch") : null;
     if (selection.provider === "opencode_zen") manifest.metrics.costClassification = "provider_reported_unknown_or_free_model_id";
+    if (selection.provider === "opencode_go" && capability?.provider === "opencode_go") {
+      const accounting = await readOpenCodeGoSpendLedger(env, capability.spendLedgerKey);
+      manifest.metrics.billableRequestCount = accounting.billableRequestCount;
+      manifest.metrics.inputTokens = accounting.inputTokens;
+      manifest.metrics.outputTokens = accounting.outputTokens;
+      manifest.metrics.cachedReadTokens = accounting.cachedReadTokens;
+      manifest.metrics.usageNotReportedResponses = accounting.usageNotReportedResponses;
+      manifest.metrics.estimatedCostUsd = accounting.estimatedSpendUsd;
+      manifest.metrics.remainingRequestAllowance = accounting.remainingRequestAllowance;
+      manifest.metrics.remainingEstimatedDollarAllowance = accounting.remainingEstimatedDollarAllowance;
+      manifest.metrics.pricingSource = accounting.pricing.source;
+      manifest.metrics.pricingVersion = accounting.pricing.version;
+      manifest.metrics.costClassification = accounting.estimatedSpendUsd === null ? "usage_not_reported" : "provider_metered_or_fallback_estimate";
+    }
     manifest.calibration = evaluateCalibration({
       sourceSha256: verifiedSource.source.sha256,
       gold: goldMap,

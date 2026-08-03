@@ -16,6 +16,7 @@ import {
   runVisualClassifierCapabilityWorkflow,
 } from "./visual-classifier-capability";
 import { registerODLReq021VisibleBridge } from "./visual-capability-visible-bridge";
+import { isOpenCodeGoCapabilityWorkflowPayload, runOpenCodeGoCapabilityWorkflow } from "./visual-classifier-capability-go";
 
 const prototype = OneDriveMCP.prototype as any;
 if (!prototype.__finalEngineeringCloseoutApplied) {
@@ -48,6 +49,9 @@ if (!prototype.__finalEngineeringCloseoutApplied) {
 
 export class VisualCatalogueWorkflow extends BaseVisualCatalogueWorkflow {
   async run(event: any, step: any): Promise<Record<string, unknown>> {
+    if (isOpenCodeGoCapabilityWorkflowPayload(event.payload)) {
+      return runOpenCodeGoCapabilityWorkflow(this.env, event.payload, step);
+    }
     if (isCapabilityWorkflowPayload(event.payload)) {
       return runVisualClassifierCapabilityWorkflow(this.env, event.payload, step);
     }

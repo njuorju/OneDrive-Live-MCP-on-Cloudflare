@@ -3,6 +3,18 @@ import { bytesToBase64, sha256Bytes } from "./integrated-core";
 import { canonicalJson, getArtifact, nowIso, putArtifact, sha256HexUtf8 } from "./paid-core";
 import { syntheticVisionProbeJpegBytes } from "./visual-catalogue-probe-fixture";
 import {
+  OPENCODE_GO_CHAT_ENDPOINT,
+  OPENCODE_GO_MODE,
+  OPENCODE_GO_MODEL,
+  OPENCODE_GO_PROVIDER,
+  requestOpenCodeGo,
+  selectOpenCodeGoCredentialBinding,
+  validateOpenCodeGoBudgets,
+  type OpenCodeGoCapabilityReceipt,
+  type OpenCodeGoSpendLedger,
+  type OpenCodeGoUsage,
+} from "./visual-catalogue-opencode-go";
+import {
   PREPARED_OUTCOMES,
   boundedConfidence,
   type ClassificationProposal,
@@ -21,8 +33,8 @@ export const OPENCODE_POLICY_VERSION = "opencode-zen-observed-2026-08";
 export const OPENCODE_CLASSIFIER_ARTIFACT_VERSION = "opencode-jpeg-v1";
 export const OPENCODE_CAPABILITY_CACHE_SECONDS = 60 * 60;
 
-export type VisualClassifierProvider = "openai" | "opencode_zen" | "fixture";
-export type VisualClassifierMode = "openai_responses" | "openai_batch" | "opencode_chat_completions" | "fixture";
+export type VisualClassifierProvider = "openai" | "opencode_zen" | "opencode_go" | "fixture";
+export type VisualClassifierMode = "openai_responses" | "openai_batch" | "opencode_chat_completions" | "opencode_go_chat_completions" | "fixture";
 export type VisualDataSensitivity = "public" | "internal" | "confidential" | "personal" | "restricted";
 
 export type ClassifierSelectionInput = {
@@ -33,6 +45,8 @@ export type ClassifierSelectionInput = {
   dataSensitivity?: VisualDataSensitivity;
   freeProviderDataPolicyAcknowledged?: boolean;
   dryRun?: boolean;
+  maxBillableRequests?: number;
+  maxEstimatedSpendUsd?: number;
 };
 
 export type ResolvedClassifierSelection = {
@@ -42,6 +56,8 @@ export type ResolvedClassifierSelection = {
   allowPaidFallback: boolean;
   dataSensitivity: VisualDataSensitivity | null;
   freeProviderDataPolicyAcknowledged: boolean;
+  maxBillableRequests: number | null;
+  maxEstimatedSpendUsd: number | null;
 };
 
 export type OpenCodePolicyReceipt = {
@@ -50,6 +66,14 @@ export type OpenCodePolicyReceipt = {
   dataSensitivity: "public";
   freeProviderDataPolicyAcknowledged: true;
   policyVersion: string;
+} | {
+  provider: "opencode_go";
+  model: "mimo-v2.5";
+  dataSensitivity: "public";
+  freeProviderDataPolicyAcknowledged: boolean;
+  policyVersion: "opencode-go-paid-2026-08";
+  maxBillableRequests: number;
+  maxEstimatedSpendUsd: number;
 };
 
 export type OpenCodeCapabilityReceipt = {
@@ -86,6 +110,8 @@ export type OpenCodeCapabilityReceipt = {
   costClassification: "provider_reported_unknown_or_free_model_id";
 };
 
+export type AnyOpenCodeCapabilityReceipt = OpenCodeCapabilityReceipt | OpenCodeGoCapabilityReceipt;
+
 export type ClassifierArtifactManifest = {
   version: 1;
   classifierArtifactId: string;
@@ -108,6 +134,8 @@ export type OpenCodeUsage = {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  cachedReadTokens?: number;
+  usageReported?: boolean;
 };
 
 export type OpenCodeClassifiedCandidate = {
@@ -124,6 +152,8 @@ export type OpenCodeClassifiedCandidate = {
   endpointFamily: "openai_compatible_chat_completions";
   passNumber: 1 | 2;
   reviewRoutingReason: string | null;
+  provider?: "opencode_zen" | "opencode_go";
+  accounting?: OpenCodeGoSpendLedger | null;
 };
 
 type DeterministicSignal = { outcome: PreparedOutcome | null; reason: string | null; confidence: number };
@@ -136,14 +166,15 @@ const CAPABILITY_KEY = `visual-compiler/provider-cache/opencode-zen/${OPENCODE_Z
 function providerFromMode(mode: VisualClassifierMode): VisualClassifierProvider {
   if (mode === "fixture") return "fixture";
   if (mode === "opencode_chat_completions") return "opencode_zen";
+  if (mode === "opencode_go_chat_completions") return "opencode_go";
   return "openai";
 }
 
-export function resolveClassifierSelection(input: ClassifierSelectionInput, env?: Pick<Env, "OPENAI_API_KEY" | "OPENCODE_ZEN_API_KEY" | "VISUAL_CLASSIFIER_PROVIDER" | "VISUAL_CLASSIFIER_MODEL" | "OPENCODE_ZEN_MODEL">): ResolvedClassifierSelection {
+export function resolveClassifierSelection(input: ClassifierSelectionInput, env?: Pick<Env, "OPENAI_API_KEY" | "OPENCODE_ZEN_API_KEY" | "OPENCODE_GO_API_KEY" | "VISUAL_CLASSIFIER_PROVIDER" | "VISUAL_CLASSIFIER_MODEL" | "OPENCODE_ZEN_MODEL">): ResolvedClassifierSelection {
   const defaultProvider = String(env?.VISUAL_CLASSIFIER_PROVIDER ?? "openai") as VisualClassifierProvider;
-  const inferredMode = input.classifierMode ?? (input.dryRun && !input.classifierProvider ? "fixture" : defaultProvider === "opencode_zen" ? "opencode_chat_completions" : "openai_batch");
+  const inferredMode = input.classifierMode ?? (input.dryRun && !input.classifierProvider ? "fixture" : defaultProvider === "opencode_zen" ? "opencode_chat_completions" : defaultProvider === "opencode_go" ? "opencode_go_chat_completions" : "openai_batch");
   const provider = input.classifierProvider ?? providerFromMode(inferredMode);
-  const model = String(input.model ?? (provider === "opencode_zen" ? env?.OPENCODE_ZEN_MODEL ?? OPENCODE_ZEN_MODEL : provider === "fixture" ? "calibration-fixture" : env?.VISUAL_CLASSIFIER_MODEL ?? "gpt-5.2-2025-12-11"));
+  const model = String(input.model ?? (provider === "opencode_zen" ? env?.OPENCODE_ZEN_MODEL ?? OPENCODE_ZEN_MODEL : provider === "opencode_go" ? OPENCODE_GO_MODEL : provider === "fixture" ? "calibration-fixture" : env?.VISUAL_CLASSIFIER_MODEL ?? "gpt-5.2-2025-12-11"));
   const allowPaidFallback = Boolean(input.allowPaidFallback ?? false);
   const sensitivity = input.dataSensitivity ?? null;
   const acknowledged = Boolean(input.freeProviderDataPolicyAcknowledged ?? false);
@@ -151,7 +182,7 @@ export function resolveClassifierSelection(input: ClassifierSelectionInput, env?
   if (provider === "fixture") {
     if (inferredMode !== "fixture") throw new ConnectorError("classifier_configuration_invalid", "Fixture provider requires fixture mode.");
     if (!input.dryRun) throw new ConnectorError("fixture_production_forbidden", "Fixture classification is permitted only for dry runs.");
-    return { provider, mode: inferredMode, model: "calibration-fixture", allowPaidFallback: false, dataSensitivity: null, freeProviderDataPolicyAcknowledged: false };
+    return { provider, mode: inferredMode, model: "calibration-fixture", allowPaidFallback: false, dataSensitivity: null, freeProviderDataPolicyAcknowledged: false, maxBillableRequests: null, maxEstimatedSpendUsd: null };
   }
 
   if (provider === "openai") {
@@ -159,7 +190,17 @@ export function resolveClassifierSelection(input: ClassifierSelectionInput, env?
       throw new ConnectorError("classifier_configuration_invalid", "OpenAI provider requires an OpenAI classifier mode.");
     }
     if (env && !String(env.OPENAI_API_KEY ?? "")) throw new ConnectorError("openai_api_key_missing", "OPENAI_API_KEY is not configured.");
-    return { provider, mode: inferredMode, model, allowPaidFallback, dataSensitivity: sensitivity, freeProviderDataPolicyAcknowledged: acknowledged };
+    return { provider, mode: inferredMode, model, allowPaidFallback, dataSensitivity: sensitivity, freeProviderDataPolicyAcknowledged: acknowledged, maxBillableRequests: null, maxEstimatedSpendUsd: null };
+  }
+
+  if (provider === "opencode_go") {
+    if (inferredMode !== OPENCODE_GO_MODE) throw new ConnectorError("classifier_configuration_invalid", "OpenCode Go requires opencode_go_chat_completions mode.");
+    if (model !== OPENCODE_GO_MODEL) throw new ConnectorError("provider_model_not_allowed", `OpenCode Go jobs require the exact model ID ${OPENCODE_GO_MODEL}.`);
+    if (allowPaidFallback) throw new ConnectorError("paid_fallback_forbidden", "Automatic fallback is disabled for OpenCode Go.");
+    if (sensitivity !== "public") throw new ConnectorError("provider_data_policy_rejected", "This bounded OpenCode Go tranche accepts only explicitly public source material.");
+    if (env) selectOpenCodeGoCredentialBinding(env);
+    const budgets = validateOpenCodeGoBudgets(input.maxBillableRequests, input.maxEstimatedSpendUsd);
+    return { provider, mode: inferredMode, model, allowPaidFallback: false, dataSensitivity: "public", freeProviderDataPolicyAcknowledged: acknowledged, ...budgets };
   }
 
   if (inferredMode !== "opencode_chat_completions") throw new ConnectorError("classifier_configuration_invalid", "OpenCode Zen requires opencode_chat_completions mode.");
@@ -168,10 +209,19 @@ export function resolveClassifierSelection(input: ClassifierSelectionInput, env?
   if (sensitivity !== "public") throw new ConnectorError("provider_data_policy_rejected", "MiMo-V2.5 Free accepts only explicitly public, non-confidential source material.");
   if (!acknowledged) throw new ConnectorError("provider_data_policy_acknowledgement_required", "The free-provider data policy must be explicitly acknowledged.");
   if (env && !String(env.OPENCODE_ZEN_API_KEY ?? "")) throw new ConnectorError("provider_secret_missing", "OPENCODE_ZEN_API_KEY is not configured.");
-  return { provider, mode: inferredMode, model, allowPaidFallback: false, dataSensitivity: "public", freeProviderDataPolicyAcknowledged: true };
+  return { provider, mode: inferredMode, model, allowPaidFallback: false, dataSensitivity: "public", freeProviderDataPolicyAcknowledged: true, maxBillableRequests: null, maxEstimatedSpendUsd: null };
 }
 
 export function openCodePolicyReceipt(selection: ResolvedClassifierSelection): OpenCodePolicyReceipt | null {
+  if (selection.provider === "opencode_go") {
+    return {
+      provider: "opencode_go", model: OPENCODE_GO_MODEL, dataSensitivity: "public",
+      freeProviderDataPolicyAcknowledged: selection.freeProviderDataPolicyAcknowledged,
+      policyVersion: "opencode-go-paid-2026-08",
+      maxBillableRequests: selection.maxBillableRequests as number,
+      maxEstimatedSpendUsd: selection.maxEstimatedSpendUsd as number,
+    };
+  }
   if (selection.provider !== "opencode_zen") return null;
   return {
     provider: "opencode_zen",
@@ -591,7 +641,13 @@ export type OpenCodeClassifierQueueMessage = {
   promptVersion: string;
   passNumber: 1 | 2;
   confidenceThreshold: number;
-  capability: OpenCodeCapabilityReceipt;
+  capability: AnyOpenCodeCapabilityReceipt;
+  provider?: "opencode_zen" | "opencode_go";
+  mode?: "opencode_chat_completions" | "opencode_go_chat_completions";
+  credentialBindingName?: "OPENCODE_GO_API_KEY" | "OPENCODE_ZEN_API_KEY";
+  spendLedgerKey?: string;
+  maxBillableRequests?: number;
+  maxEstimatedSpendUsd?: number;
   requestIdentity: string;
   resultKey: string;
   createdAt: string;
@@ -609,7 +665,7 @@ export async function prepareOpenCodeClassifierQueueMessage(input: {
   promptVersion: string;
   passNumber: 1 | 2;
   confidenceThreshold: number;
-  capability: OpenCodeCapabilityReceipt;
+  capability: AnyOpenCodeCapabilityReceipt;
   classifierMaxDimension?: number;
   classifierQuality?: number;
   highDetail?: boolean;
@@ -625,13 +681,15 @@ export async function prepareOpenCodeClassifierQueueMessage(input: {
     jobId: input.jobId,
     candidateId: input.candidate.stableVisualId,
     classifierArtifactSha256: derivative?.sha256 ?? input.candidate.embeddedSha256 ?? null,
-    provider: OPENCODE_ZEN_PROVIDER,
+    provider: input.capability.provider,
+    mode: "mode" in input.capability ? input.capability.mode : "opencode_chat_completions",
+    credentialBindingName: "credentialBindingName" in input.capability ? input.capability.credentialBindingName : "OPENCODE_ZEN_API_KEY",
     model: input.model,
     rubricVersion: input.rubricVersion,
     promptVersion: input.promptVersion,
     passNumber: input.passNumber,
   }));
-  const resultKey = `visual-compiler/jobs/${input.jobId}/opencode/results/${input.candidate.stableVisualId}/pass-${input.passNumber}/${requestIdentity}.json`;
+  const resultKey = `visual-compiler/jobs/${input.jobId}/${input.capability.provider === "opencode_go" ? "opencode-go" : "opencode"}/results/${input.candidate.stableVisualId}/pass-${input.passNumber}/${requestIdentity}.json`;
   const existing = await input.env.ARTIFACTS.get(resultKey);
   if (existing) {
     const cached = JSON.parse(await existing.text()) as OpenCodeClassifiedCandidate;
@@ -650,6 +708,12 @@ export async function prepareOpenCodeClassifierQueueMessage(input: {
         passNumber: input.passNumber,
         confidenceThreshold: input.confidenceThreshold,
         capability: input.capability,
+        provider: input.capability.provider,
+        mode: input.capability.provider === "opencode_go" ? OPENCODE_GO_MODE : "opencode_chat_completions",
+        credentialBindingName: input.capability.provider === "opencode_go" ? input.capability.credentialBindingName : "OPENCODE_ZEN_API_KEY",
+        spendLedgerKey: input.capability.provider === "opencode_go" ? input.capability.spendLedgerKey : undefined,
+        maxBillableRequests: input.capability.provider === "opencode_go" ? input.capability.maxBillableRequests : undefined,
+        maxEstimatedSpendUsd: input.capability.provider === "opencode_go" ? input.capability.maxEstimatedSpendUsd : undefined,
         requestIdentity,
         resultKey,
         createdAt: nowIso(),
@@ -695,8 +759,10 @@ export async function processOpenCodeClassifierQueueMessage(
   }
   const existing = await readOpenCodeClassifierQueueResult(env, message.resultKey);
   if (existing) return { ...existing, idempotentReplay: true };
-  const apiKey = String(env.OPENCODE_ZEN_API_KEY ?? "");
-  if (!apiKey) throw new ConnectorError("provider_secret_missing", "OPENCODE_ZEN_API_KEY is not configured.");
+  const isGo = message.provider === "opencode_go" || message.capability.provider === "opencode_go";
+  const apiKey = isGo ? "" : String(env.OPENCODE_ZEN_API_KEY ?? "");
+  if (!isGo && !apiKey) throw new ConnectorError("provider_secret_missing", "OPENCODE_ZEN_API_KEY is not configured.");
+  if (isGo && !message.spendLedgerKey) throw new ConnectorError("provider_spend_ledger_missing", "OpenCode Go classification requires an immutable spend ledger.");
 
   const content: Record<string, unknown>[] = [{ type: "text", text: message.prompt }];
   if (message.classifierArtifact) {
@@ -731,15 +797,29 @@ export async function processOpenCodeClassifierQueueMessage(
         text: `Your previous response failed validation: ${validationErrors.join("; ")}. Return a corrected JSON object only, preserving the visual meaning.`,
       });
     }
-    const response = await requestOpenCodeZen(apiKey, request, { fetchImpl: options.fetchImpl, maximumAttempts: 4 });
-    aggregateRetries += response.retries;
-    aggregateRateLimits += response.rateLimitEvents;
+    const response = isGo
+      ? await requestOpenCodeGo({
+          env,
+          credentialBindingName: message.credentialBindingName ?? selectOpenCodeGoCredentialBinding(env),
+          spendLedgerKey: String(message.spendLedgerKey ?? ""),
+          body: request,
+          context: `candidate:${message.candidate.stableVisualId}:pass:${message.passNumber}:correction:${correction + 1}`,
+          requestIdentity: message.requestIdentity,
+          fetchImpl: options.fetchImpl,
+        })
+      : await requestOpenCodeZen(apiKey, request, { fetchImpl: options.fetchImpl, maximumAttempts: 4 });
+    aggregateRetries += "retries" in response ? response.retries : 0;
+    aggregateRateLimits += "rateLimitEvents" in response ? response.rateLimitEvents : 0;
     aggregateLatency += response.latencyMilliseconds;
-    const usage = safeUsage(response.body);
+    const usage = isGo
+      ? { inputTokens: response.usage.inputTokens ?? 0, outputTokens: response.usage.outputTokens ?? 0, totalTokens: response.usage.totalTokens ?? 0, cachedReadTokens: response.usage.cachedReadTokens ?? 0, usageReported: response.usage.reported }
+      : safeUsage(response.body);
     aggregateUsage = {
       inputTokens: aggregateUsage.inputTokens + usage.inputTokens,
       outputTokens: aggregateUsage.outputTokens + usage.outputTokens,
       totalTokens: aggregateUsage.totalTokens + usage.totalTokens,
+      cachedReadTokens: (aggregateUsage.cachedReadTokens ?? 0) + (usage.cachedReadTokens ?? 0),
+      usageReported: (aggregateUsage.usageReported ?? true) && (usage.usageReported ?? true),
     };
     rawDiagnostic = chatContent(response.body).slice(0, 8000);
     let parsed: unknown;
@@ -761,10 +841,10 @@ export async function processOpenCodeClassifierQueueMessage(
   } else {
     proposal = invalidProposal(message.deterministic, message.passNumber === 2, validationErrors.join("; ") || "persistent schema failure");
     reviewRoutingReason = "persistent_schema_failure";
-    const diagnosticKey = `visual-compiler/jobs/${message.jobId}/opencode/diagnostics/${message.candidate.stableVisualId}/pass-${message.passNumber}/${message.requestIdentity}.json`;
+    const diagnosticKey = `visual-compiler/jobs/${message.jobId}/${isGo ? "opencode-go" : "opencode"}/diagnostics/${message.candidate.stableVisualId}/pass-${message.passNumber}/${message.requestIdentity}.json`;
     await putArtifact(env, diagnosticKey, JSON.stringify({
       version: 1,
-      provider: OPENCODE_ZEN_PROVIDER,
+      provider: isGo ? OPENCODE_GO_PROVIDER : OPENCODE_ZEN_PROVIDER,
       model: message.model,
       candidateId: message.candidate.stableVisualId,
       passNumber: message.passNumber,
@@ -772,7 +852,7 @@ export async function processOpenCodeClassifierQueueMessage(
       boundedRawResponse: rawDiagnostic,
       createdAt: nowIso(),
     }, null, 2), "application/json; charset=utf-8", {
-      provider: OPENCODE_ZEN_PROVIDER,
+      provider: isGo ? OPENCODE_GO_PROVIDER : OPENCODE_ZEN_PROVIDER,
       candidateId: message.candidate.stableVisualId,
       passNumber: String(message.passNumber),
     });
@@ -791,9 +871,11 @@ export async function processOpenCodeClassifierQueueMessage(
     endpointFamily: "openai_compatible_chat_completions",
     passNumber: message.passNumber,
     reviewRoutingReason,
+    provider: isGo ? "opencode_go" : "opencode_zen",
+    accounting: isGo ? await import("./visual-catalogue-opencode-go").then((module) => module.readOpenCodeGoSpendLedger(env, String(message.spendLedgerKey))) : null,
   };
   await putArtifact(env, message.resultKey, JSON.stringify(result, null, 2), "application/json; charset=utf-8", {
-    provider: OPENCODE_ZEN_PROVIDER,
+    provider: isGo ? OPENCODE_GO_PROVIDER : OPENCODE_ZEN_PROVIDER,
     model: message.model,
     candidateId: message.candidate.stableVisualId,
     requestIdentity: message.requestIdentity,

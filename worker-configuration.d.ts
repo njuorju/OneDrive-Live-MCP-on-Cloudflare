@@ -15,6 +15,7 @@ interface Env {
   COOKIE_ENCRYPTION_KEY: string;
   OPENAI_API_KEY?: string;
   OPENCODE_ZEN_API_KEY?: string;
+  OPENCODE_GO_API_KEY?: string;
   OWNER_MICROSOFT_ID: string;
   CONNECTOR_NAME: string;
   ONEDRIVE_ROOT: string;

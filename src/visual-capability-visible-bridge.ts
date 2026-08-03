@@ -58,10 +58,12 @@ export function registerODLReq021VisibleBridge(server: McpServer): void {
       const result = await originalStartVisual(input, extra);
       if (resultErrorCode(result) !== "provider_capability_receipt_required") return result;
       const capabilityResult = await hiddenStartCapability({
-        provider: "opencode_zen",
-        mode: "opencode_chat_completions",
-        model: "mimo-v2.5-free",
+        provider: input.classifierProvider ?? "opencode_zen",
+        mode: input.classifierMode ?? "opencode_chat_completions",
+        model: input.model ?? "mimo-v2.5-free",
         forceFresh: true,
+        maxBillableRequests: input.maxBillableRequests,
+        maxEstimatedSpendUsd: input.maxEstimatedSpendUsd,
       }, extra);
       return addCompatibilityRoute(capabilityResult);
     };
