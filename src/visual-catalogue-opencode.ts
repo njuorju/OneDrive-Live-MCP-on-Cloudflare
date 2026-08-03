@@ -811,7 +811,7 @@ export async function processOpenCodeClassifierQueueMessage(
     aggregateRetries += "retries" in response ? response.retries : 0;
     aggregateRateLimits += "rateLimitEvents" in response ? response.rateLimitEvents : 0;
     aggregateLatency += response.latencyMilliseconds;
-    const usage = isGo
+    const usage: OpenCodeUsage = "usage" in response
       ? { inputTokens: response.usage.inputTokens ?? 0, outputTokens: response.usage.outputTokens ?? 0, totalTokens: response.usage.totalTokens ?? 0, cachedReadTokens: response.usage.cachedReadTokens ?? 0, usageReported: response.usage.reported }
       : safeUsage(response.body);
     aggregateUsage = {
