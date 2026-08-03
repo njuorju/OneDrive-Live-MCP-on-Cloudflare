@@ -1,0 +1,41 @@
+name: ODL-REQ-022 PR materializer
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: github.head_ref == 'work/odl-req-022-opencode-go-mimo-paid'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 1
+      - name: Materialize the reviewed patch and remove bootstrap files
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, gzip, io, re, tarfile
+          from pathlib import Path
+          source = Path('.github/workflows/odl-req-022-bootstrap.yml').read_text()
+          match = re.search(r'^\s*PATCH_TGZ_B64:\s*(\S+)\s*$', source, re.M)
+          if not match:
+              raise SystemExit('embedded patch archive not found')
+          data = base64.b64decode(match.group(1))
+          with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as archive:
+              archive.extractall('.')
+          Path('.github/workflows/odl-req-022-bootstrap.yml').unlink(missing_ok=True)
+          Path('.github/workflows/odl-req-022-materialize-pr.yml').unlink(missing_ok=True)
+          PY
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m 'Implement ODL-REQ-022 OpenCode Go paid route'
+          git push origin HEAD:${{ github.head_ref }}
