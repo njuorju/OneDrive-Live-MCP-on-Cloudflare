@@ -24,7 +24,7 @@ jobs:
         with:
           node-version: 22
       - name: Apply exact bounded patch
-        run: node scripts/apply-odl-req-020-probe-fix.mjs
+        run: node scripts/apply-odl-req-020-probe-fix-v2.mjs
       - name: Commit generated source and regression test
         run: |
           git config user.name github-actions[bot]
