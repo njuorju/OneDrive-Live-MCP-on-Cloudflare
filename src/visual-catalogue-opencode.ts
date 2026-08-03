@@ -1,6 +1,7 @@
 import { ConnectorError } from "./errors";
 import { bytesToBase64, sha256Bytes } from "./integrated-core";
 import { canonicalJson, getArtifact, nowIso, putArtifact, sha256HexUtf8 } from "./paid-core";
+import { syntheticVisionProbeJpegBytes } from "./visual-catalogue-probe-fixture";
 import {
   PREPARED_OUTCOMES,
   boundedConfidence,
@@ -265,21 +266,8 @@ export async function requestOpenCodeZen(
   throw new ConnectorError("provider_retry_exhausted", "OpenCode Zen remained unavailable after bounded retries.");
 }
 
-async function syntheticVisionProbeJpeg(env: Env): Promise<Uint8Array> {
-  const svg = new TextEncoder().encode([
-    '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">',
-    '<rect width="640" height="360" fill="white"/>',
-    '<rect x="70" y="70" width="120" height="120" fill="#0066ff"/>',
-    '<circle cx="360" cy="130" r="62" fill="#e21b23"/>',
-    '<text x="70" y="285" font-family="Arial, sans-serif" font-size="34" font-weight="700" fill="black">UCA VISION PROBE 2047</text>',
-    '</svg>',
-  ].join(""));
-  const output = await (env.IMAGES as any)
-    .input(new Blob([svg.slice().buffer], { type: "image/svg+xml" }).stream())
-    .output({ format: "image/jpeg", quality: 90, anim: false });
-  const response = output.response();
-  if (!response.ok) throw new ConnectorError("provider_probe_image_failed", "The synthetic vision probe image could not be generated.");
-  return new Uint8Array(await response.arrayBuffer());
+async function syntheticVisionProbeJpeg(_env: Env): Promise<Uint8Array> {
+  return syntheticVisionProbeJpegBytes();
 }
 
 function probePassed(content: string): { passed: boolean; exactTextObserved: boolean; blueSquareObserved: boolean; redCircleObserved: boolean } {
