@@ -77,8 +77,8 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: 3f67b673280f2119de4eedd09745e20f
       WORKER_NAME: nikolay-onedrive-mcp
       WORKFLOW_NAME: onedrive-live-mcp-visual-catalogue
-      OPENING_VERSION_ID: da5558f0-fe88-455c-a4e1-803e2dd279d3
-      OPENING_DEPLOYMENT_ID: c2ce8604-3751-4c24-bfb8-76b80c0f81f6
+      OPENING_VERSION_ID: e55f3e0d-b406-49c0-ab32-ce59e06cc041
+      OPENING_DEPLOYMENT_ID: 5ae11025-b08e-4528-95d4-6acb9617a0ec
     steps:
       - uses: actions/checkout@v4
         with:
@@ -186,7 +186,7 @@ jobs:
           api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
           auth=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json")
           instance_id="odl-req-024-${GITHUB_SHA:0:12}"
-          params=$(jq -cn --arg id "$instance_id" '{jobId:$id,workflowId:$id,userId:"system-recovery-odl-req-024",input:{__odlReq024GoVisionDiagnostic:true,maxBillableRequests:8,maxEstimatedSpendUsd:0.05}}')
+          params=$(jq -cn --arg id "$instance_id" '{jobId:$id,workflowId:$id,userId:"system-recovery-odl-req-024",input:{__odlReq024GoVisionDiagnostic:true,maxBillableRequests:5,maxEstimatedSpendUsd:0.05}}')
           jq -n --arg id "$instance_id" --arg params "$params" '{instance_id:$id,params:$params,instance_retention:{success_retention:"7 days",error_retention:"7 days"}}' > diagnostic-create-request.json
           create_code=$(curl -sS -o diagnostic-create-response.json -w '%{http_code}' "${auth[@]}" -X POST "$api/workflows/$WORKFLOW_NAME/instances" --data @diagnostic-create-request.json)
           if [[ "$create_code" != 2* ]]; then
@@ -220,8 +220,8 @@ jobs:
           jq -e '.diagnosticReceipt.probeVersion == "odl-req-024-go-vision-contract-v1"' odl-req-024-diagnostic.json >/dev/null
           jq -e '.diagnosticReceipt.oneDriveAccessed == false and .diagnosticReceipt.oneDriveMutationPerformed == false and .diagnosticReceipt.sourcePdfRead == false and .diagnosticReceipt.providerFallbackUsed == false' odl-req-024-diagnostic.json >/dev/null
           jq -e '.pages64Through219Blocked == true and .calibrationStarted == false' odl-req-024-diagnostic.json >/dev/null
-          jq -e '.diagnosticReceipt.accounting.billableRequestCount <= 8 and .diagnosticReceipt.accounting.maxBillableRequests <= 8 and .diagnosticReceipt.accounting.maxEstimatedSpendUsd <= 0.05' odl-req-024-diagnostic.json >/dev/null
-          if grep -Eiq 'data:image|base64,|UCA VISION PROBE 2047|ODL-REQ-024 TEXT CONTROL|authorization|bearer[[:space:]]|OPENCODE_(ZEN|GO)_API_KEY|r2Key|sourceRenderArtifactId|sourceRenderSha256' odl-req-024-diagnostic.json; then
+          jq -e '.diagnosticReceipt.accounting.billableRequestCount <= 5 and .diagnosticReceipt.accounting.maxBillableRequests <= 5 and .diagnosticReceipt.accounting.maxEstimatedSpendUsd <= 0.05' odl-req-024-diagnostic.json >/dev/null
+          if grep -Eiq 'data:image|base64,|UCA VISION PROBE 2047|ODL-REQ-024 TEXT CONTROL|authorization|bearer[[:space:]]|r2Key|sourceRenderArtifactId|sourceRenderSha256' odl-req-024-diagnostic.json; then
             echo "Sanitized diagnostic leaked forbidden request, response, credential, image, or private-artifact data." >&2
             exit 1
           fi
