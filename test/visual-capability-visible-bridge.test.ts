@@ -70,6 +70,28 @@ test("visible visual-job status tool falls back to the capability status handler
   assert.equal(result.structuredContent.compatibilityStatusTool, "get_visual_catalogue_job");
 });
 
+test("visible status tool expands a generic capability coordinator record", async () => {
+  let capabilityReads = 0;
+  const server = serverWith({
+    get_visual_catalogue_job: async () => success({
+      jobId: "00000000-0000-4000-8000-000000000025",
+      toolName: "start_visual_classifier_capability_job",
+      status: "running",
+      stage: "retry_wait_text_structured_output_1",
+    }),
+    get_visual_classifier_capability_job: async (input) => {
+      capabilityReads += 1;
+      return success({ jobId: input.jobId, status: "retry_wait", currentStage: "text_structured_output", attemptHistorySummary: [{ httpStatus: 429, responseClass: "rate_limited" }] });
+    },
+  });
+  registerODLReq021VisibleBridge(server);
+  const result = await server._registeredTools.get_visual_catalogue_job.handler({ jobId: "00000000-0000-4000-8000-000000000025" });
+  assert.equal(capabilityReads, 1);
+  assert.equal(result.structuredContent.currentStage, "text_structured_output");
+  assert.equal(result.structuredContent.attemptHistorySummary[0].httpStatus, 429);
+  assert.equal(result.structuredContent.compatibilityStatusTool, "get_visual_catalogue_job");
+});
+
 test("visible status tool preserves unrelated failures", async () => {
   let capabilityReads = 0;
   const server = serverWith({
