@@ -780,6 +780,7 @@ export async function processOpenCodeClassifierQueueMessage(
     { role: "user", content },
   ];
   const request: Record<string, unknown> = { model: message.model, messages, max_tokens: 1400, temperature: 0 };
+  if (isGo) request.stream = false;
   if (message.capability.structuredOutput.responseFormatAccepted) request.response_format = { type: "json_object" };
 
   let aggregateRetries = 0;

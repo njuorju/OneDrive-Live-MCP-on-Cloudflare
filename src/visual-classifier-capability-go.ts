@@ -23,6 +23,7 @@ import {
 } from "./visual-classifier-capability-common";
 import {
   ODL_REQ_022_GO_PROBE_VERSION,
+  ODL_REQ_024_GO_PROBE_VERSION,
   OPENCODE_GO_CHAT_ENDPOINT,
   OPENCODE_GO_ENDPOINT_FAMILY,
   OPENCODE_GO_MODE,
@@ -896,6 +897,11 @@ export async function getOpenCodeGoCapabilityJob(context: HotfixContext, jobId: 
 export async function readSuccessfulOpenCodeGoCapabilityReceipt(env: Env, expected?: { maxBillableRequests?: number; maxEstimatedSpendUsd?: number }): Promise<OpenCodeGoCapabilityReceipt | null> {
   const credentialBindingName = selectOpenCodeGoCredentialBinding(env);
   const budgets = validateOpenCodeGoBudgets(expected?.maxBillableRequests, expected?.maxEstimatedSpendUsd);
+  const currentCache = await import("./visual-catalogue-opencode-go").then((module) => module.readOpenCodeGoCapabilityCache(env));
+  if (currentCache
+    && currentCache.probeVersion === ODL_REQ_024_GO_PROBE_VERSION
+    && currentCache.maxBillableRequests === budgets.maxBillableRequests
+    && currentCache.maxEstimatedSpendUsd === budgets.maxEstimatedSpendUsd) return currentCache;
   const index = await readJsonIfPresent<CapabilityIndex>(env, indexKey(credentialBindingName, budgets.maxBillableRequests, budgets.maxEstimatedSpendUsd));
   if (!index) return null;
   const manifest = await readJsonIfPresent<OpenCodeGoCapabilityJobManifest>(env, manifestKey(index.jobId, credentialBindingName));

@@ -13,6 +13,7 @@ import {
   OPENCODE_GO_MODEL,
   OPENCODE_GO_MODELS_ENDPOINT,
   OPENCODE_GO_PROVIDER,
+  ODL_REQ_024_GO_PROBE_VERSION,
   assertOpenCodeGoBudgetAvailable,
   initializeOpenCodeGoSpendLedger,
   openCodeGoCredentialValue,
@@ -27,7 +28,6 @@ import {
   type OpenCodeGoUsage,
 } from "./visual-catalogue-opencode-go";
 
-export const ODL_REQ_024_GO_PROBE_VERSION = "odl-req-024-go-vision-contract-v1" as const;
 export const ODL_REQ_024_DIAGNOSTIC_MAX_REQUESTS = 8;
 export const ODL_REQ_024_DIAGNOSTIC_MAX_SPEND_USD = 0.05;
 export const ODL_REQ_024_CAPABILITY_MAX_REQUESTS = 75;
@@ -635,19 +635,15 @@ export async function runOpenCodeGoVisionDiagnosticWorkflow(
 
   const diagnostics: GoDiagnosticProbeReceipt[] = [];
   const doProbe = async (probe: GoDiagnosticProbeName, attempt: number, retryReason: string | null = null) => {
-    const result = await step.do(
-      `ODL-REQ-024 ${probe} attempt ${attempt}`,
-      { retries: { limit: 0, delay: "1 second", backoff: "constant" }, timeout: "2 minutes" },
-      async () => runProbe({
-        env,
-        probe,
-        attempt,
-        fixture,
-        credentialBindingName,
-        spendLedgerKey: diagnosticLedger.key,
-        retryReason,
-      }),
-    );
+    const result = await runProbe({
+      env,
+      probe,
+      attempt,
+      fixture,
+      credentialBindingName,
+      spendLedgerKey: diagnosticLedger.key,
+      retryReason,
+    });
     diagnostics.push(result.receipt);
     return result;
   };
@@ -750,7 +746,7 @@ export async function runOpenCodeGoVisionDiagnosticWorkflow(
     providerFallbackUsed: false,
   };
 
-  let capabilityReceipt: Record<string, unknown> | null = null;
+  let capabilityReceipt: ({ status: "passed" | "failed" } & Record<string, unknown>) | null = null;
   if (successfulCanonical && structuredVision?.receipt.structuredFixtureMatched) {
     const capabilityLedger = await initializeOpenCodeGoSpendLedger(env, {
       scopeId: `${jobId}-capability`,
@@ -763,19 +759,15 @@ export async function runOpenCodeGoVisionDiagnosticWorkflow(
     const capabilityProbe = async (probe: GoDiagnosticProbeName, maximumAttempts: number) => {
       let last: ProbeInternal | null = null;
       for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
-        const result = await step.do(
-          `ODL-REQ-024 capability ${probe} attempt ${attempt}`,
-          { retries: { limit: 0, delay: "1 second", backoff: "constant" }, timeout: "2 minutes" },
-          async () => runProbe({
-            env,
-            probe,
-            attempt,
-            fixture,
-            credentialBindingName,
-            spendLedgerKey: capabilityLedger.key,
-            retryReason: attempt > 1 ? "bounded_capability_retry" : null,
-          }),
-        );
+        const result = await runProbe({
+          env,
+          probe,
+          attempt,
+          fixture,
+          credentialBindingName,
+          spendLedgerKey: capabilityLedger.key,
+          retryReason: attempt > 1 ? "bounded_capability_retry" : null,
+        });
         capabilityAttempts.push(result.receipt);
         last = result;
         if (result.receipt.usableFinalContent) return result;
