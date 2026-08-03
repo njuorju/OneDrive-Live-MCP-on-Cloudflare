@@ -8,18 +8,14 @@ import {
   type StoredEnvelope,
 } from "./auth-store";
 import { processIntegrityCoordination, type CoordinationRequest } from "./integrity-coordination";
+import { renderCacheSizeAccepted } from "./render-cache-policy";
 
 type RenderCacheEntry = {
   bytes: ArrayBuffer;
   expiresAt: number;
 };
 
-export const RENDER_CACHE_MAX_BYTES = 32 * 1024 * 1024;
 const RENDER_ID_PATTERN = /^[0-9a-zA-Z-]{1,200}$/;
-
-export function renderCacheSizeAccepted(byteLength: number): boolean {
-  return Number.isInteger(byteLength) && byteLength >= 5 && byteLength <= RENDER_CACHE_MAX_BYTES;
-}
 
 /**
  * Strongly consistent OAuth/session and integrated-workflow storage.
