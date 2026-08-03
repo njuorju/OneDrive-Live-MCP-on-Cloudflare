@@ -1,0 +1,34 @@
+name: ODL-REQ-020 probe metadata
+
+on:
+  push:
+    branches:
+      - fix/odl-req-020-synthetic-vision-probe
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  update-metadata:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/odl-req-020-synthetic-vision-probe
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Compute exact committed fixture metadata
+        run: node scripts/fix-odl-req-020-probe-metadata.mjs
+      - name: Commit exact metadata
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/visual-catalogue-probe-fixture.ts
+          git commit -m "test: record exact synthetic probe fixture metadata"
+          git push origin HEAD:fix/odl-req-020-synthetic-vision-probe
