@@ -77,8 +77,8 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: 3f67b673280f2119de4eedd09745e20f
       WORKER_NAME: nikolay-onedrive-mcp
       WORKFLOW_NAME: onedrive-live-mcp-visual-catalogue
-      OPENING_VERSION_ID: 02c982a0-a751-4caf-8130-7e35b44f76c9
-      OPENING_DEPLOYMENT_ID: d287a789-722c-4e03-b47d-85653b805b44
+      OPENING_VERSION_ID: e06f333e-3343-433f-b876-4968e32d2f18
+      OPENING_DEPLOYMENT_ID: 987e6b2d-1ad0-453f-a0de-6f17513e2223
     steps:
       - uses: actions/checkout@v4
         with:
@@ -227,6 +227,7 @@ jobs:
           fi
           jq '{classification,selectedBranch:.diagnosticReceipt.selectedBranch,blockerClassification:.diagnosticReceipt.blockerClassification,capabilityStatus:(.capabilityReceipt.status // null),calibrationAuthorized,pages64Through219Blocked}' odl-req-024-diagnostic.json
       - name: Upload sanitized deployment and provider evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: odl-req-024-deployment-evidence
@@ -234,9 +235,10 @@ jobs:
             deployment.log
             deployment-evidence.json
             odl-req-024-diagnostic.json
+            odl-req-024-workflow-failure.json
             pre-bindings.json
             post-bindings.json
             pre-secret-bindings.json
             post-secret-bindings.json
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 7
