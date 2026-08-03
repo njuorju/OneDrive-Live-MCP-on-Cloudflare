@@ -49,18 +49,25 @@ test("production runbook requires forward recovery and plugin refresh", () => {
   assert.match(runbook, /Never create replacement production resources/);
 });
 
-test("ODL-REQ-023 deployment is exact-main, post-CI, leased, and non-interactive", () => {
+test("ODL-REQ-024 deployment is exact-main, post-CI, leased, and runs only the synthetic diagnostic", () => {
   const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
   assert.match(workflow, /deploy-production:/);
   assert.match(workflow, /if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/);
   assert.match(workflow, /needs: validate/);
   assert.match(workflow, /test "\$\(git rev-parse HEAD\)" = "\$GITHUB_SHA"/);
-  assert.match(workflow, /OPENING_VERSION_ID: 8b57490f-6720-4323-8542-5ba7716dafe0/);
-  assert.match(workflow, /OPENING_DEPLOYMENT_ID: 0ba7d0c4-e694-4681-8e5a-f90917e0a43b/);
+  assert.match(workflow, /OPENING_VERSION_ID: 02c982a0-a751-4caf-8130-7e35b44f76c9/);
+  assert.match(workflow, /OPENING_DEPLOYMENT_ID: d287a789-722c-4e03-b47d-85653b805b44/);
   assert.match(workflow, /npx wrangler deploy --config wrangler\.production\.json/);
+  assert.match(workflow, /odl-req-024-go-vision-contract-v1/);
+  assert.match(workflow, /__odlReq024GoVisionDiagnostic/);
+  assert.match(workflow, /maxBillableRequests.*8/);
+  assert.match(workflow, /maxEstimatedSpendUsd.*0\.05/);
+  assert.match(workflow, /oneDriveAccessed == false/);
+  assert.match(workflow, /sourcePdfRead == false/);
+  assert.match(workflow, /pages64Through219Blocked == true/);
   assert.match(workflow, /\.result\.deployments\[0\]\.versions\[0\]\.percentage==100/);
   assert.match(workflow, /cmp pre-bindings\.json post-bindings\.json/);
   assert.match(workflow, /cmp pre-secret-bindings\.json post-secret-bindings\.json/);
   assert.match(workflow, /healthHttp200:true/);
-  assert.doesNotMatch(workflow, /workflow_dispatch|deployment-only|transport branch/i);
+  assert.doesNotMatch(workflow, /start_visual_catalogue_job|sourceItemId|pageStart|pageEnd|workflow_dispatch|deployment-only|transport branch/i);
 });

@@ -71,13 +71,14 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: validate
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 45
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: 3f67b673280f2119de4eedd09745e20f
       WORKER_NAME: nikolay-onedrive-mcp
-      OPENING_VERSION_ID: 8b57490f-6720-4323-8542-5ba7716dafe0
-      OPENING_DEPLOYMENT_ID: 0ba7d0c4-e694-4681-8e5a-f90917e0a43b
+      WORKFLOW_NAME: onedrive-live-mcp-visual-catalogue
+      OPENING_VERSION_ID: 02c982a0-a751-4caf-8130-7e35b44f76c9
+      OPENING_DEPLOYMENT_ID: d287a789-722c-4e03-b47d-85653b805b44
     steps:
       - uses: actions/checkout@v4
         with:
@@ -153,7 +154,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          npx wrangler deploy --config wrangler.production.json --name "$WORKER_NAME" --message "Deploy ODL-REQ-023 exact main $GITHUB_SHA" --tag "odl-req-023-${GITHUB_SHA:0:12}" 2>&1 | tee deployment.log
+          npx wrangler deploy --config wrangler.production.json --name "$WORKER_NAME" --message "Deploy ODL-REQ-024 exact main $GITHUB_SHA" --tag "odl-req-024-${GITHUB_SHA:0:12}" 2>&1 | tee deployment.log
       - name: Verify deployment, traffic, bindings, secrets, and health
         shell: bash
         run: |
@@ -178,13 +179,61 @@ jobs:
           go_secret_present=$(jq 'any(.[]; .name == "OPENCODE_GO_API_KEY" and .type == "secret_text")' post-secret-bindings.json)
           jq -n --arg sourceCommit "$GITHUB_SHA" --arg deploymentId "$deployment_id" --arg versionId "$version_id" --argjson versionNumber "$version_number" --argjson goSecretPresent "$go_secret_present" '{sourceCommit:$sourceCommit,deploymentId:$deploymentId,versionId:$versionId,versionNumber:$versionNumber,trafficPercent:100,bindingsUnchanged:true,secretBindingsUnchanged:true,opencodeGoSecretPresent:$goSecretPresent,healthHttp200:true}' > deployment-evidence.json
           cat deployment-evidence.json
-      - name: Upload sanitized deployment evidence
+      - name: Run bounded synthetic OpenCode Go diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
+          auth=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json")
+          instance_id="odl-req-024-${GITHUB_SHA:0:12}"
+          params=$(jq -cn --arg id "$instance_id" '{jobId:$id,workflowId:$id,userId:"system-recovery-odl-req-024",input:{__odlReq024GoVisionDiagnostic:true,maxBillableRequests:8,maxEstimatedSpendUsd:0.05}}')
+          jq -n --arg id "$instance_id" --arg params "$params" '{instance_id:$id,params:$params,instance_retention:{success_retention:"7 days",error_retention:"7 days"}}' > diagnostic-create-request.json
+          create_code=$(curl -sS -o diagnostic-create-response.json -w '%{http_code}' "${auth[@]}" -X POST "$api/workflows/$WORKFLOW_NAME/instances" --data @diagnostic-create-request.json)
+          if [[ "$create_code" != 2* ]]; then
+            curl -fsS "${auth[@]}" "$api/workflows/$WORKFLOW_NAME/instances/$instance_id?simple=false" > diagnostic-existing.json
+            jq -e '.success == true' diagnostic-existing.json >/dev/null
+          else
+            jq -e '.success == true and (.result.status == "queued" or .result.status == "running")' diagnostic-create-response.json >/dev/null
+          fi
+          rm -f odl-req-024-diagnostic.json
+          for _ in $(seq 1 180); do
+            curl -fsS "${auth[@]}" "$api/workflows/$WORKFLOW_NAME/instances/$instance_id?simple=false" > diagnostic-instance.json
+            status=$(jq -r '.result.status // "unknown"' diagnostic-instance.json)
+            case "$status" in
+              complete)
+                jq -e '.result.output != null' diagnostic-instance.json >/dev/null
+                if jq -e '.result.output | type == "string"' diagnostic-instance.json >/dev/null; then
+                  jq -r '.result.output' diagnostic-instance.json | jq '.' > odl-req-024-diagnostic.json
+                else
+                  jq '.result.output' diagnostic-instance.json > odl-req-024-diagnostic.json
+                fi
+                break
+                ;;
+              errored|terminated)
+                jq '{success,result:{id:.result.id,status:.result.status,error:.result.error}}' diagnostic-instance.json > odl-req-024-workflow-failure.json
+                exit 1
+                ;;
+            esac
+            sleep 10
+          done
+          test -s odl-req-024-diagnostic.json
+          jq -e '.diagnosticReceipt.probeVersion == "odl-req-024-go-vision-contract-v1"' odl-req-024-diagnostic.json >/dev/null
+          jq -e '.diagnosticReceipt.oneDriveAccessed == false and .diagnosticReceipt.oneDriveMutationPerformed == false and .diagnosticReceipt.sourcePdfRead == false and .diagnosticReceipt.providerFallbackUsed == false' odl-req-024-diagnostic.json >/dev/null
+          jq -e '.pages64Through219Blocked == true and .calibrationStarted == false' odl-req-024-diagnostic.json >/dev/null
+          jq -e '.diagnosticReceipt.accounting.billableRequestCount <= 8 and .diagnosticReceipt.accounting.maxBillableRequests <= 8 and .diagnosticReceipt.accounting.maxEstimatedSpendUsd <= 0.05' odl-req-024-diagnostic.json >/dev/null
+          if grep -Eiq 'data:image|base64,|UCA VISION PROBE 2047|ODL-REQ-024 TEXT CONTROL|authorization|bearer[[:space:]]|OPENCODE_(ZEN|GO)_API_KEY|r2Key|sourceRenderArtifactId|sourceRenderSha256' odl-req-024-diagnostic.json; then
+            echo "Sanitized diagnostic leaked forbidden request, response, credential, image, or private-artifact data." >&2
+            exit 1
+          fi
+          jq '{classification,selectedBranch:.diagnosticReceipt.selectedBranch,blockerClassification:.diagnosticReceipt.blockerClassification,capabilityStatus:(.capabilityReceipt.status // null),calibrationAuthorized,pages64Through219Blocked}' odl-req-024-diagnostic.json
+      - name: Upload sanitized deployment and provider evidence
         uses: actions/upload-artifact@v4
         with:
-          name: odl-req-023-deployment-evidence
+          name: odl-req-024-deployment-evidence
           path: |
             deployment.log
             deployment-evidence.json
+            odl-req-024-diagnostic.json
             pre-bindings.json
             post-bindings.json
             pre-secret-bindings.json

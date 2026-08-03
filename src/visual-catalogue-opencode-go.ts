@@ -8,6 +8,7 @@ export const OPENCODE_GO_MODELS_ENDPOINT = "https://opencode.ai/zen/go/v1/models
 export const OPENCODE_GO_CHAT_ENDPOINT = "https://opencode.ai/zen/go/v1/chat/completions";
 export const OPENCODE_GO_ENDPOINT_FAMILY = "openai_compatible_chat_completions" as const;
 export const ODL_REQ_022_GO_PROBE_VERSION = "odl-req-022-go-capability-v1" as const;
+export const ODL_REQ_024_GO_PROBE_VERSION = "odl-req-024-go-vision-contract-v1" as const;
 export const OPENCODE_GO_CAPABILITY_CACHE_SECONDS = 60 * 60;
 export const OPENCODE_GO_FALLBACK_PRICING_VERSION = "mimo-v2.5-fallback-2026-08-03";
 export const OPENCODE_GO_MAX_BILLABLE_REQUESTS = 75;
@@ -80,7 +81,7 @@ export type OpenCodeGoCapabilityReceipt = {
   mode: typeof OPENCODE_GO_MODE;
   model: typeof OPENCODE_GO_MODEL;
   endpointFamily: typeof OPENCODE_GO_ENDPOINT_FAMILY;
-  probeVersion: typeof ODL_REQ_022_GO_PROBE_VERSION;
+  probeVersion: typeof ODL_REQ_022_GO_PROBE_VERSION | typeof ODL_REQ_024_GO_PROBE_VERSION;
   credentialBindingName: OpenCodeGoCredentialBindingName;
   discoveryTimestamp: string;
   discoveryCacheHit: boolean;
@@ -123,7 +124,12 @@ export type OpenCodeGoCapabilityReceipt = {
   costClassification: "provider_metered_or_fallback_estimate" | "usage_not_reported";
 };
 
-const CAPABILITY_CACHE_KEY = `visual-compiler/provider-cache/opencode-go/${OPENCODE_GO_MODEL}/${ODL_REQ_022_GO_PROBE_VERSION}/capabilities.json`;
+const CAPABILITY_CACHE_KEY_V1 = `visual-compiler/provider-cache/opencode-go/${OPENCODE_GO_MODEL}/${ODL_REQ_022_GO_PROBE_VERSION}/capabilities.json`;
+const CAPABILITY_CACHE_KEY_V2 = `visual-compiler/provider-cache/opencode-go/${OPENCODE_GO_MODEL}/${ODL_REQ_024_GO_PROBE_VERSION}/capabilities.json`;
+
+function capabilityCacheKey(probeVersion: OpenCodeGoCapabilityReceipt["probeVersion"]): string {
+  return probeVersion === ODL_REQ_024_GO_PROBE_VERSION ? CAPABILITY_CACHE_KEY_V2 : CAPABILITY_CACHE_KEY_V1;
+}
 const MAX_RESPONSE_BYTES = 64 * 1024;
 
 function boundedInteger(value: unknown): number | null {
@@ -445,7 +451,7 @@ export async function requestOpenCodeGo(input: {
 }
 
 export async function writeOpenCodeGoCapabilityCache(env: Env, receipt: OpenCodeGoCapabilityReceipt): Promise<void> {
-  await putArtifact(env, CAPABILITY_CACHE_KEY, JSON.stringify(receipt, null, 2), "application/json; charset=utf-8", {
+  await putArtifact(env, capabilityCacheKey(receipt.probeVersion), JSON.stringify(receipt, null, 2), "application/json; charset=utf-8", {
     provider: receipt.provider,
     model: receipt.model,
     probeVersion: receipt.probeVersion,
@@ -455,16 +461,19 @@ export async function writeOpenCodeGoCapabilityCache(env: Env, receipt: OpenCode
 }
 
 export async function readOpenCodeGoCapabilityCache(env: Env): Promise<OpenCodeGoCapabilityReceipt | null> {
-  const object = await env.ARTIFACTS.get(CAPABILITY_CACHE_KEY);
-  if (!object) return null;
-  try {
-    const receipt = JSON.parse(await object.text()) as OpenCodeGoCapabilityReceipt;
-    if (receipt.provider !== OPENCODE_GO_PROVIDER || receipt.mode !== OPENCODE_GO_MODE || receipt.model !== OPENCODE_GO_MODEL) return null;
-    if (receipt.probeVersion !== ODL_REQ_022_GO_PROBE_VERSION || !receipt.visionProbe.passed) return null;
-    if (receipt.credentialBindingName !== selectOpenCodeGoCredentialBinding(env)) return null;
-    if (Date.now() - Date.parse(receipt.discoveryTimestamp) > OPENCODE_GO_CAPABILITY_CACHE_SECONDS * 1000) return null;
-    return { ...receipt, discoveryCacheHit: true, accounting: await readOpenCodeGoSpendLedger(env, receipt.spendLedgerKey) };
-  } catch {
-    return null;
+  for (const key of [CAPABILITY_CACHE_KEY_V2, CAPABILITY_CACHE_KEY_V1]) {
+    const object = await env.ARTIFACTS.get(key);
+    if (!object) continue;
+    try {
+      const receipt = JSON.parse(await object.text()) as OpenCodeGoCapabilityReceipt;
+      if (receipt.provider !== OPENCODE_GO_PROVIDER || receipt.mode !== OPENCODE_GO_MODE || receipt.model !== OPENCODE_GO_MODEL) continue;
+      if (![ODL_REQ_024_GO_PROBE_VERSION, ODL_REQ_022_GO_PROBE_VERSION].includes(receipt.probeVersion) || !receipt.visionProbe.passed) continue;
+      if (receipt.credentialBindingName !== selectOpenCodeGoCredentialBinding(env)) continue;
+      if (Date.now() - Date.parse(receipt.discoveryTimestamp) > OPENCODE_GO_CAPABILITY_CACHE_SECONDS * 1000) continue;
+      return { ...receipt, discoveryCacheHit: true, accounting: await readOpenCodeGoSpendLedger(env, receipt.spendLedgerKey) };
+    } catch {
+      continue;
+    }
   }
+  return null;
 }
