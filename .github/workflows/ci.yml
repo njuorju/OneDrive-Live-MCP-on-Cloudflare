@@ -3,119 +3,242 @@ name: CI
 on:
   push:
     branches:
-      - feature/odl-req-025-attachment-zen-responses
+      - main
+      - work/**
+  pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref_name }}
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
-  apply-final-connector-fixes:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
+          cache: npm
+      - name: Install pinned dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+      - name: Type check
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run type-check 2>&1 | tee typecheck.log
+      - name: Test
+        shell: bash
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test.log
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-diagnostics-${{ github.event_name }}
+          path: |
+            typecheck.log
+            test.log
+          if-no-files-found: ignore
+          retention-days: 1
+      - name: Production dependency security gate
+        run: npm audit --audit-level=high --omit=dev
+      - name: Full dependency advisory report
+        continue-on-error: true
+        run: npm audit --audit-level=high
+      - name: Dry-run Worker bundle with non-secret test placeholders
+        run: |
+          cp wrangler.jsonc wrangler.ci.jsonc
+          sed -i 's/REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER/CI_TEST_ROOT/g' wrangler.ci.jsonc
+          sed -i 's/REPLACE_WITH_KV_NAMESPACE_ID/00000000000000000000000000000000/g' wrangler.ci.jsonc
+          npx wrangler deploy --dry-run --config wrangler.ci.jsonc --outdir dist
+      - name: Upload non-secret Worker bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker-bundle-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy-production:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: validate
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 45
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: 3f67b673280f2119de4eedd09745e20f
+      WORKER_NAME: nikolay-onedrive-mcp
+      WORKFLOW_NAME: onedrive-live-mcp-visual-catalogue
+      OPENING_VERSION_ID: e55f3e0d-b406-49c0-ab32-ce59e06cc041
+      OPENING_DEPLOYMENT_ID: 5ae11025-b08e-4528-95d4-6acb9617a0ec
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: feature/odl-req-025-attachment-zen-responses
-          fetch-depth: 0
-          token: ${{ github.token }}
-      - name: Apply exact asserted source and test fixes
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+      - name: Generate production configuration
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${{ github.sha }}"
           python - <<'PY'
+          import json, os
           from pathlib import Path
-
-          connector = Path('src/connector-files.ts')
-          text = connector.read_text()
-          anchor = '''export function decodeStrictUtf8(bytes: Uint8Array): string {
-            let text: string;
-            try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
-            catch { throw boundaryError("connector_file_content_invalid", "The connector file is not valid UTF-8 text."); }
-            for (let index = 0; index < text.length; index += 1) {
-              const code = text.charCodeAt(index);
-              const disallowedC0 = code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d;
-              const disallowedC1 = code >= 0x7f && code <= 0x9f;
-              if (code === 0 || disallowedC0 || disallowedC1) throw boundaryError("connector_file_content_invalid", "The connector file contains binary or disallowed control bytes.");
-            }
-            return text;
-          }
-          '''.replace('          ', '')
-          addition = anchor + '''
-          function assertStructuredTextContent(fileName: string, text: string): void {
-            const ext = extension(fileName);
-            const clean = text.replace(/^\\uFEFF/, "");
-            if (ext === "json") {
-              try { JSON.parse(clean); }
-              catch { throw boundaryError("connector_file_content_invalid", "The connector JSON file is malformed."); }
-              return;
-            }
-            if (ext !== "csv") return;
-            let quoted = false;
-            let fieldStarted = false;
-            for (let index = 0; index < clean.length; index += 1) {
-              const character = clean[index];
-              if (quoted) {
-                if (character === '"') {
-                  if (clean[index + 1] === '"') index += 1;
-                  else quoted = false;
-                }
-                continue;
-              }
-              if (character === '"') {
-                if (fieldStarted) throw boundaryError("connector_file_content_invalid", "The connector CSV file is malformed.");
-                quoted = true;
-              } else if (character === "," || character === "\\n" || character === "\\r") {
-                fieldStarted = false;
-              } else {
-                fieldStarted = true;
-              }
-            }
-            if (quoted) throw boundaryError("connector_file_content_invalid", "The connector CSV file is malformed.");
-          }
-          '''.replace('          ', '')
-          if text.count(anchor) != 1:
-              raise SystemExit(f'decode anchor count={text.count(anchor)}')
-          text = text.replace(anchor, addition)
-          call_anchor = '  const text = decodeStrictUtf8(bytes);\n  const signature = validateFileSignature(fileName, exactArrayBuffer(bytes));\n'
-          call_replacement = '  const text = decodeStrictUtf8(bytes);\n  assertStructuredTextContent(fileName, text);\n  const signature = validateFileSignature(fileName, exactArrayBuffer(bytes));\n'
-          if text.count(call_anchor) != 1:
-              raise SystemExit(f'validation call anchor count={text.count(call_anchor)}')
-          connector.write_text(text.replace(call_anchor, call_replacement))
-
-          backed = Path('src/file-backed-text.ts')
-          text = backed.read_text()
-          return_anchor = '    parity,\n    runtimeReferenceShape: { csv: csvIncoming.runtimeShape, json: jsonIncoming.runtimeShape },\n'
-          return_replacement = '    parity,\n    parsed: {\n      csv: { recordCount: parity.recordCount, headerWidth: parseCsvCatalogue(csvIncoming.text).columns.length },\n      json: { recordCount: parity.recordCount, rootType: (input.jsonRecordsPath ?? "").trim() ? "object_path" : "array" },\n    },\n    runtimeReferenceShape: { csv: csvIncoming.runtimeShape, json: jsonIncoming.runtimeShape },\n'
-          if text.count(return_anchor) != 1:
-              raise SystemExit(f'receipt anchor count={text.count(return_anchor)}')
-          backed.write_text(text.replace(return_anchor, return_replacement))
-
-          test_path = Path('test/connector-file-contract.test.ts')
-          text = test_path.read_text()
-          old_fixture = 'JSON.stringify([["source_record_id","name"],["ACA-9999","X"]])'
-          new_fixture = 'JSON.stringify([{ source_record_id: "ACA-9999", name: "X" }])'
-          if text.count(old_fixture) != 1:
-              raise SystemExit(f'mismatch fixture count={text.count(old_fixture)}')
-          text = text.replace(old_fixture, new_fixture)
-          old_typo = '(error: unknown) => error instanceof ConnectorError && e.code === "connector_file_too_large"'
-          new_typo = '(error: unknown) => error instanceof ConnectorError && error.code === "connector_file_too_large"'
-          if text.count(old_typo) != 1:
-              raise SystemExit(f'test typo count={text.count(old_typo)}')
-          test_path.write_text(text.replace(old_typo, new_typo))
+          cfg = json.loads(Path('wrangler.jsonc').read_text())
+          sha = os.environ['GITHUB_SHA']
+          cfg['name'] = os.environ['WORKER_NAME']
+          cfg['keep_vars'] = True
+          cfg['kv_namespaces'] = [{'binding': 'OAUTH_KV', 'id': 'a3ead543dad24b8596ab9193b10f1b9f'}]
+          cfg['vars'].update({
+            'CONNECTOR_NAME': 'OneDrive Live MCP',
+            'ONEDRIVE_ROOT': 'Работа',
+            'MAX_FILE_MB': '20',
+            'MAX_ORIGINAL_FILE_MB': '25',
+            'MAX_TEXT_WRITE_KB': '4096',
+            'MAX_READ_CHARS': '50000',
+            'CACHE_TTL_SECONDS': '604800',
+            'MAX_IMAGE_INPUT_MB': '15',
+            'MAX_IMAGE_PIXELS': '40000000',
+            'MAX_IMAGE_DIMENSION': '8192',
+            'MAX_IMAGE_PAGES': '8',
+            'IMAGE_PROCESSING_TIMEOUT_MS': '15000',
+            'INTEGRITY_LEASE_SECONDS': '600',
+            'PAID_MAX_SOURCE_MB': '500',
+            'PAID_VISUAL_PARSE_MB': '40',
+            'PAID_RENDER_ORIGIN': 'https://nikolay-onedrive-mcp.fdas201290.workers.dev',
+            'VISUAL_CLASSIFIER_PROVIDER': 'openai',
+            'VISUAL_CLASSIFIER_MODEL': 'gpt-5.2-2025-12-11',
+            'OPENCODE_ZEN_MODEL': 'mimo-v2.5-free',
+            'OPENCODE_ZEN_DISCOVERY_TTL_SECONDS': '3600',
+            'VISUAL_CLASSIFIER_CONCURRENCY': '2',
+            'VISUAL_CLASSIFIER_MAX_DIMENSION': '1280',
+            'VISUAL_CLASSIFIER_JPEG_QUALITY': '82',
+            'VISUAL_RUBRIC_VERSION': 'uca-visual-rubric-2026-08-02',
+            'VISUAL_PROMPT_VERSION': 'visual-source-classifier-opencode-mimo-2026-08-02',
+            'VISUAL_RENDERER_VERSION': 'pdfjs-cache-v1',
+            'WORKER_DEPLOYMENT_ID': f'repo-{sha}',
+          })
+          Path('wrangler.production.json').write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n')
           PY
-          git add src/connector-files.ts src/file-backed-text.ts test/connector-file-contract.test.ts
-          git diff --cached --check
-          test "$(git diff --cached --name-only | sort | tr '\n' ' ')" = "src/connector-files.ts src/file-backed-text.ts test/connector-file-contract.test.ts "
-      - name: Commit final connector validation fixes
+      - name: Verify opening lease and binding surfaces
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "ODL-REQ-025: harden connector content validation"
-          git push origin HEAD:feature/odl-req-025-attachment-zen-responses
+          test -n "$CLOUDFLARE_API_TOKEN"
+          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
+          auth=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json")
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/deployments" > pre-deployments.json
+          jq -e --arg d "$OPENING_DEPLOYMENT_ID" --arg v "$OPENING_VERSION_ID" '.success == true and .result.deployments[0].id == $d and .result.deployments[0].versions == [{version_id:$v,percentage:100}]' pre-deployments.json >/dev/null
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/settings" > pre-settings.json
+          jq -S '[.result.bindings[] | {name,type}] | sort_by(.name)' pre-settings.json > pre-bindings.json
+          jq -e 'any(.[]; .name == "VISUAL_CATALOGUE_WORKFLOW" and .type == "workflow") and any(.[]; .name == "PAID_JOBS" and .type == "queue") and any(.[]; .name == "ARTIFACTS" and .type == "r2_bucket") and any(.[]; .name == "IMAGES" and .type == "images")' pre-bindings.json >/dev/null
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/secrets" > pre-secrets.json
+          jq -S '[.result[] | {name,type}] | sort_by(.name)' pre-secrets.json > pre-secret-bindings.json
+          jq -e 'any(.[]; .name == "OPENCODE_ZEN_API_KEY" and .type == "secret_text")' pre-secret-bindings.json >/dev/null
+      - name: Deploy exact merged main
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          npx wrangler deploy --config wrangler.production.json --name "$WORKER_NAME" --message "Deploy ODL-REQ-024 exact main $GITHUB_SHA" --tag "odl-req-024-${GITHUB_SHA:0:12}" 2>&1 | tee deployment.log
+      - name: Verify deployment, traffic, bindings, secrets, and health
+        shell: bash
+        run: |
+          set -euo pipefail
+          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
+          auth=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json")
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/deployments" > post-deployments.json
+          jq -e --arg old "$OPENING_DEPLOYMENT_ID" '.success == true and .result.deployments[0].id != $old and (.result.deployments[0].versions|length)==1 and .result.deployments[0].versions[0].percentage==100' post-deployments.json >/dev/null
+          deployment_id=$(jq -r '.result.deployments[0].id' post-deployments.json)
+          version_id=$(jq -r '.result.deployments[0].versions[0].version_id' post-deployments.json)
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/versions?deployable=true" > post-versions.json
+          version_number=$(jq -r --arg v "$version_id" '[.result.items[]|select(.id==$v)][0].number' post-versions.json)
+          test "$version_number" != "null"
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/settings" > post-settings.json
+          jq -S '[.result.bindings[] | {name,type}] | sort_by(.name)' post-settings.json > post-bindings.json
+          cmp pre-bindings.json post-bindings.json
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/secrets" > post-secrets.json
+          jq -S '[.result[] | {name,type}] | sort_by(.name)' post-secrets.json > post-secret-bindings.json
+          cmp pre-secret-bindings.json post-secret-bindings.json
+          health=$(curl -fsS --retry 8 --retry-all-errors --retry-delay 2 "https://nikolay-onedrive-mcp.fdas201290.workers.dev/health")
+          jq -e '.ok == true' <<<"$health" >/dev/null
+          go_secret_present=$(jq 'any(.[]; .name == "OPENCODE_GO_API_KEY" and .type == "secret_text")' post-secret-bindings.json)
+          jq -n --arg sourceCommit "$GITHUB_SHA" --arg deploymentId "$deployment_id" --arg versionId "$version_id" --argjson versionNumber "$version_number" --argjson goSecretPresent "$go_secret_present" '{sourceCommit:$sourceCommit,deploymentId:$deploymentId,versionId:$versionId,versionNumber:$versionNumber,trafficPercent:100,bindingsUnchanged:true,secretBindingsUnchanged:true,opencodeGoSecretPresent:$goSecretPresent,healthHttp200:true}' > deployment-evidence.json
+          cat deployment-evidence.json
+      - name: Run bounded synthetic OpenCode Go diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
+          auth=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json")
+          instance_id="odl-req-024-${GITHUB_SHA:0:12}"
+          params=$(jq -cn --arg id "$instance_id" '{jobId:$id,workflowId:$id,userId:"system-recovery-odl-req-024",input:{__odlReq024GoVisionDiagnostic:true,maxBillableRequests:5,maxEstimatedSpendUsd:0.05}}')
+          jq -n --arg id "$instance_id" --arg params "$params" '{instance_id:$id,params:$params,instance_retention:{success_retention:"7 days",error_retention:"7 days"}}' > diagnostic-create-request.json
+          create_code=$(curl -sS -o diagnostic-create-response.json -w '%{http_code}' "${auth[@]}" -X POST "$api/workflows/$WORKFLOW_NAME/instances" --data @diagnostic-create-request.json)
+          if [[ "$create_code" != 2* ]]; then
+            curl -fsS "${auth[@]}" "$api/workflows/$WORKFLOW_NAME/instances/$instance_id?simple=false" > diagnostic-existing.json
+            jq -e '.success == true' diagnostic-existing.json >/dev/null
+          else
+            jq -e '.success == true and (.result.status == "queued" or .result.status == "running")' diagnostic-create-response.json >/dev/null
+          fi
+          rm -f odl-req-024-diagnostic.json
+          for _ in $(seq 1 180); do
+            curl -fsS "${auth[@]}" "$api/workflows/$WORKFLOW_NAME/instances/$instance_id?simple=false" > diagnostic-instance.json
+            status=$(jq -r '.result.status // "unknown"' diagnostic-instance.json)
+            case "$status" in
+              complete)
+                jq -e '.result.output != null' diagnostic-instance.json >/dev/null
+                if jq -e '.result.output | type == "string"' diagnostic-instance.json >/dev/null; then
+                  jq -r '.result.output' diagnostic-instance.json | jq '.' > odl-req-024-diagnostic.json
+                else
+                  jq '.result.output' diagnostic-instance.json > odl-req-024-diagnostic.json
+                fi
+                break
+                ;;
+              errored|terminated)
+                jq '{success,result:{id:.result.id,status:.result.status,error:.result.error}}' diagnostic-instance.json > odl-req-024-workflow-failure.json
+                exit 1
+                ;;
+            esac
+            sleep 10
+          done
+          test -s odl-req-024-diagnostic.json
+          jq -e '.diagnosticReceipt.probeVersion == "odl-req-024-go-vision-contract-v1"' odl-req-024-diagnostic.json >/dev/null
+          jq -e '.diagnosticReceipt.oneDriveAccessed == false and .diagnosticReceipt.oneDriveMutationPerformed == false and .diagnosticReceipt.sourcePdfRead == false and .diagnosticReceipt.providerFallbackUsed == false' odl-req-024-diagnostic.json >/dev/null
+          jq -e '.pages64Through219Blocked == true and .calibrationStarted == false' odl-req-024-diagnostic.json >/dev/null
+          jq -e '.diagnosticReceipt.accounting.billableRequestCount <= 5 and .diagnosticReceipt.accounting.maxBillableRequests <= 5 and .diagnosticReceipt.accounting.maxEstimatedSpendUsd <= 0.05' odl-req-024-diagnostic.json >/dev/null
+          if grep -Eiq 'data:image|base64,|UCA VISION PROBE 2047|ODL-REQ-024 TEXT CONTROL|authorization|bearer[[:space:]]|r2Key|sourceRenderArtifactId|sourceRenderSha256' odl-req-024-diagnostic.json; then
+            echo "Sanitized diagnostic leaked forbidden request, response, credential, image, or private-artifact data." >&2
+            exit 1
+          fi
+          jq '{classification,selectedBranch:.diagnosticReceipt.selectedBranch,blockerClassification:.diagnosticReceipt.blockerClassification,capabilityStatus:(.capabilityReceipt.status // null),calibrationAuthorized,pages64Through219Blocked}' odl-req-024-diagnostic.json
+      - name: Upload sanitized deployment and provider evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: odl-req-024-deployment-evidence
+          path: |
+            deployment.log
+            deployment-evidence.json
+            odl-req-024-diagnostic.json
+            odl-req-024-workflow-failure.json
+            pre-bindings.json
+            post-bindings.json
+            pre-secret-bindings.json
+            post-secret-bindings.json
+          if-no-files-found: warn
+          retention-days: 7
