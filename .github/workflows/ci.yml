@@ -21,17 +21,26 @@ jobs:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
           token: ${{ github.token }}
-      - name: Verify and apply exact usage fix
+      - name: Apply exact asserted usage fix
         shell: bash
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
           echo "f309fe77519db2527e9e729ef89661bd89821b6d5dd76295900e261d61ec4b80  .odl-req-025-usage-fix.patch" | sha256sum --check
-          git apply --check .odl-req-025-usage-fix.patch
-          git apply .odl-req-025-usage-fix.patch
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('src/visual-catalogue-zen-responses.ts')
+          text = path.read_text()
+          old = '  const totalTokens = boundedInteger(usage.total_tokens ?? ((inputTokens ?? 0) + (outputTokens ?? 0)));\n'
+          new = '  const explicitTotalTokens = boundedInteger(usage.total_tokens);\n  const totalTokens = explicitTotalTokens ?? (inputTokens !== null || outputTokens !== null ? (inputTokens ?? 0) + (outputTokens ?? 0) : null);\n'
+          if text.count(old) != 1:
+              raise SystemExit(f'expected exactly one target line, found {text.count(old)}')
+          path.write_text(text.replace(old, new))
+          PY
           rm .odl-req-025-usage-fix.patch
           git add src/visual-catalogue-zen-responses.ts .odl-req-025-usage-fix.patch
           git diff --cached --check
+          test "$(git diff --cached --name-only | sort | tr '\n' ' ')" = ".odl-req-025-usage-fix.patch src/visual-catalogue-zen-responses.ts "
       - name: Commit focused usage fix
         shell: bash
         run: |
