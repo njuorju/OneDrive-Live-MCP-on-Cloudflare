@@ -70,6 +70,11 @@ import {
   readOpenCodeGoSpendLedger,
   type OpenCodeGoCapabilityReceipt,
 } from "./visual-catalogue-opencode-go";
+import {
+  ZEN_RESPONSES_PROVIDER,
+  readZenResponsesCapabilityCache,
+  readZenResponsesSpendLedger,
+} from "./visual-catalogue-zen-responses";
 
 export type ClassifierProvider = VisualClassifierProvider;
 export type ClassifierMode = VisualClassifierMode;
@@ -1170,7 +1175,7 @@ function calibrationBinary(outcome: PreparedOutcome): "retain" | "reject" | "rev
 }
 
 function routeDeterministicQualityControl(results: VisualResultRecord[], provider: ClassifierProvider, sampleSize = 4): VisualResultRecord[] {
-  if (!["opencode_zen", "opencode_go"].includes(provider) || sampleSize <= 0) return results;
+  if (!["opencode_zen", "opencode_go", ZEN_RESPONSES_PROVIDER].includes(provider) || sampleSize <= 0) return results;
   const eligible = results
     .filter((record) => record.outcome !== "needs_review" && !record.disagreement && record.confidence >= 0.9)
     .sort((left, right) => left.stableVisualId.localeCompare(right.stableVisualId));
@@ -1421,6 +1426,17 @@ export async function runVisualCompileWorkflow(
       manifest.providerCapabilities = discoveredCapability;
       manifest.metrics.costClassification = discoveredCapability.costClassification;
       await writeManifest(env, manifest);
+    } else if (selection.provider === ZEN_RESPONSES_PROVIDER) {
+      manifest.stage = "reading_opencode_zen_responses_capability";
+      await writeManifest(env, manifest);
+      const paidCapability = await step.do("read successful Zen Responses capability receipt", async () => readZenResponsesCapabilityCache(env));
+      if (!paidCapability || paidCapability.maxBillableRequests !== selection.maxBillableRequests || paidCapability.maxEstimatedSpendUsd !== selection.maxEstimatedSpendUsd) {
+        throw new ConnectorError("provider_capability_receipt_required", "A successful, unexpired Zen Responses capability receipt with the exact paid budget identity is required before candidate classification.");
+      }
+      capability = paidCapability;
+      manifest.providerCapabilities = paidCapability;
+      manifest.metrics.costClassification = paidCapability.costClassification;
+      await writeManifest(env, manifest);
     } else if (selection.provider === "opencode_go") {
       manifest.stage = "reading_opencode_go_capability";
       await writeManifest(env, manifest);
@@ -1567,7 +1583,7 @@ export async function runVisualCompileWorkflow(
         const adjacent = inventory.candidates
           .filter((other) => other.pageOrSlide !== null && candidate.pageOrSlide !== null && Math.abs(other.pageOrSlide - candidate.pageOrSlide) === 1)
           .map((other) => ({ stableKey: other.stableKey, pageOrSlide: other.pageOrSlide, description: preliminary.find((record) => record.stableKey === other.stableKey)?.conciseDescription }));
-        if (["opencode_zen", "opencode_go"].includes(selection.provider)) {
+        if (["opencode_zen", "opencode_go", ZEN_RESPONSES_PROVIDER].includes(selection.provider)) {
           if (!capability || !isOpenCodeResult(classifiedValue)) throw new ConnectorError("provider_result_invalid", "OpenCode pass 1 result is unavailable for the conservative second pass.");
           const second = await classifyOpenCodeViaQueue({
             env,
@@ -1700,7 +1716,7 @@ export async function runVisualCompileWorkflow(
     manifest.contactSheetKey = await step.do("render compact review contact sheet", { retries: { limit: 3, delay: "10 seconds", backoff: "exponential" }, timeout: "10 minutes" }, async () => buildContactSheet(env, payload.jobId, results, [...selected.reviewVisualIds, ...selected.sampleVisualIds]));
 
     let cacheReuseVerified: boolean | null = null;
-    if (["opencode_zen", "opencode_go"].includes(selection.provider) && capability) {
+    if (["opencode_zen", "opencode_go", ZEN_RESPONSES_PROVIDER].includes(selection.provider) && capability) {
       const sample = inventory.candidates.slice(0, Math.min(3, inventory.candidates.length));
       const checks = await Promise.all(sample.map(async (candidate) => {
         const first = classified.get(candidate.stableVisualId);
@@ -1723,6 +1739,20 @@ export async function runVisualCompileWorkflow(
     manifest.resultCounts = outcomeCounts(results);
     manifest.metrics.estimatedCostUsd = selection.provider === "openai" ? estimatedCost(model, manifest.metrics.inputTokens, manifest.metrics.outputTokens, mode === "openai_batch") : null;
     if (selection.provider === "opencode_zen") manifest.metrics.costClassification = "provider_reported_unknown_or_free_model_id";
+    if (selection.provider === ZEN_RESPONSES_PROVIDER && capability?.provider === ZEN_RESPONSES_PROVIDER) {
+      const accounting = await readZenResponsesSpendLedger(env, capability.spendLedgerKey);
+      manifest.metrics.billableRequestCount = accounting.billableRequestCount;
+      manifest.metrics.inputTokens = accounting.inputTokens;
+      manifest.metrics.outputTokens = accounting.outputTokens;
+      manifest.metrics.cachedReadTokens = accounting.cachedReadTokens;
+      manifest.metrics.usageNotReportedResponses = accounting.usageNotReportedResponses;
+      manifest.metrics.estimatedCostUsd = accounting.estimatedSpendUsd;
+      manifest.metrics.remainingRequestAllowance = accounting.remainingRequestAllowance;
+      manifest.metrics.remainingEstimatedDollarAllowance = accounting.remainingEstimatedDollarAllowance;
+      manifest.metrics.pricingSource = accounting.pricing.source;
+      manifest.metrics.pricingVersion = accounting.pricing.version;
+      manifest.metrics.costClassification = accounting.estimatedSpendUsd === null ? "usage_not_reported" : "provider_metered_or_fallback_estimate";
+    }
     if (selection.provider === "opencode_go" && capability?.provider === "opencode_go") {
       const accounting = await readOpenCodeGoSpendLedger(env, capability.spendLedgerKey);
       manifest.metrics.billableRequestCount = accounting.billableRequestCount;

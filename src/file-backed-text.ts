@@ -20,6 +20,7 @@ import {
   loadConnectorTextFile,
   trustedConnectorFileUrl,
   type LoadedConnectorTextFile,
+  type ConnectorFileNetworkOptions,
 } from "./connector-files";
 export {
   connectorFileInputSchema,
@@ -201,10 +202,11 @@ export async function createTextFileFromConnectorFileStrict(
   destinationPath: string,
   filename: string,
   suppliedExpectedSha256?: string,
+  networkOptions: ConnectorFileNetworkOptions = {},
 ) {
   const config = getRuntimeConfig(env);
   const safeName = validateItemName(filename);
-  const incoming = await loadConnectorTextFile(fileReference, safeName, config.maxTextWriteBytes, suppliedExpectedSha256);
+  const incoming = await loadConnectorTextFile(fileReference, safeName, config.maxTextWriteBytes, suppliedExpectedSha256, undefined, fetch, networkOptions);
   const destination = await resolveRelativeFolder(env, userId, destinationPath);
   const created = await createExactTextBytes(env, userId, destination, safeName, incoming.bytes);
   const verification = await verifyExactLiveBytes(env, userId, created, incoming.bytes, incoming.sha256, config.maxTextWriteBytes);
@@ -218,12 +220,13 @@ export async function replaceTextFileFromConnectorFileStrict(
   itemId: string,
   expectedETag: string,
   suppliedExpectedSha256?: string,
+  networkOptions: ConnectorFileNetworkOptions = {},
 ) {
   const config = getRuntimeConfig(env);
   const source = await verifyItemInsideRoot(env, userId, itemId);
   assertWritableTextItem(source);
   requireExpectedETag(source, expectedETag);
-  const incoming = await loadConnectorTextFile(fileReference, source.item.name, config.maxTextWriteBytes, suppliedExpectedSha256);
+  const incoming = await loadConnectorTextFile(fileReference, source.item.name, config.maxTextWriteBytes, suppliedExpectedSha256, undefined, fetch, networkOptions);
   const replaced = await replaceExactTextBytes(env, userId, source, expectedETag, incoming.bytes);
   const verification = await verifyExactLiveBytes(env, userId, replaced, incoming.bytes, incoming.sha256, config.maxTextWriteBytes);
   return publicationResult(verification, expectedETag);
@@ -450,10 +453,11 @@ export async function validateCataloguePairFilesStrict(
   },
   maximumBytes = 4_194_304,
   fetchImpl: typeof fetch = fetch,
+  networkOptions: { csv?: ConnectorFileNetworkOptions; json?: ConnectorFileNetworkOptions } = {},
 ) {
   const [csvIncoming, jsonIncoming] = await Promise.all([
-    loadConnectorTextFile(input.csvFile, "catalogue.csv", maximumBytes, input.expectedCsvSha256, input.expectedCsvByteSize, fetchImpl),
-    loadConnectorTextFile(input.jsonFile, "catalogue.json", maximumBytes, input.expectedJsonSha256, input.expectedJsonByteSize, fetchImpl),
+    loadConnectorTextFile(input.csvFile, "catalogue.csv", maximumBytes, input.expectedCsvSha256, input.expectedCsvByteSize, fetchImpl, networkOptions.csv),
+    loadConnectorTextFile(input.jsonFile, "catalogue.json", maximumBytes, input.expectedJsonSha256, input.expectedJsonByteSize, fetchImpl, networkOptions.json),
   ]);
   const parity = validateCataloguePairBytes(
     csvIncoming.text,
@@ -463,13 +467,14 @@ export async function validateCataloguePairFilesStrict(
     input.expectedRecordCount,
   );
   return {
-    validationReceiptVersion: "odl-req-023-v1",
+    validationReceiptVersion: "odl-req-025-v1",
     files: {
       csv: { filename: csvIncoming.fileName, bytes: csvIncoming.byteLength, sha256: csvIncoming.sha256, declaredMimeType: csvIncoming.declaredMimeType, sourceMimeType: csvIncoming.sourceMimeType },
       json: { filename: jsonIncoming.fileName, bytes: jsonIncoming.byteLength, sha256: jsonIncoming.sha256, declaredMimeType: jsonIncoming.declaredMimeType, sourceMimeType: jsonIncoming.sourceMimeType },
     },
     parity,
     runtimeReferenceShape: { csv: csvIncoming.runtimeShape, json: jsonIncoming.runtimeShape },
+    networkPolicy: { csv: csvIncoming.networkReceipt, json: jsonIncoming.networkReceipt },
     oneDriveCalled: false,
     mutationBegan: false,
   };
@@ -489,6 +494,7 @@ export async function replaceCataloguePairFromConnectorFilesStrict(
     jsonRecordsPath?: string;
     expectedRecordCount?: number;
   },
+  networkOptions: { csv?: ConnectorFileNetworkOptions; json?: ConnectorFileNetworkOptions } = {},
 ) {
   if (input.csvItemId === input.jsonItemId) {
     throw new ConnectorError("catalogue_pair_items_must_differ", "The CSV and JSON catalogue item IDs must identify different files.");
@@ -508,8 +514,8 @@ export async function replaceCataloguePairFromConnectorFilesStrict(
   }
 
   const [csvIncoming, jsonIncoming] = await Promise.all([
-    loadConnectorTextFile(input.csvFile, csvInitial.item.name, config.maxTextWriteBytes),
-    loadConnectorTextFile(input.jsonFile, jsonInitial.item.name, config.maxTextWriteBytes),
+    loadConnectorTextFile(input.csvFile, csvInitial.item.name, config.maxTextWriteBytes, undefined, undefined, fetch, networkOptions.csv),
+    loadConnectorTextFile(input.jsonFile, jsonInitial.item.name, config.maxTextWriteBytes, undefined, undefined, fetch, networkOptions.json),
   ]);
   const parity = validateCataloguePairBytes(
     csvIncoming.text,
@@ -616,7 +622,7 @@ export function registerFileBackedTextTools(server: McpServer, contextFactory: (
   }, async (input: any) => {
     const context = contextFactory();
     try {
-      return textResult(await createTextFileFromConnectorFileStrict(context.env, context.userId, input.file, input.destinationPath, input.filename, input.expectedSha256));
+      return textResult(await createTextFileFromConnectorFileStrict(context.env, context.userId, input.file, input.destinationPath, input.filename, input.expectedSha256, { enforceAuthorizedFileParam: true, authorizedTopLevelFileParam: "file", declaredFileParams: ["file"] }));
     } catch (error) { return errorResult(error); }
   });
 
@@ -634,7 +640,7 @@ export function registerFileBackedTextTools(server: McpServer, contextFactory: (
   }, async (input: any) => {
     const context = contextFactory();
     try {
-      return textResult(await replaceTextFileFromConnectorFileStrict(context.env, context.userId, input.file, input.itemId, input.expectedETag, input.expectedSha256));
+      return textResult(await replaceTextFileFromConnectorFileStrict(context.env, context.userId, input.file, input.itemId, input.expectedETag, input.expectedSha256, { enforceAuthorizedFileParam: true, authorizedTopLevelFileParam: "file", declaredFileParams: ["file"] }));
     } catch (error) { return errorResult(error); }
   });
 
@@ -658,7 +664,7 @@ export function registerFileBackedTextTools(server: McpServer, contextFactory: (
     const context = contextFactory();
     try {
       const config = getRuntimeConfig(context.env);
-      return textResult(await validateCataloguePairFilesStrict(input, config.maxTextWriteBytes));
+      return textResult(await validateCataloguePairFilesStrict(input, config.maxTextWriteBytes, fetch, { csv: { enforceAuthorizedFileParam: true, authorizedTopLevelFileParam: "csvFile", declaredFileParams: ["csvFile", "jsonFile"] }, json: { enforceAuthorizedFileParam: true, authorizedTopLevelFileParam: "jsonFile", declaredFileParams: ["csvFile", "jsonFile"] } }));
     } catch (error) { return errorResult(error); }
   });
 
@@ -681,7 +687,7 @@ export function registerFileBackedTextTools(server: McpServer, contextFactory: (
   }, async (input: any) => {
     const context = contextFactory();
     try {
-      return textResult(await replaceCataloguePairFromConnectorFilesStrict(context.env, context.userId, input));
+      return textResult(await replaceCataloguePairFromConnectorFilesStrict(context.env, context.userId, input, { csv: { enforceAuthorizedFileParam: true, authorizedTopLevelFileParam: "csvFile", declaredFileParams: ["csvFile", "jsonFile"] }, json: { enforceAuthorizedFileParam: true, authorizedTopLevelFileParam: "jsonFile", declaredFileParams: ["csvFile", "jsonFile"] } }));
     } catch (error) { return errorResult(error); }
   });
 }

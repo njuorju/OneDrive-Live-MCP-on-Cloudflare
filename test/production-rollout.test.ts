@@ -49,27 +49,26 @@ test("production runbook requires forward recovery and plugin refresh", () => {
   assert.match(runbook, /Never create replacement production resources/);
 });
 
-test("ODL-REQ-024 deployment is exact-main, post-CI, leased, and runs only the synthetic diagnostic", () => {
+test("ODL-REQ-025 deployment is exact-main, post-CI, leased, and does not retry terminal MiMo diagnostics", () => {
   const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
   assert.match(workflow, /deploy-production:/);
   assert.match(workflow, /if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/);
   assert.match(workflow, /needs: validate/);
   assert.match(workflow, /test "\$\(git rev-parse HEAD\)" = "\$GITHUB_SHA"/);
-  assert.match(workflow, /OPENING_VERSION_ID: e55f3e0d-b406-49c0-ab32-ce59e06cc041/);
-  assert.match(workflow, /OPENING_DEPLOYMENT_ID: 5ae11025-b08e-4528-95d4-6acb9617a0ec/);
+  assert.match(workflow, /OPENING_VERSION_ID: edc3677f-15c3-40df-aea2-f7fbe8a26459/);
+  assert.match(workflow, /OPENING_DEPLOYMENT_ID: 995fdd5c-6342-490d-9df2-b19483457a2a/);
   assert.match(workflow, /npx wrangler deploy --config wrangler\.production\.json/);
-  assert.match(workflow, /odl-req-024-go-vision-contract-v1/);
-  assert.match(workflow, /__odlReq024GoVisionDiagnostic/);
-  assert.match(workflow, /maxBillableRequests.*5/);
-  assert.match(workflow, /maxEstimatedSpendUsd.*0\.05/);
-  assert.match(workflow, /oneDriveAccessed == false/);
-  assert.match(workflow, /sourcePdfRead == false/);
-  assert.match(workflow, /pages64Through219Blocked == true/);
+  assert.match(workflow, /Deploy ODL-REQ-025 exact main/);
+  assert.match(workflow, /odl-req-025-\$\{GITHUB_SHA:0:12\}/);
   assert.match(workflow, /\.result\.deployments\[0\]\.versions\[0\]\.percentage==100/);
   assert.match(workflow, /cmp pre-bindings\.json post-bindings\.json/);
   assert.match(workflow, /cmp pre-secret-bindings\.json post-secret-bindings\.json/);
+  assert.match(workflow, /OPENCODE_ZEN_API_KEY/);
+  assert.match(workflow, /MCP_OBJECT/);
+  assert.match(workflow, /OAUTH_KV/);
   assert.match(workflow, /healthHttp200:true/);
   assert.match(workflow, /if: always\(\)/);
-  assert.match(workflow, /odl-req-024-workflow-failure\.json/);
+  assert.match(workflow, /odl-req-025-deployment-evidence/);
+  assert.doesNotMatch(workflow, /__odlReq024GoVisionDiagnostic|Run bounded synthetic OpenCode Go diagnostic|mimo-v2\.5-pro/);
   assert.doesNotMatch(workflow, /start_visual_catalogue_job|sourceItemId|pageStart|pageEnd|workflow_dispatch|deployment-only|transport branch/i);
 });

@@ -15,6 +15,20 @@ import {
   type OpenCodeGoUsage,
 } from "./visual-catalogue-opencode-go";
 import {
+  ZEN_RESPONSES_CREDENTIAL_BINDING,
+  ZEN_RESPONSES_ENDPOINT_FAMILY,
+  ZEN_RESPONSES_MODE,
+  ZEN_RESPONSES_MODEL,
+  ZEN_RESPONSES_PROVIDER,
+  buildZenResponsesRequest,
+  readZenResponsesSpendLedger,
+  requestZenResponses,
+  validateZenResponsesBudgets,
+  zenResponsesCredential,
+  type ZenResponsesCapabilityReceipt,
+  type ZenResponsesSpendLedger,
+} from "./visual-catalogue-zen-responses";
+import {
   PREPARED_OUTCOMES,
   boundedConfidence,
   type ClassificationProposal,
@@ -33,8 +47,8 @@ export const OPENCODE_POLICY_VERSION = "opencode-zen-observed-2026-08";
 export const OPENCODE_CLASSIFIER_ARTIFACT_VERSION = "opencode-jpeg-v1";
 export const OPENCODE_CAPABILITY_CACHE_SECONDS = 60 * 60;
 
-export type VisualClassifierProvider = "openai" | "opencode_zen" | "opencode_go" | "fixture";
-export type VisualClassifierMode = "openai_responses" | "openai_batch" | "opencode_chat_completions" | "opencode_go_chat_completions" | "fixture";
+export type VisualClassifierProvider = "openai" | "opencode_zen" | "opencode_go" | "opencode_zen_responses" | "fixture";
+export type VisualClassifierMode = "openai_responses" | "openai_batch" | "opencode_chat_completions" | "opencode_go_chat_completions" | "opencode_responses" | "fixture";
 export type VisualDataSensitivity = "public" | "internal" | "confidential" | "personal" | "restricted";
 
 export type ClassifierSelectionInput = {
@@ -74,12 +88,20 @@ export type OpenCodePolicyReceipt = {
   policyVersion: "opencode-go-paid-2026-08";
   maxBillableRequests: number;
   maxEstimatedSpendUsd: number;
+} | {
+  provider: typeof ZEN_RESPONSES_PROVIDER;
+  model: typeof ZEN_RESPONSES_MODEL;
+  dataSensitivity: "public";
+  freeProviderDataPolicyAcknowledged: boolean;
+  policyVersion: "opencode-zen-responses-paid-2026-08";
+  maxBillableRequests: number;
+  maxEstimatedSpendUsd: number;
 };
 
 export type OpenCodeCapabilityReceipt = {
   provider: "opencode_zen";
   model: "mimo-v2.5-free";
-  endpointFamily: "openai_compatible_chat_completions";
+  endpointFamily: "openai_compatible_chat_completions" | typeof ZEN_RESPONSES_ENDPOINT_FAMILY;
   discoveryTimestamp: string;
   discoveryCacheHit: boolean;
   modelPresent: boolean;
@@ -110,7 +132,7 @@ export type OpenCodeCapabilityReceipt = {
   costClassification: "provider_reported_unknown_or_free_model_id";
 };
 
-export type AnyOpenCodeCapabilityReceipt = OpenCodeCapabilityReceipt | OpenCodeGoCapabilityReceipt;
+export type AnyOpenCodeCapabilityReceipt = OpenCodeCapabilityReceipt | OpenCodeGoCapabilityReceipt | ZenResponsesCapabilityReceipt;
 
 export type ClassifierArtifactManifest = {
   version: 1;
@@ -152,8 +174,8 @@ export type OpenCodeClassifiedCandidate = {
   endpointFamily: "openai_compatible_chat_completions";
   passNumber: 1 | 2;
   reviewRoutingReason: string | null;
-  provider?: "opencode_zen" | "opencode_go";
-  accounting?: OpenCodeGoSpendLedger | null;
+  provider?: "opencode_zen" | "opencode_go" | "opencode_zen_responses";
+  accounting?: OpenCodeGoSpendLedger | ZenResponsesSpendLedger | null;
 };
 
 type DeterministicSignal = { outcome: PreparedOutcome | null; reason: string | null; confidence: number };
@@ -167,14 +189,15 @@ function providerFromMode(mode: VisualClassifierMode): VisualClassifierProvider 
   if (mode === "fixture") return "fixture";
   if (mode === "opencode_chat_completions") return "opencode_zen";
   if (mode === "opencode_go_chat_completions") return "opencode_go";
+  if (mode === ZEN_RESPONSES_MODE) return ZEN_RESPONSES_PROVIDER;
   return "openai";
 }
 
 export function resolveClassifierSelection(input: ClassifierSelectionInput, env?: Pick<Env, "OPENAI_API_KEY" | "OPENCODE_ZEN_API_KEY" | "OPENCODE_GO_API_KEY" | "VISUAL_CLASSIFIER_PROVIDER" | "VISUAL_CLASSIFIER_MODEL" | "OPENCODE_ZEN_MODEL">): ResolvedClassifierSelection {
   const defaultProvider = String(env?.VISUAL_CLASSIFIER_PROVIDER ?? "openai") as VisualClassifierProvider;
-  const inferredMode = input.classifierMode ?? (input.dryRun && !input.classifierProvider ? "fixture" : defaultProvider === "opencode_zen" ? "opencode_chat_completions" : defaultProvider === "opencode_go" ? "opencode_go_chat_completions" : "openai_batch");
+  const inferredMode = input.classifierMode ?? (input.dryRun && !input.classifierProvider ? "fixture" : defaultProvider === "opencode_zen" ? "opencode_chat_completions" : defaultProvider === "opencode_go" ? "opencode_go_chat_completions" : defaultProvider === ZEN_RESPONSES_PROVIDER ? ZEN_RESPONSES_MODE : "openai_batch");
   const provider = input.classifierProvider ?? providerFromMode(inferredMode);
-  const model = String(input.model ?? (provider === "opencode_zen" ? env?.OPENCODE_ZEN_MODEL ?? OPENCODE_ZEN_MODEL : provider === "opencode_go" ? OPENCODE_GO_MODEL : provider === "fixture" ? "calibration-fixture" : env?.VISUAL_CLASSIFIER_MODEL ?? "gpt-5.2-2025-12-11"));
+  const model = String(input.model ?? (provider === "opencode_zen" ? env?.OPENCODE_ZEN_MODEL ?? OPENCODE_ZEN_MODEL : provider === "opencode_go" ? OPENCODE_GO_MODEL : provider === ZEN_RESPONSES_PROVIDER ? ZEN_RESPONSES_MODEL : provider === "fixture" ? "calibration-fixture" : env?.VISUAL_CLASSIFIER_MODEL ?? "gpt-5.2-2025-12-11"));
   const allowPaidFallback = Boolean(input.allowPaidFallback ?? false);
   const sensitivity = input.dataSensitivity ?? null;
   const acknowledged = Boolean(input.freeProviderDataPolicyAcknowledged ?? false);
@@ -191,6 +214,16 @@ export function resolveClassifierSelection(input: ClassifierSelectionInput, env?
     }
     if (env && !String(env.OPENAI_API_KEY ?? "")) throw new ConnectorError("openai_api_key_missing", "OPENAI_API_KEY is not configured.");
     return { provider, mode: inferredMode, model, allowPaidFallback, dataSensitivity: sensitivity, freeProviderDataPolicyAcknowledged: acknowledged, maxBillableRequests: null, maxEstimatedSpendUsd: null };
+  }
+
+  if (provider === ZEN_RESPONSES_PROVIDER) {
+    if (inferredMode !== ZEN_RESPONSES_MODE) throw new ConnectorError("classifier_configuration_invalid", "Zen Responses requires opencode_responses mode.");
+    if (model !== ZEN_RESPONSES_MODEL) throw new ConnectorError("provider_model_not_allowed", `Zen Responses jobs require the exact model ID ${ZEN_RESPONSES_MODEL}.`);
+    if (allowPaidFallback) throw new ConnectorError("paid_fallback_forbidden", "Automatic provider fallback is disabled for Zen Responses.");
+    if (sensitivity !== "public") throw new ConnectorError("provider_data_policy_rejected", "This bounded Zen Responses route accepts only explicitly public source material.");
+    if (env) zenResponsesCredential(env);
+    const budgets = validateZenResponsesBudgets(input.maxBillableRequests, input.maxEstimatedSpendUsd);
+    return { provider, mode: inferredMode, model, allowPaidFallback: false, dataSensitivity: "public", freeProviderDataPolicyAcknowledged: acknowledged, ...budgets };
   }
 
   if (provider === "opencode_go") {
@@ -213,6 +246,9 @@ export function resolveClassifierSelection(input: ClassifierSelectionInput, env?
 }
 
 export function openCodePolicyReceipt(selection: ResolvedClassifierSelection): OpenCodePolicyReceipt | null {
+  if (selection.provider === ZEN_RESPONSES_PROVIDER) {
+    return { provider: ZEN_RESPONSES_PROVIDER, model: ZEN_RESPONSES_MODEL, dataSensitivity: "public", freeProviderDataPolicyAcknowledged: selection.freeProviderDataPolicyAcknowledged, policyVersion: "opencode-zen-responses-paid-2026-08", maxBillableRequests: selection.maxBillableRequests as number, maxEstimatedSpendUsd: selection.maxEstimatedSpendUsd as number };
+  }
   if (selection.provider === "opencode_go") {
     return {
       provider: "opencode_go", model: OPENCODE_GO_MODEL, dataSensitivity: "public",
@@ -642,8 +678,8 @@ export type OpenCodeClassifierQueueMessage = {
   passNumber: 1 | 2;
   confidenceThreshold: number;
   capability: AnyOpenCodeCapabilityReceipt;
-  provider?: "opencode_zen" | "opencode_go";
-  mode?: "opencode_chat_completions" | "opencode_go_chat_completions";
+  provider?: "opencode_zen" | "opencode_go" | "opencode_zen_responses";
+  mode?: "opencode_chat_completions" | "opencode_go_chat_completions" | "opencode_responses";
   credentialBindingName?: "OPENCODE_GO_API_KEY" | "OPENCODE_ZEN_API_KEY";
   spendLedgerKey?: string;
   maxBillableRequests?: number;
@@ -689,7 +725,7 @@ export async function prepareOpenCodeClassifierQueueMessage(input: {
     promptVersion: input.promptVersion,
     passNumber: input.passNumber,
   }));
-  const resultKey = `visual-compiler/jobs/${input.jobId}/${input.capability.provider === "opencode_go" ? "opencode-go" : "opencode"}/results/${input.candidate.stableVisualId}/pass-${input.passNumber}/${requestIdentity}.json`;
+  const resultKey = `visual-compiler/jobs/${input.jobId}/${input.capability.provider === "opencode_go" ? "opencode-go" : input.capability.provider === ZEN_RESPONSES_PROVIDER ? "opencode-zen-responses" : "opencode"}/results/${input.candidate.stableVisualId}/pass-${input.passNumber}/${requestIdentity}.json`;
   const existing = await input.env.ARTIFACTS.get(resultKey);
   if (existing) {
     const cached = JSON.parse(await existing.text()) as OpenCodeClassifiedCandidate;
@@ -709,11 +745,11 @@ export async function prepareOpenCodeClassifierQueueMessage(input: {
         confidenceThreshold: input.confidenceThreshold,
         capability: input.capability,
         provider: input.capability.provider,
-        mode: input.capability.provider === "opencode_go" ? OPENCODE_GO_MODE : "opencode_chat_completions",
-        credentialBindingName: input.capability.provider === "opencode_go" ? input.capability.credentialBindingName : "OPENCODE_ZEN_API_KEY",
-        spendLedgerKey: input.capability.provider === "opencode_go" ? input.capability.spendLedgerKey : undefined,
-        maxBillableRequests: input.capability.provider === "opencode_go" ? input.capability.maxBillableRequests : undefined,
-        maxEstimatedSpendUsd: input.capability.provider === "opencode_go" ? input.capability.maxEstimatedSpendUsd : undefined,
+        mode: input.capability.provider === "opencode_go" ? OPENCODE_GO_MODE : input.capability.provider === ZEN_RESPONSES_PROVIDER ? ZEN_RESPONSES_MODE : "opencode_chat_completions",
+        credentialBindingName: input.capability.provider === "opencode_go" ? input.capability.credentialBindingName : ZEN_RESPONSES_CREDENTIAL_BINDING,
+        spendLedgerKey: input.capability.provider === "opencode_go" || input.capability.provider === ZEN_RESPONSES_PROVIDER ? input.capability.spendLedgerKey : undefined,
+        maxBillableRequests: input.capability.provider === "opencode_go" || input.capability.provider === ZEN_RESPONSES_PROVIDER ? input.capability.maxBillableRequests : undefined,
+        maxEstimatedSpendUsd: input.capability.provider === "opencode_go" || input.capability.provider === ZEN_RESPONSES_PROVIDER ? input.capability.maxEstimatedSpendUsd : undefined,
         requestIdentity,
         resultKey,
         createdAt: nowIso(),
@@ -736,6 +772,12 @@ export async function prepareOpenCodeClassifierQueueMessage(input: {
       passNumber: input.passNumber,
       confidenceThreshold: input.confidenceThreshold,
       capability: input.capability,
+      provider: input.capability.provider,
+      mode: input.capability.provider === "opencode_go" ? OPENCODE_GO_MODE : input.capability.provider === ZEN_RESPONSES_PROVIDER ? ZEN_RESPONSES_MODE : "opencode_chat_completions",
+      credentialBindingName: input.capability.provider === "opencode_go" ? input.capability.credentialBindingName : ZEN_RESPONSES_CREDENTIAL_BINDING,
+      spendLedgerKey: input.capability.provider === "opencode_go" || input.capability.provider === ZEN_RESPONSES_PROVIDER ? input.capability.spendLedgerKey : undefined,
+      maxBillableRequests: input.capability.provider === "opencode_go" || input.capability.provider === ZEN_RESPONSES_PROVIDER ? input.capability.maxBillableRequests : undefined,
+      maxEstimatedSpendUsd: input.capability.provider === "opencode_go" || input.capability.provider === ZEN_RESPONSES_PROVIDER ? input.capability.maxEstimatedSpendUsd : undefined,
       requestIdentity,
       resultKey,
       createdAt: nowIso(),
@@ -760,28 +802,51 @@ export async function processOpenCodeClassifierQueueMessage(
   const existing = await readOpenCodeClassifierQueueResult(env, message.resultKey);
   if (existing) return { ...existing, idempotentReplay: true };
   const isGo = message.provider === "opencode_go" || message.capability.provider === "opencode_go";
-  const apiKey = isGo ? "" : String(env.OPENCODE_ZEN_API_KEY ?? "");
-  if (!isGo && !apiKey) throw new ConnectorError("provider_secret_missing", "OPENCODE_ZEN_API_KEY is not configured.");
-  if (isGo && !message.spendLedgerKey) throw new ConnectorError("provider_spend_ledger_missing", "OpenCode Go classification requires an immutable spend ledger.");
+  const isResponses = message.provider === ZEN_RESPONSES_PROVIDER || message.capability.provider === ZEN_RESPONSES_PROVIDER;
+  const apiKey = isGo || isResponses ? "" : String(env.OPENCODE_ZEN_API_KEY ?? "");
+  if (!isGo && !isResponses && !apiKey) throw new ConnectorError("provider_secret_missing", "OPENCODE_ZEN_API_KEY is not configured.");
+  if ((isGo || isResponses) && !message.spendLedgerKey) throw new ConnectorError("provider_spend_ledger_missing", "Paid OpenCode classification requires an immutable spend ledger.");
 
-  const content: Record<string, unknown>[] = [{ type: "text", text: message.prompt }];
+  let imageDataUrl: string | undefined;
   if (message.classifierArtifact) {
     const bytes = new Uint8Array(await (await getArtifact(env, message.classifierArtifact.r2Key)).arrayBuffer());
-    content.push({
+    imageDataUrl = `data:image/jpeg;base64,${bytesToBase64(bytes)}`;
+  }
+  const chatContentParts: Record<string, unknown>[] = [{ type: "text", text: message.prompt }];
+  if (imageDataUrl) {
+    chatContentParts.push({
       type: "image_url",
       image_url: {
-        url: `data:image/jpeg;base64,${bytesToBase64(bytes)}`,
+        url: imageDataUrl,
         ...(message.capability.visionProbe.detailFieldAccepted ? { detail: message.passNumber === 2 ? "high" : "auto" } : {}),
       },
     });
   }
   const messages: Record<string, unknown>[] = [
     { role: "system", content: "Return exactly one JSON object and no Markdown. Do not infer unreadable labels. Use needs_review when uncertain." },
-    { role: "user", content },
+    { role: "user", content: chatContentParts },
   ];
-  const request: Record<string, unknown> = { model: message.model, messages, max_tokens: 1400, temperature: 0 };
-  if (isGo) request.stream = false;
-  if (message.capability.structuredOutput.responseFormatAccepted) request.response_format = { type: "json_object" };
+  const chatRequest: Record<string, unknown> = { model: message.model, messages, max_tokens: 1400, temperature: 0 };
+  if (isGo) chatRequest.stream = false;
+  if (!isResponses && message.capability.structuredOutput.responseFormatAccepted) chatRequest.response_format = { type: "json_object" };
+
+  const schema: Record<string, unknown> = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      outcome: { type: "string", enum: [...PREPARED_OUTCOMES] },
+      confidence: { type: "number", minimum: 0, maximum: 1 },
+      concise_description: { type: "string" },
+      visual_type: { type: "string" },
+      visible_text: { type: "string" },
+      page_series_id: { type: ["string", "null"] },
+      canonical_visual_id: { type: ["string", "null"] },
+      continuation_likely: { type: "boolean" },
+      continuation_title: { type: ["string", "null"] },
+      reason: { type: "string" },
+    },
+    required: ["outcome", "confidence", "concise_description", "visual_type", "visible_text", "page_series_id", "canonical_visual_id", "continuation_likely", "continuation_title", "reason"],
+  };
 
   let aggregateRetries = 0;
   let aggregateRateLimits = 0;
@@ -791,38 +856,61 @@ export async function processOpenCodeClassifierQueueMessage(
   let parsedValue: Record<string, unknown> | null = null;
   let rawDiagnostic = "";
   let validationErrors: string[] = [];
+  let lastStructuralReceipt: unknown = null;
   for (let correction = 0; correction < 2; correction += 1) {
-    if (correction === 1) {
+    if (!isResponses && correction === 1) {
       (messages[1].content as Record<string, unknown>[]).unshift({
         type: "text",
         text: `Your previous response failed validation: ${validationErrors.join("; ")}. Return a corrected JSON object only, preserving the visual meaning.`,
       });
     }
-    const response = isGo
-      ? await requestOpenCodeGo({
-          env,
-          credentialBindingName: message.credentialBindingName ?? selectOpenCodeGoCredentialBinding(env),
-          spendLedgerKey: String(message.spendLedgerKey ?? ""),
-          body: request,
-          context: `candidate:${message.candidate.stableVisualId}:pass:${message.passNumber}:correction:${correction + 1}`,
-          requestIdentity: message.requestIdentity,
-          fetchImpl: options.fetchImpl,
-        })
-      : await requestOpenCodeZen(apiKey, request, { fetchImpl: options.fetchImpl, maximumAttempts: 4 });
-    aggregateRetries += "retries" in response ? response.retries : 0;
-    aggregateRateLimits += "rateLimitEvents" in response ? response.rateLimitEvents : 0;
-    aggregateLatency += response.latencyMilliseconds;
-    const usage: OpenCodeUsage = "usage" in response
-      ? { inputTokens: response.usage.inputTokens ?? 0, outputTokens: response.usage.outputTokens ?? 0, totalTokens: response.usage.totalTokens ?? 0, cachedReadTokens: response.usage.cachedReadTokens ?? 0, usageReported: response.usage.reported }
-      : safeUsage(response.body);
-    aggregateUsage = {
-      inputTokens: aggregateUsage.inputTokens + usage.inputTokens,
-      outputTokens: aggregateUsage.outputTokens + usage.outputTokens,
-      totalTokens: aggregateUsage.totalTokens + usage.totalTokens,
-      cachedReadTokens: (aggregateUsage.cachedReadTokens ?? 0) + (usage.cachedReadTokens ?? 0),
-      usageReported: (aggregateUsage.usageReported ?? true) && (usage.usageReported ?? true),
-    };
-    rawDiagnostic = chatContent(response.body).slice(0, 8000);
+    if (isResponses) {
+      const correctionText = correction === 0 ? message.prompt : `${message.prompt}\nThe previous response failed validation: ${validationErrors.join("; ")}. Return corrected JSON only.`;
+      const response = await requestZenResponses({
+        env,
+        spendLedgerKey: String(message.spendLedgerKey),
+        body: buildZenResponsesRequest({ text: correctionText, imageDataUrl, maxOutputTokens: 1400, schema: { name: "visual_classification", schema } }),
+        context: `candidate:${message.candidate.stableVisualId}:pass:${message.passNumber}:correction:${correction + 1}`,
+        requestIdentity: message.requestIdentity,
+        fetchImpl: options.fetchImpl,
+      });
+      aggregateLatency += response.latencyMilliseconds;
+      aggregateUsage = {
+        inputTokens: aggregateUsage.inputTokens + (response.usage.inputTokens ?? 0),
+        outputTokens: aggregateUsage.outputTokens + (response.usage.outputTokens ?? 0),
+        totalTokens: aggregateUsage.totalTokens + (response.usage.totalTokens ?? 0),
+        cachedReadTokens: (aggregateUsage.cachedReadTokens ?? 0) + (response.usage.cachedReadTokens ?? 0),
+        usageReported: (aggregateUsage.usageReported ?? true) && response.usage.reported,
+      };
+      rawDiagnostic = response.text.slice(0, 8000);
+      lastStructuralReceipt = response.structuralReceipt;
+    } else {
+      const response = isGo
+        ? await requestOpenCodeGo({
+            env,
+            credentialBindingName: message.credentialBindingName ?? selectOpenCodeGoCredentialBinding(env),
+            spendLedgerKey: String(message.spendLedgerKey ?? ""),
+            body: chatRequest,
+            context: `candidate:${message.candidate.stableVisualId}:pass:${message.passNumber}:correction:${correction + 1}`,
+            requestIdentity: message.requestIdentity,
+            fetchImpl: options.fetchImpl,
+          })
+        : await requestOpenCodeZen(apiKey, chatRequest, { fetchImpl: options.fetchImpl, maximumAttempts: 4 });
+      aggregateRetries += "retries" in response ? response.retries : 0;
+      aggregateRateLimits += "rateLimitEvents" in response ? response.rateLimitEvents : 0;
+      aggregateLatency += response.latencyMilliseconds;
+      const usage: OpenCodeUsage = "usage" in response
+        ? { inputTokens: response.usage.inputTokens ?? 0, outputTokens: response.usage.outputTokens ?? 0, totalTokens: response.usage.totalTokens ?? 0, cachedReadTokens: response.usage.cachedReadTokens ?? 0, usageReported: response.usage.reported }
+        : safeUsage(response.body);
+      aggregateUsage = {
+        inputTokens: aggregateUsage.inputTokens + usage.inputTokens,
+        outputTokens: aggregateUsage.outputTokens + usage.outputTokens,
+        totalTokens: aggregateUsage.totalTokens + usage.totalTokens,
+        cachedReadTokens: (aggregateUsage.cachedReadTokens ?? 0) + (usage.cachedReadTokens ?? 0),
+        usageReported: (aggregateUsage.usageReported ?? true) && (usage.usageReported ?? true),
+      };
+      rawDiagnostic = chatContent(response.body).slice(0, 8000);
+    }
     let parsed: unknown;
     try { parsed = JSON.parse(rawDiagnostic); }
     catch { validationErrors = ["response is not valid JSON"]; continue; }
@@ -842,22 +930,26 @@ export async function processOpenCodeClassifierQueueMessage(
   } else {
     proposal = invalidProposal(message.deterministic, message.passNumber === 2, validationErrors.join("; ") || "persistent schema failure");
     reviewRoutingReason = "persistent_schema_failure";
-    const diagnosticKey = `visual-compiler/jobs/${message.jobId}/${isGo ? "opencode-go" : "opencode"}/diagnostics/${message.candidate.stableVisualId}/pass-${message.passNumber}/${message.requestIdentity}.json`;
+    const route = isGo ? "opencode-go" : isResponses ? "opencode-zen-responses" : "opencode";
+    const diagnosticKey = `visual-compiler/jobs/${message.jobId}/${route}/diagnostics/${message.candidate.stableVisualId}/pass-${message.passNumber}/${message.requestIdentity}.json`;
     await putArtifact(env, diagnosticKey, JSON.stringify({
       version: 1,
-      provider: isGo ? OPENCODE_GO_PROVIDER : OPENCODE_ZEN_PROVIDER,
+      provider: isGo ? OPENCODE_GO_PROVIDER : isResponses ? ZEN_RESPONSES_PROVIDER : OPENCODE_ZEN_PROVIDER,
       model: message.model,
       candidateId: message.candidate.stableVisualId,
       passNumber: message.passNumber,
       validationErrors,
-      boundedRawResponse: rawDiagnostic,
+      ...(isResponses ? { structuralReceipt: lastStructuralReceipt, generatedContentStored: false } : { boundedRawResponse: rawDiagnostic }),
       createdAt: nowIso(),
     }, null, 2), "application/json; charset=utf-8", {
-      provider: isGo ? OPENCODE_GO_PROVIDER : OPENCODE_ZEN_PROVIDER,
+      provider: isGo ? OPENCODE_GO_PROVIDER : isResponses ? ZEN_RESPONSES_PROVIDER : OPENCODE_ZEN_PROVIDER,
       candidateId: message.candidate.stableVisualId,
       passNumber: String(message.passNumber),
     });
   }
+  const accounting = isGo
+    ? await import("./visual-catalogue-opencode-go").then((module) => module.readOpenCodeGoSpendLedger(env, String(message.spendLedgerKey)))
+    : isResponses ? await readZenResponsesSpendLedger(env, String(message.spendLedgerKey)) : null;
   const result: OpenCodeClassifiedCandidate = {
     proposal,
     usage: aggregateUsage,
@@ -869,14 +961,14 @@ export async function processOpenCodeClassifierQueueMessage(
     classifierArtifact: message.classifierArtifact,
     requestIdentity: message.requestIdentity,
     idempotentReplay: false,
-    endpointFamily: "openai_compatible_chat_completions",
+    endpointFamily: isResponses ? ZEN_RESPONSES_ENDPOINT_FAMILY : "openai_compatible_chat_completions",
     passNumber: message.passNumber,
     reviewRoutingReason,
-    provider: isGo ? "opencode_go" : "opencode_zen",
-    accounting: isGo ? await import("./visual-catalogue-opencode-go").then((module) => module.readOpenCodeGoSpendLedger(env, String(message.spendLedgerKey))) : null,
+    provider: isGo ? "opencode_go" : isResponses ? ZEN_RESPONSES_PROVIDER : "opencode_zen",
+    accounting,
   };
   await putArtifact(env, message.resultKey, JSON.stringify(result, null, 2), "application/json; charset=utf-8", {
-    provider: isGo ? OPENCODE_GO_PROVIDER : OPENCODE_ZEN_PROVIDER,
+    provider: isGo ? OPENCODE_GO_PROVIDER : isResponses ? ZEN_RESPONSES_PROVIDER : OPENCODE_ZEN_PROVIDER,
     model: message.model,
     candidateId: message.candidate.stableVisualId,
     requestIdentity: message.requestIdentity,
