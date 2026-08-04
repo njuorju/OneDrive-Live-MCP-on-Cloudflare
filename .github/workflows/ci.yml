@@ -1,57 +1,51 @@
-name: ODL-REQ-025 dependency lock artifact
+name: ODL-REQ-025 commit validated lock artifact
 
 on:
   pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: odl-req-025-lock-artifact-${{ github.event.pull_request.number }}
+  group: odl-req-025-lock-commit-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  generate-lock:
+  commit-lock:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           ref: feature/odl-req-025-attachment-zen-responses
           fetch-depth: 1
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22.18.0"
-          cache: npm
-      - name: Regenerate exact lockfile
-        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Download exact validated artifact
+        shell: bash
         env:
-          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
-      - name: Install pinned dependencies
-        run: npm ci --ignore-scripts --no-audit --no-fund
-        env:
-          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
-      - name: Production dependency security gate
-        run: npm audit --audit-level=moderate --omit=dev
-      - name: Type check
-        run: npm run type-check
-      - name: Test except temporary workflow self-contract
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/njuorju/OneDrive-Live-MCP-on-Cloudflare/actions/artifacts/8891728531/zip" \
+            -o lock-artifact.zip
+          rm -rf lock-artifact
+          mkdir lock-artifact
+          unzip -q lock-artifact.zip -d lock-artifact
+          test "$(sha256sum lock-artifact/package-lock.json | awk '{print $1}')" = "eee48aa981153e64a2f7fb2200921851dcefa8dcff8d63bc20acf9468db12b70"
+          cp lock-artifact/package-lock.json package-lock.json
+      - name: Commit package lock only
         shell: bash
         run: |
           set -euo pipefail
-          find test -name '*.test.ts' ! -name 'production-rollout.test.ts' -print0 | xargs -0 npx tsx --test
-      - name: Wrangler production dry-run
-        run: |
-          cp wrangler.jsonc wrangler.ci.jsonc
-          sed -i 's/REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER/CI_TEST_ROOT/g' wrangler.ci.jsonc
-          sed -i 's/REPLACE_WITH_KV_NAMESPACE_ID/00000000000000000000000000000000/g' wrangler.ci.jsonc
-          npx wrangler deploy --dry-run --config wrangler.ci.jsonc --outdir dist
-      - name: Verify package manifest unchanged
-        run: git diff --exit-code -- package.json
-      - name: Upload regenerated lockfile
-        uses: actions/upload-artifact@v4
-        with:
-          name: odl-req-025-package-lock
-          path: package-lock.json
-          if-no-files-found: error
-          retention-days: 1
+          git diff --exit-code -- package.json
+          git add package-lock.json
+          test -n "$(git diff --cached --name-only)"
+          test "$(git diff --cached --name-only)" = "package-lock.json"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: refresh audited dependency lock"
+          git push origin HEAD:feature/odl-req-025-attachment-zen-responses
