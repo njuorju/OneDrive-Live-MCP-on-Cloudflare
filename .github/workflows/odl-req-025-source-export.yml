@@ -1,0 +1,35 @@
+name: ODL-REQ-025 source export
+
+on:
+  push:
+    branches:
+      - feature/odl-req-025-attachment-zen-responses
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify exact branch
+        run: |
+          set -euo pipefail
+          test "$(git branch --show-current)" = "feature/odl-req-025-attachment-zen-responses"
+          git status --short
+      - name: Package source
+        run: |
+          set -euo pipefail
+          tar --exclude=.git --exclude=node_modules --exclude=dist --exclude=dist-production -czf odl-req-025-source.tgz .
+          sha256sum odl-req-025-source.tgz > odl-req-025-source.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: odl-req-025-source
+          path: |
+            odl-req-025-source.tgz
+            odl-req-025-source.sha256
+          retention-days: 1
