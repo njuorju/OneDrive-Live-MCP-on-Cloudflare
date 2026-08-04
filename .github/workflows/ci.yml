@@ -26,7 +26,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
-          echo "b2cfc4bee5d7474b8e8ead293e1757d05efdc37bb68b519d909caf3053666599  .odl-req-025-usage-fix.patch" | sha256sum --check
+          echo "f309fe77519db2527e9e729ef89661bd89821b6d5dd76295900e261d61ec4b80  .odl-req-025-usage-fix.patch" | sha256sum --check
           git apply --check .odl-req-025-usage-fix.patch
           git apply .odl-req-025-usage-fix.patch
           rm .odl-req-025-usage-fix.patch
