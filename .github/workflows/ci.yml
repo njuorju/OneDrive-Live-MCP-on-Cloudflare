@@ -34,10 +34,10 @@ jobs:
           git show origin/main:.github/workflows/ci.yml > .github/workflows/ci.yml
           git apply --check /tmp/odl-req-025.diff
           git apply /tmp/odl-req-025.diff
-          rm -rf .odl-req-025 .github/workflows/odl-req-025-apply.yml
+          git show HEAD:.github/workflows/ci.yml > .github/workflows/ci.yml
+          rm -rf .odl-req-025
           git add -A
           cat > /tmp/expected-files <<'EOF'
-          .github/workflows/ci.yml
           src/connector-files.ts
           src/file-backed-text.ts
           src/index-closeout.ts
@@ -53,9 +53,9 @@ jobs:
           test/visual-catalogue-zen-responses.test.ts
           EOF
           sed -i 's/^          //' /tmp/expected-files
-          git diff origin/main --name-only --diff-filter=ACMR | sort > /tmp/actual-files
+          git diff --cached --name-only --diff-filter=ACMR | sort > /tmp/actual-files
           diff -u /tmp/expected-files /tmp/actual-files
-      - name: Commit focused implementation
+      - name: Commit focused source and tests
         shell: bash
         run: |
           set -euo pipefail
