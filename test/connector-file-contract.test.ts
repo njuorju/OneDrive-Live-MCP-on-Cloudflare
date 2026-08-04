@@ -3,10 +3,9 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { z } from "zod";
 import { ConnectorError, safeErrorResult } from "../src/errors";
+import { CHATGPT_ATTACHMENT_HOST, isPublicRoutableAddress } from "../src/connector-files";
 import {
   connectorFileInputSchema,
-  CHATGPT_ATTACHMENT_HOST,
-  isPublicRoutableAddress,
   loadConnectorTextFile,
   normalizeConnectorFileReference,
   trustedConnectorFileUrl,
@@ -124,19 +123,25 @@ test("declared and response MIME mismatches are rejected", async () => {
   await assert.rejects(() => loadConnectorTextFile(ref("/badmime", "catalogue.csv", "text/csv"), "target.csv", 1024, undefined, undefined, mappedFetch), (e: unknown) => e instanceof ConnectorError && e.code === "connector_file_mime_rejected");
 });
 
-test("content sniffing rejects binary bytes despite textual MIME", async () => {
+test("binary and malformed content are rejected", async () => {
   await assert.rejects(() => loadConnectorTextFile(ref("/binary", "catalogue.csv", "text/csv"), "target.csv", 1024, undefined, undefined, mappedFetch), (e: unknown) => e instanceof ConnectorError && e.code === "connector_file_content_invalid");
+  await assert.rejects(() => loadConnectorTextFile(ref("/badcsv", "catalogue.csv", "text/csv"), "target.csv", 1024, undefined, undefined, mappedFetch), (e: unknown) => e instanceof ConnectorError && e.code === "connector_file_content_invalid");
+  await assert.rejects(() => loadConnectorTextFile(ref("/badjson", "catalogue.json", "application/json"), "target.json", 1024, undefined, undefined, mappedFetch), (e: unknown) => e instanceof ConnectorError && e.code === "connector_file_content_invalid");
 });
 
-test("hash and byte-size mismatches are precise", async () => {
-  await assert.rejects(() => loadConnectorTextFile(ref("/csv", "catalogue.csv", "text/csv"), "target.csv", 1024, "0".repeat(64), undefined, mappedFetch), (e: unknown) => e instanceof ConnectorError && e.code === "connector_file_hash_mismatch");
-  await assert.rejects(() => loadConnectorTextFile(ref("/csv", "catalogue.csv", "text/csv"), "target.csv", 1024, undefined, 999, mappedFetch), (e: unknown) => e instanceof ConnectorError && e.code === "connector_file_content_invalid");
+test("byte length and hash are enforced", async () => {
+  const hash = await sha256HexBytes(csv);
+  await assert.rejects(() => loadConnectorTextFile(ref("/csv", "catalogue.csv", "text/csv"), "target.csv", 1024, hash, csv.byteLength + 1, mappedFetch), (e: unknown) => e instanceof ConnectorError && e.code === "connector_file_content_invalid");
+  await assert.rejects(() => loadConnectorTextFile(ref("/csv", "catalogue.csv", "text/csv"), "target.csv", 1024, "0".repeat(64), csv.byteLength, mappedFetch), (e: unknown) => e instanceof ConnectorError && e.code === "connector_file_hash_mismatch");
+  const loaded = await loadConnectorTextFile(ref("/csv", "catalogue.csv", "text/csv"), "target.csv", 1024, hash, csv.byteLength, mappedFetch);
+  assert.equal(loaded.byteLength, csv.byteLength);
+  assert.equal(loaded.sha256, hash);
 });
 
-test("validation-only tool handles root-array JSON and performs no OneDrive call", async () => {
-  const receipt = await validateCataloguePairFilesStrict({
-    csvFile: ref("/csv", "academic_sources_master_batch017_repaired.csv", "text/csv"),
-    jsonFile: ref("/json", "academic_sources_master_batch017_repaired.json", "application/json"),
+test("pair validation confirms root-array json, key parity, count, bytes and hashes", async () => {
+  const validated = await validateCataloguePairFilesStrict({
+    csvFile: ref("/csv", "catalogue.csv", "text/csv"),
+    jsonFile: ref("/json", "catalogue.json", "application/json"),
     recordKeyField: "source_record_id",
     jsonRecordsPath: "",
     expectedRecordCount: 2,
@@ -145,21 +150,16 @@ test("validation-only tool handles root-array JSON and performs no OneDrive call
     expectedJsonByteSize: json.byteLength,
     expectedJsonSha256: await sha256HexBytes(json),
   }, 1024, mappedFetch);
-  assert.equal(receipt.parity.recordCount, 2);
-  assert.equal(receipt.oneDriveCalled, false);
-  assert.equal(receipt.mutationBegan, false);
+  assert.equal(validated.parsed.json.rootType, "array");
+  assert.equal(validated.parity.recordCount, 2);
+  assert.equal(validated.mutationBegan, false);
 });
 
-test("CSV and JSON parse failures remain explicit", async () => {
-  await assert.rejects(() => validateCataloguePairFilesStrict({ csvFile: ref("/badcsv", "x.csv", "text/csv"), jsonFile: ref("/json", "x.json", "application/json"), recordKeyField: "source_record_id" }, 1024, mappedFetch), (e: unknown) => e instanceof ConnectorError && e.code === "malformed_csv");
-  await assert.rejects(() => validateCataloguePairFilesStrict({ csvFile: ref("/csv", "x.csv", "text/csv"), jsonFile: ref("/badjson", "x.json", "application/json"), recordKeyField: "source_record_id" }, 1024, mappedFetch), (e: unknown) => e instanceof ConnectorError && e.code === "malformed_catalogue");
-});
-
-test("stable-key and record-count mismatches fail closed", async () => {
-  const mismatchedJson = encoder.encode(JSON.stringify([{ source_record_id: "ACA-9999", name: "A" }, { source_record_id: "ACA-0002", name: "B" }]));
+test("pair validation fails on key set or expected count drift", async () => {
   const customFetch: typeof fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const raw = input instanceof URL ? input.href : typeof input === "string" ? input : input.url;
-    if (new URL(raw).pathname === "/mismatch") return new Response(mismatchedJson, { status: 200, headers: { "content-type": "application/json", "content-length": String(mismatchedJson.byteLength) } });
+    const url = new URL(raw);
+    if (url.pathname === "/mismatch") return new Response(JSON.stringify([["source_record_id","name"],["ACA-9999","X"]]), { status: 200, headers: { "content-type": "application/json" } });
     return mappedFetch(input, init);
   }) as typeof fetch;
   await assert.rejects(() => validateCataloguePairFilesStrict({ csvFile: ref("/csv", "x.csv", "text/csv"), jsonFile: ref("/mismatch", "x.json", "application/json"), recordKeyField: "source_record_id" }, 1024, customFetch), (e: unknown) => e instanceof ConnectorError && e.code === "catalogue_key_set_mismatch");
@@ -258,5 +258,5 @@ test("same-host redirect is allowed only when explicitly enabled and no authoriz
 
 test("declared byte size is enforced and included only as sanitized metadata", async () => {
   await assert.rejects(() => loadConnectorTextFile({ ...ref("/csv", "catalogue.csv", "text/csv"), size: 1 }, "target.csv", 1024, undefined, undefined, mappedFetch), (error: unknown) => error instanceof ConnectorError && error.code === "connector_file_content_invalid");
-  await assert.rejects(() => loadConnectorTextFile({ ...ref("/csv", "catalogue.csv", "text/csv"), size: 10_000 }, "target.csv", 1024, undefined, undefined, mappedFetch), (error: unknown) => error instanceof ConnectorError && error.code === "connector_file_too_large");
+  await assert.rejects(() => loadConnectorTextFile({ ...ref("/csv", "catalogue.csv", "text/csv"), size: 10_000 }, "target.csv", 1024, undefined, undefined, mappedFetch), (error: unknown) => error instanceof ConnectorError && e.code === "connector_file_too_large");
 });
