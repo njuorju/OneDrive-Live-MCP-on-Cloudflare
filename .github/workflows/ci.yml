@@ -1,108 +1,96 @@
 name: CI
 
 on:
-  pull_request:
+  push:
+    branches:
+      - feature/odl-req-025-attachment-zen-responses
 
 permissions:
   contents: write
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  group: ci-${{ github.workflow }}-${{ github.ref_name }}
   cancel-in-progress: true
 
 jobs:
   apply-final-connector-fixes:
-    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.ref }}
+          ref: feature/odl-req-025-attachment-zen-responses
           fetch-depth: 0
           token: ${{ github.token }}
       - name: Apply exact asserted source and test fixes
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+          test "$(git rev-parse HEAD)" = "${{ github.sha }}"
           python - <<'PY'
           from pathlib import Path
 
           connector = Path('src/connector-files.ts')
           text = connector.read_text()
           anchor = '''export function decodeStrictUtf8(bytes: Uint8Array): string {
-  let text: string;
-  try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
-  catch { throw boundaryError("connector_file_content_invalid", "The connector file is not valid UTF-8 text."); }
-  for (let index = 0; index < text.length; index += 1) {
-    const code = text.charCodeAt(index);
-    const disallowedC0 = code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d;
-    const disallowedC1 = code >= 0x7f && code <= 0x9f;
-    if (code === 0 || disallowedC0 || disallowedC1) throw boundaryError("connector_file_content_invalid", "The connector file contains binary or disallowed control bytes.");
-  }
-  return text;
-}
-'''
+            let text: string;
+            try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+            catch { throw boundaryError("connector_file_content_invalid", "The connector file is not valid UTF-8 text."); }
+            for (let index = 0; index < text.length; index += 1) {
+              const code = text.charCodeAt(index);
+              const disallowedC0 = code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d;
+              const disallowedC1 = code >= 0x7f && code <= 0x9f;
+              if (code === 0 || disallowedC0 || disallowedC1) throw boundaryError("connector_file_content_invalid", "The connector file contains binary or disallowed control bytes.");
+            }
+            return text;
+          }
+          '''.replace('          ', '')
           addition = anchor + '''
-function assertStructuredTextContent(fileName: string, text: string): void {
-  const ext = extension(fileName);
-  const clean = text.replace(/^\\uFEFF/, "");
-  if (ext === "json") {
-    try { JSON.parse(clean); }
-    catch { throw boundaryError("connector_file_content_invalid", "The connector JSON file is malformed."); }
-    return;
-  }
-  if (ext !== "csv") return;
-  let quoted = false;
-  let fieldStarted = false;
-  for (let index = 0; index < clean.length; index += 1) {
-    const character = clean[index];
-    if (quoted) {
-      if (character === '"') {
-        if (clean[index + 1] === '"') index += 1;
-        else quoted = false;
-      }
-      continue;
-    }
-    if (character === '"') {
-      if (fieldStarted) throw boundaryError("connector_file_content_invalid", "The connector CSV file is malformed.");
-      quoted = true;
-    } else if (character === "," || character === "\\n" || character === "\\r") {
-      fieldStarted = false;
-    } else {
-      fieldStarted = true;
-    }
-  }
-  if (quoted) throw boundaryError("connector_file_content_invalid", "The connector CSV file is malformed.");
-}
-'''
+          function assertStructuredTextContent(fileName: string, text: string): void {
+            const ext = extension(fileName);
+            const clean = text.replace(/^\\uFEFF/, "");
+            if (ext === "json") {
+              try { JSON.parse(clean); }
+              catch { throw boundaryError("connector_file_content_invalid", "The connector JSON file is malformed."); }
+              return;
+            }
+            if (ext !== "csv") return;
+            let quoted = false;
+            let fieldStarted = false;
+            for (let index = 0; index < clean.length; index += 1) {
+              const character = clean[index];
+              if (quoted) {
+                if (character === '"') {
+                  if (clean[index + 1] === '"') index += 1;
+                  else quoted = false;
+                }
+                continue;
+              }
+              if (character === '"') {
+                if (fieldStarted) throw boundaryError("connector_file_content_invalid", "The connector CSV file is malformed.");
+                quoted = true;
+              } else if (character === "," || character === "\\n" || character === "\\r") {
+                fieldStarted = false;
+              } else {
+                fieldStarted = true;
+              }
+            }
+            if (quoted) throw boundaryError("connector_file_content_invalid", "The connector CSV file is malformed.");
+          }
+          '''.replace('          ', '')
           if text.count(anchor) != 1:
               raise SystemExit(f'decode anchor count={text.count(anchor)}')
           text = text.replace(anchor, addition)
-          call_anchor = '''  const text = decodeStrictUtf8(bytes);
-  const signature = validateFileSignature(fileName, exactArrayBuffer(bytes));
-'''
-          call_replacement = '''  const text = decodeStrictUtf8(bytes);
-  assertStructuredTextContent(fileName, text);
-  const signature = validateFileSignature(fileName, exactArrayBuffer(bytes));
-'''
+          call_anchor = '  const text = decodeStrictUtf8(bytes);\n  const signature = validateFileSignature(fileName, exactArrayBuffer(bytes));\n'
+          call_replacement = '  const text = decodeStrictUtf8(bytes);\n  assertStructuredTextContent(fileName, text);\n  const signature = validateFileSignature(fileName, exactArrayBuffer(bytes));\n'
           if text.count(call_anchor) != 1:
               raise SystemExit(f'validation call anchor count={text.count(call_anchor)}')
           connector.write_text(text.replace(call_anchor, call_replacement))
 
           backed = Path('src/file-backed-text.ts')
           text = backed.read_text()
-          return_anchor = '''    parity,
-    runtimeReferenceShape: { csv: csvIncoming.runtimeShape, json: jsonIncoming.runtimeShape },
-'''
-          return_replacement = '''    parity,
-    parsed: {
-      csv: { recordCount: parity.recordCount, headerWidth: parseCsvCatalogue(csvIncoming.text).columns.length },
-      json: { recordCount: parity.recordCount, rootType: (input.jsonRecordsPath ?? "").trim() ? "object_path" : "array" },
-    },
-    runtimeReferenceShape: { csv: csvIncoming.runtimeShape, json: jsonIncoming.runtimeShape },
-'''
+          return_anchor = '    parity,\n    runtimeReferenceShape: { csv: csvIncoming.runtimeShape, json: jsonIncoming.runtimeShape },\n'
+          return_replacement = '    parity,\n    parsed: {\n      csv: { recordCount: parity.recordCount, headerWidth: parseCsvCatalogue(csvIncoming.text).columns.length },\n      json: { recordCount: parity.recordCount, rootType: (input.jsonRecordsPath ?? "").trim() ? "object_path" : "array" },\n    },\n    runtimeReferenceShape: { csv: csvIncoming.runtimeShape, json: jsonIncoming.runtimeShape },\n'
           if text.count(return_anchor) != 1:
               raise SystemExit(f'receipt anchor count={text.count(return_anchor)}')
           backed.write_text(text.replace(return_anchor, return_replacement))
@@ -130,4 +118,4 @@ function assertStructuredTextContent(fileName: string, text: string): void {
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "ODL-REQ-025: harden connector content validation"
-          git push origin "HEAD:${{ github.event.pull_request.head.ref }}"
+          git push origin HEAD:feature/odl-req-025-attachment-zen-responses
