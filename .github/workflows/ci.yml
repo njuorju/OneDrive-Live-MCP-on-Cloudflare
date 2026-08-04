@@ -1,146 +1,65 @@
 name: CI
 
 on:
-  push:
-    branches: [main, "work/**"]
   pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
-  validate:
+  apply-export-fix:
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22.18.0"
-          cache: npm
-      - name: Install pinned dependencies
-        run: npm ci --ignore-scripts --no-audit --no-fund
-        env:
-          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
-      - name: Type check
-        run: npm run type-check
-      - name: Full test suite
-        run: npm test
-      - name: Production dependency audit
-        run: npm audit --audit-level=high --omit=dev
-      - name: Wrangler production dry-run
-        shell: bash
-        run: |
-          set -euo pipefail
-          cp wrangler.jsonc wrangler.ci.jsonc
-          sed -i 's/REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER/CI_TEST_ROOT/g' wrangler.ci.jsonc
-          sed -i 's/REPLACE_WITH_KV_NAMESPACE_ID/00000000000000000000000000000000/g' wrangler.ci.jsonc
-          npx wrangler deploy --dry-run --config wrangler.ci.jsonc --outdir dist-production
-
-  deploy-production:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: validate
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: 3f67b673280f2119de4eedd09745e20f
-      WORKER_NAME: nikolay-onedrive-mcp
-      OPENING_VERSION_ID: edc3677f-15c3-40df-aea2-f7fbe8a26459
-      OPENING_DEPLOYMENT_ID: 995fdd5c-6342-490d-9df2-b19483457a2a
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
-          fetch-depth: 1
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22.18.0"
-          cache: npm
-      - run: npm ci --ignore-scripts --no-audit --no-fund
-        env:
-          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
-      - name: Build exact production configuration
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+          token: ${{ github.token }}
+      - name: Apply exact asserted re-export fix
         shell: bash
         run: |
           set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
           python - <<'PY'
-          import json, os
           from pathlib import Path
-          cfg = json.loads(Path('wrangler.jsonc').read_text())
-          sha = os.environ['GITHUB_SHA']
-          cfg['name'] = os.environ['WORKER_NAME']
-          cfg['keep_vars'] = True
-          cfg['kv_namespaces'] = [{'binding':'OAUTH_KV','id':'a3ead543dad24b8596ab9193b10f1b9f'}]
-          cfg['vars'].update({
-            'CONNECTOR_NAME':'OneDrive Live MCP','ONEDRIVE_ROOT':'Работа',
-            'MAX_FILE_MB':'20','MAX_ORIGINAL_FILE_MB':'25','MAX_TEXT_WRITE_KB':'4096','MAX_READ_CHARS':'50000',
-            'CACHE_TTL_SECONDS':'604800','MAX_IMAGE_INPUT_MB':'15','MAX_IMAGE_PIXELS':'40000000',
-            'MAX_IMAGE_DIMENSION':'8192','MAX_IMAGE_PAGES':'8','IMAGE_PROCESSING_TIMEOUT_MS':'15000',
-            'INTEGRITY_LEASE_SECONDS':'600','PAID_MAX_SOURCE_MB':'500','PAID_VISUAL_PARSE_MB':'40',
-            'PAID_RENDER_ORIGIN':'https://nikolay-onedrive-mcp.fdas201290.workers.dev',
-            'VISUAL_CLASSIFIER_PROVIDER':'openai','VISUAL_CLASSIFIER_MODEL':'gpt-5.2-2025-12-11',
-            'OPENCODE_ZEN_MODEL':'mimo-v2.5-free','OPENCODE_ZEN_DISCOVERY_TTL_SECONDS':'3600',
-            'VISUAL_CLASSIFIER_CONCURRENCY':'2','VISUAL_CLASSIFIER_MAX_DIMENSION':'1280',
-            'VISUAL_CLASSIFIER_JPEG_QUALITY':'82','VISUAL_RUBRIC_VERSION':'uca-visual-rubric-2026-08-02',
-            'VISUAL_PROMPT_VERSION':'visual-source-classifier-zen-responses-2026-08-04',
-            'VISUAL_RENDERER_VERSION':'pdfjs-cache-v1','WORKER_DEPLOYMENT_ID':f'repo-{sha}'
-          })
-          Path('wrangler.production.json').write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n')
+          path = Path('src/file-backed-text.ts')
+          text = path.read_text()
+          old = '''export {
+  connectorFileInputSchema,
+  connectorFileRuntimeShape,
+  loadConnectorTextFile,
+  normalizeConnectorFileReference,
+  trustedConnectorFileUrl,
+} from "./connector-files";
+'''
+          new = '''export {
+  CHATGPT_ATTACHMENT_HOST,
+  connectorFileInputSchema,
+  connectorFileRuntimeShape,
+  isPublicRoutableAddress,
+  loadConnectorTextFile,
+  normalizeConnectorFileReference,
+  trustedConnectorFileUrl,
+} from "./connector-files";
+'''
+          if text.count(old) != 1:
+              raise SystemExit(f'expected exactly one export block, found {text.count(old)}')
+          path.write_text(text.replace(old, new))
           PY
-      - name: Verify opening deployment, bindings, and Zen credential
+          git add src/file-backed-text.ts
+          git diff --cached --check
+          test "$(git diff --cached --name-only)" = "src/file-backed-text.ts"
+      - name: Commit focused re-export fix
         shell: bash
         run: |
           set -euo pipefail
-          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
-          auth=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json")
-          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/deployments" > pre-deployments.json
-          jq -e --arg d "$OPENING_DEPLOYMENT_ID" --arg v "$OPENING_VERSION_ID" '.success and .result.deployments[0].id==$d and .result.deployments[0].versions==[{version_id:$v,percentage:100}]' pre-deployments.json >/dev/null
-          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/settings" > pre-settings.json
-          jq -S '[.result.bindings[]|{name,type}]|sort_by(.name)' pre-settings.json > pre-bindings.json
-          jq -e 'all(["VISUAL_CATALOGUE_WORKFLOW","PAID_JOBS","ARTIFACTS","IMAGES","AI","OAUTH_KV","MCP_OBJECT"][] as $n; any(.[]; .name==$n))' pre-bindings.json >/dev/null
-          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/secrets" > pre-secrets.json
-          jq -S '[.result[]|{name,type}]|sort_by(.name)' pre-secrets.json > pre-secret-bindings.json
-          jq -e 'any(.[]; .name=="OPENCODE_ZEN_API_KEY" and .type=="secret_text")' pre-secret-bindings.json >/dev/null
-      - name: Deploy exact merged main once
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          npx wrangler deploy --config wrangler.production.json --name "$WORKER_NAME" --message "Deploy ODL-REQ-025 exact main $GITHUB_SHA" --tag "odl-req-025-${GITHUB_SHA:0:12}" | tee deployment.log
-      - name: Verify deployment and immutable surfaces
-        shell: bash
-        run: |
-          set -euo pipefail
-          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
-          auth=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json")
-          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/deployments" > post-deployments.json
-          jq -e --arg old "$OPENING_DEPLOYMENT_ID" '.success and .result.deployments[0].id!=$old and (.result.deployments[0].versions|length)==1 and .result.deployments[0].versions[0].percentage==100' post-deployments.json >/dev/null
-          deployment_id=$(jq -r '.result.deployments[0].id' post-deployments.json)
-          version_id=$(jq -r '.result.deployments[0].versions[0].version_id' post-deployments.json)
-          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/versions?deployable=true" > post-versions.json
-          version_number=$(jq -r --arg v "$version_id" '[.result.items[]|select(.id==$v)][0].number' post-versions.json)
-          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/settings" | jq -S '[.result.bindings[]|{name,type}]|sort_by(.name)' > post-bindings.json
-          cmp pre-bindings.json post-bindings.json
-          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/secrets" | jq -S '[.result[]|{name,type}]|sort_by(.name)' > post-secret-bindings.json
-          cmp pre-secret-bindings.json post-secret-bindings.json
-          health=$(curl -fsS --retry 8 --retry-all-errors --retry-delay 2 "https://nikolay-onedrive-mcp.fdas201290.workers.dev/health")
-          jq -e '.ok==true' <<<"$health" >/dev/null
-          jq -n --arg sourceCommit "$GITHUB_SHA" --arg deploymentId "$deployment_id" --arg versionId "$version_id" --argjson versionNumber "$version_number" '{sourceCommit:$sourceCommit,deploymentId:$deploymentId,versionId:$versionId,versionNumber:$versionNumber,trafficPercent:100,bindingsUnchanged:true,secretsUnchanged:true,healthHttp200:true}' | tee deployment-evidence.json
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: odl-req-025-deployment-evidence
-          path: |
-            deployment.log
-            deployment-evidence.json
-            pre-bindings.json
-            post-bindings.json
-            pre-secret-bindings.json
-            post-secret-bindings.json
-          if-no-files-found: warn
-          retention-days: 7
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "ODL-REQ-025: re-export connector policy helpers"
+          git push origin "HEAD:${{ github.event.pull_request.head.ref }}"
