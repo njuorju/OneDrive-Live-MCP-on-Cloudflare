@@ -101,7 +101,7 @@ export type OpenCodePolicyReceipt = {
 export type OpenCodeCapabilityReceipt = {
   provider: "opencode_zen";
   model: "mimo-v2.5-free";
-  endpointFamily: "openai_compatible_chat_completions" | typeof ZEN_RESPONSES_ENDPOINT_FAMILY;
+  endpointFamily: "openai_compatible_chat_completions";
   discoveryTimestamp: string;
   discoveryCacheHit: boolean;
   modelPresent: boolean;
@@ -171,7 +171,7 @@ export type OpenCodeClassifiedCandidate = {
   classifierArtifact: ClassifierArtifactManifest | null;
   requestIdentity: string;
   idempotentReplay: boolean;
-  endpointFamily: "openai_compatible_chat_completions";
+  endpointFamily: "openai_compatible_chat_completions" | typeof ZEN_RESPONSES_ENDPOINT_FAMILY;
   passNumber: 1 | 2;
   reviewRoutingReason: string | null;
   provider?: "opencode_zen" | "opencode_go" | "opencode_zen_responses";
