@@ -71,14 +71,13 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: validate
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 30
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: 3f67b673280f2119de4eedd09745e20f
       WORKER_NAME: nikolay-onedrive-mcp
-      WORKFLOW_NAME: onedrive-live-mcp-visual-catalogue
-      OPENING_VERSION_ID: e55f3e0d-b406-49c0-ab32-ce59e06cc041
-      OPENING_DEPLOYMENT_ID: 5ae11025-b08e-4528-95d4-6acb9617a0ec
+      OPENING_VERSION_ID: edc3677f-15c3-40df-aea2-f7fbe8a26459
+      OPENING_DEPLOYMENT_ID: 995fdd5c-6342-490d-9df2-b19483457a2a
     steps:
       - uses: actions/checkout@v4
         with:
@@ -145,7 +144,18 @@ jobs:
           jq -e --arg d "$OPENING_DEPLOYMENT_ID" --arg v "$OPENING_VERSION_ID" '.success == true and .result.deployments[0].id == $d and .result.deployments[0].versions == [{version_id:$v,percentage:100}]' pre-deployments.json >/dev/null
           curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/settings" > pre-settings.json
           jq -S '[.result.bindings[] | {name,type}] | sort_by(.name)' pre-settings.json > pre-bindings.json
-          jq -e 'any(.[]; .name == "VISUAL_CATALOGUE_WORKFLOW" and .type == "workflow") and any(.[]; .name == "PAID_JOBS" and .type == "queue") and any(.[]; .name == "ARTIFACTS" and .type == "r2_bucket") and any(.[]; .name == "IMAGES" and .type == "images")' pre-bindings.json >/dev/null
+          jq -e '
+            any(.[]; .name == "VISUAL_CATALOGUE_WORKFLOW" and .type == "workflow") and
+            any(.[]; .name == "PAID_WORKFLOW" and .type == "workflow") and
+            any(.[]; .name == "PAID_JOBS" and .type == "queue") and
+            any(.[]; .name == "ARTIFACTS" and .type == "r2_bucket") and
+            any(.[]; .name == "IMAGES" and .type == "images") and
+            any(.[]; .name == "MCP_OBJECT" and .type == "durable_object_namespace") and
+            any(.[]; .name == "AUTH_STATE" and .type == "durable_object_namespace") and
+            any(.[]; .name == "PAID_COORDINATOR" and .type == "durable_object_namespace") and
+            any(.[]; .name == "AI" and .type == "ai") and
+            any(.[]; .name == "OAUTH_KV" and .type == "kv_namespace")
+          ' pre-bindings.json >/dev/null
           curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/secrets" > pre-secrets.json
           jq -S '[.result[] | {name,type}] | sort_by(.name)' pre-secrets.json > pre-secret-bindings.json
           jq -e 'any(.[]; .name == "OPENCODE_ZEN_API_KEY" and .type == "secret_text")' pre-secret-bindings.json >/dev/null
@@ -154,7 +164,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          npx wrangler deploy --config wrangler.production.json --name "$WORKER_NAME" --message "Deploy ODL-REQ-024 exact main $GITHUB_SHA" --tag "odl-req-024-${GITHUB_SHA:0:12}" 2>&1 | tee deployment.log
+          npx wrangler deploy --config wrangler.production.json --name "$WORKER_NAME" --message "Deploy ODL-REQ-025 exact main $GITHUB_SHA" --tag "odl-req-025-${GITHUB_SHA:0:12}" 2>&1 | tee deployment.log
       - name: Verify deployment, traffic, bindings, secrets, and health
         shell: bash
         run: |
@@ -176,66 +186,17 @@ jobs:
           cmp pre-secret-bindings.json post-secret-bindings.json
           health=$(curl -fsS --retry 8 --retry-all-errors --retry-delay 2 "https://nikolay-onedrive-mcp.fdas201290.workers.dev/health")
           jq -e '.ok == true' <<<"$health" >/dev/null
-          go_secret_present=$(jq 'any(.[]; .name == "OPENCODE_GO_API_KEY" and .type == "secret_text")' post-secret-bindings.json)
-          jq -n --arg sourceCommit "$GITHUB_SHA" --arg deploymentId "$deployment_id" --arg versionId "$version_id" --argjson versionNumber "$version_number" --argjson goSecretPresent "$go_secret_present" '{sourceCommit:$sourceCommit,deploymentId:$deploymentId,versionId:$versionId,versionNumber:$versionNumber,trafficPercent:100,bindingsUnchanged:true,secretBindingsUnchanged:true,opencodeGoSecretPresent:$goSecretPresent,healthHttp200:true}' > deployment-evidence.json
+          zen_secret_present=$(jq 'any(.[]; .name == "OPENCODE_ZEN_API_KEY" and .type == "secret_text")' post-secret-bindings.json)
+          jq -n --arg sourceCommit "$GITHUB_SHA" --arg deploymentId "$deployment_id" --arg versionId "$version_id" --argjson versionNumber "$version_number" --argjson zenSecretPresent "$zen_secret_present" '{sourceCommit:$sourceCommit,deploymentId:$deploymentId,versionId:$versionId,versionNumber:$versionNumber,trafficPercent:100,bindingsUnchanged:true,secretBindingsUnchanged:true,opencodeZenSecretPresent:$zenSecretPresent,healthHttp200:true}' > deployment-evidence.json
           cat deployment-evidence.json
-      - name: Run bounded synthetic OpenCode Go diagnostic
-        shell: bash
-        run: |
-          set -euo pipefail
-          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
-          auth=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json")
-          instance_id="odl-req-024-${GITHUB_SHA:0:12}"
-          params=$(jq -cn --arg id "$instance_id" '{jobId:$id,workflowId:$id,userId:"system-recovery-odl-req-024",input:{__odlReq024GoVisionDiagnostic:true,maxBillableRequests:5,maxEstimatedSpendUsd:0.05}}')
-          jq -n --arg id "$instance_id" --arg params "$params" '{instance_id:$id,params:$params,instance_retention:{success_retention:"7 days",error_retention:"7 days"}}' > diagnostic-create-request.json
-          create_code=$(curl -sS -o diagnostic-create-response.json -w '%{http_code}' "${auth[@]}" -X POST "$api/workflows/$WORKFLOW_NAME/instances" --data @diagnostic-create-request.json)
-          if [[ "$create_code" != 2* ]]; then
-            curl -fsS "${auth[@]}" "$api/workflows/$WORKFLOW_NAME/instances/$instance_id?simple=false" > diagnostic-existing.json
-            jq -e '.success == true' diagnostic-existing.json >/dev/null
-          else
-            jq -e '.success == true and (.result.status == "queued" or .result.status == "running")' diagnostic-create-response.json >/dev/null
-          fi
-          rm -f odl-req-024-diagnostic.json
-          for _ in $(seq 1 180); do
-            curl -fsS "${auth[@]}" "$api/workflows/$WORKFLOW_NAME/instances/$instance_id?simple=false" > diagnostic-instance.json
-            status=$(jq -r '.result.status // "unknown"' diagnostic-instance.json)
-            case "$status" in
-              complete)
-                jq -e '.result.output != null' diagnostic-instance.json >/dev/null
-                if jq -e '.result.output | type == "string"' diagnostic-instance.json >/dev/null; then
-                  jq -r '.result.output' diagnostic-instance.json | jq '.' > odl-req-024-diagnostic.json
-                else
-                  jq '.result.output' diagnostic-instance.json > odl-req-024-diagnostic.json
-                fi
-                break
-                ;;
-              errored|terminated)
-                jq '{success,result:{id:.result.id,status:.result.status,error:.result.error}}' diagnostic-instance.json > odl-req-024-workflow-failure.json
-                exit 1
-                ;;
-            esac
-            sleep 10
-          done
-          test -s odl-req-024-diagnostic.json
-          jq -e '.diagnosticReceipt.probeVersion == "odl-req-024-go-vision-contract-v1"' odl-req-024-diagnostic.json >/dev/null
-          jq -e '.diagnosticReceipt.oneDriveAccessed == false and .diagnosticReceipt.oneDriveMutationPerformed == false and .diagnosticReceipt.sourcePdfRead == false and .diagnosticReceipt.providerFallbackUsed == false' odl-req-024-diagnostic.json >/dev/null
-          jq -e '.pages64Through219Blocked == true and .calibrationStarted == false' odl-req-024-diagnostic.json >/dev/null
-          jq -e '.diagnosticReceipt.accounting.billableRequestCount <= 5 and .diagnosticReceipt.accounting.maxBillableRequests <= 5 and .diagnosticReceipt.accounting.maxEstimatedSpendUsd <= 0.05' odl-req-024-diagnostic.json >/dev/null
-          if grep -Eiq 'data:image|base64,|UCA VISION PROBE 2047|ODL-REQ-024 TEXT CONTROL|authorization|bearer[[:space:]]|r2Key|sourceRenderArtifactId|sourceRenderSha256' odl-req-024-diagnostic.json; then
-            echo "Sanitized diagnostic leaked forbidden request, response, credential, image, or private-artifact data." >&2
-            exit 1
-          fi
-          jq '{classification,selectedBranch:.diagnosticReceipt.selectedBranch,blockerClassification:.diagnosticReceipt.blockerClassification,capabilityStatus:(.capabilityReceipt.status // null),calibrationAuthorized,pages64Through219Blocked}' odl-req-024-diagnostic.json
-      - name: Upload sanitized deployment and provider evidence
+      - name: Upload sanitized deployment evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: odl-req-024-deployment-evidence
+          name: odl-req-025-deployment-evidence
           path: |
             deployment.log
             deployment-evidence.json
-            odl-req-024-diagnostic.json
-            odl-req-024-workflow-failure.json
             pre-bindings.json
             post-bindings.json
             pre-secret-bindings.json

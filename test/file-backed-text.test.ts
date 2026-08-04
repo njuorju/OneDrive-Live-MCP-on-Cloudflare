@@ -11,7 +11,7 @@ import {
   validateCataloguePairBytes,
 } from "../src/file-backed-text";
 
-const connectorReference = { download_url: "https://files.openaiusercontent.com/connector/fixture", file_id: "file_fixture" };
+const connectorReference = { download_url: "https://oaisdmntprindiasocentral.blob.core.windows.net/connector/fixture", file_id: "file_fixture" };
 
 function arrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
@@ -31,12 +31,12 @@ test("file inputs use the supported ChatGPT connector-file object schema", () =>
   const schema = z.toJSONSchema(connectorFileInputSchema) as any;
   assert.equal(schema.type, "object");
   assert.deepEqual(schema.required, ["download_url", "file_id"]);
-  assert.deepEqual(Object.keys(schema.properties).sort(), ["download_url", "file_id", "file_name", "mime_type"]);
+  assert.deepEqual(Object.keys(schema.properties).sort(), ["download_url", "file_id", "file_name", "mime_type", "size"]);
   assert.equal(schema.additionalProperties, false);
 });
 
 test("only OpenAI and ChatGPT connector file references are accepted", () => {
-  assert.equal(trustedConnectorFileUrl(connectorReference.download_url).hostname, "files.openaiusercontent.com");
+  assert.equal(trustedConnectorFileUrl(connectorReference.download_url).hostname, "oaisdmntprindiasocentral.blob.core.windows.net");
   assert.throws(
     () => trustedConnectorFileUrl("https://example.com/catalogue.csv"),
     (error: unknown) => error instanceof ConnectorError && error.code === "connector_file_download_forbidden",

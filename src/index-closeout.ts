@@ -21,6 +21,10 @@ import {
   isOpenCodeGoVisionDiagnosticWorkflowPayload,
   runOpenCodeGoVisionDiagnosticWorkflow,
 } from "./visual-classifier-capability-go-diagnostic";
+import {
+  isZenResponsesCapabilityWorkflowPayload,
+  runZenResponsesCapabilityWorkflow,
+} from "./visual-classifier-capability-zen-responses";
 import { extractWorkflowEventPayload } from "./workflow-api-payload";
 
 const prototype = OneDriveMCP.prototype as any;
@@ -55,6 +59,9 @@ if (!prototype.__finalEngineeringCloseoutApplied) {
 export class VisualCatalogueWorkflow extends BaseVisualCatalogueWorkflow {
   async run(event: any, step: any): Promise<Record<string, unknown>> {
     const payload = extractWorkflowEventPayload(event);
+    if (isZenResponsesCapabilityWorkflowPayload(payload as any)) {
+      return runZenResponsesCapabilityWorkflow(this.env, payload as any, step);
+    }
     if (isOpenCodeGoVisionDiagnosticWorkflowPayload(payload as any)) {
       return runOpenCodeGoVisionDiagnosticWorkflow(this.env, payload as any, step);
     }

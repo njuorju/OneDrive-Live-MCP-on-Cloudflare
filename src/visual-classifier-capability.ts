@@ -54,6 +54,16 @@ import {
   readSuccessfulOpenCodeGoCapabilityReceipt,
   startOpenCodeGoCapabilityJob,
 } from "./visual-classifier-capability-go";
+import {
+  getZenResponsesCapabilityJob,
+  readSuccessfulZenResponsesCapabilityReceipt,
+  startZenResponsesCapabilityJob,
+} from "./visual-classifier-capability-zen-responses";
+import {
+  ZEN_RESPONSES_MODE,
+  ZEN_RESPONSES_MODEL,
+  ZEN_RESPONSES_PROVIDER,
+} from "./visual-catalogue-zen-responses";
 import { syntheticVisionProbeJpegBytes } from "./visual-catalogue-probe-fixture";
 
 export const ODL_REQ_021_PROBE_VERSION = "odl-req-021-capability-v1";
@@ -851,7 +861,8 @@ function tool(server: McpServer, name: string): any {
 
 function capabilityInputIsOpenCode(raw: Record<string, unknown>): boolean {
   return raw.classifierProvider === "opencode_zen" || raw.classifierMode === "opencode_chat_completions"
-    || raw.classifierProvider === OPENCODE_GO_PROVIDER || raw.classifierMode === OPENCODE_GO_MODE;
+    || raw.classifierProvider === OPENCODE_GO_PROVIDER || raw.classifierMode === OPENCODE_GO_MODE
+    || raw.classifierProvider === ZEN_RESPONSES_PROVIDER || raw.classifierMode === ZEN_RESPONSES_MODE;
 }
 
 export function registerODLReq021Tools(server: McpServer, contextFactory: () => HotfixContext): void {
@@ -860,8 +871,8 @@ export function registerODLReq021Tools(server: McpServer, contextFactory: () => 
       title: "Start durable visual classifier capability job",
       description: "Reserve and start a non-mutating four-stage OpenCode Zen capability job with durable sanitized attempt receipts and delayed retries.",
       inputSchema: {
-        provider: z.enum(["opencode_zen", "opencode_go"]).default("opencode_zen"),
-        mode: z.enum(["opencode_chat_completions", "opencode_go_chat_completions"]).default("opencode_chat_completions"),
+        provider: z.enum(["opencode_zen", "opencode_go", "opencode_zen_responses"]).default("opencode_zen"),
+        mode: z.enum(["opencode_chat_completions", "opencode_go_chat_completions", "opencode_responses"]).default("opencode_chat_completions"),
         model: z.string().min(1).max(100).default(OPENCODE_ZEN_MODEL),
         forceFresh: z.boolean().default(false),
         maxBillableRequests: z.number().int().min(1).max(75).optional(),
@@ -871,6 +882,9 @@ export function registerODLReq021Tools(server: McpServer, contextFactory: () => 
     }, async (raw) => {
       const context = contextFactory();
       try {
+        if (raw.provider === ZEN_RESPONSES_PROVIDER || raw.mode === ZEN_RESPONSES_MODE) {
+          return await startZenResponsesCapabilityJob(context, raw as Record<string, unknown>);
+        }
         if (raw.provider === OPENCODE_GO_PROVIDER || raw.mode === OPENCODE_GO_MODE) {
           return await startOpenCodeGoCapabilityJob(context, raw);
         }
@@ -968,6 +982,8 @@ export function registerODLReq021Tools(server: McpServer, contextFactory: () => 
     }, async ({ jobId }) => {
       const context = contextFactory();
       try {
+        const zenResponsesResult = await getZenResponsesCapabilityJob(context, jobId);
+        if (zenResponsesResult) return zenResponsesResult;
         const goResult = await getOpenCodeGoCapabilityJob(context, jobId);
         if (goResult) return goResult;
         const job = await coordinatorRequest<PaidJobRecord | null>(context.env, context.userId, "/jobs/get", { jobId });
@@ -1032,7 +1048,14 @@ export function registerODLReq021Tools(server: McpServer, contextFactory: () => 
       if (capabilityInputIsOpenCode(raw)) {
         try {
           if (raw.allowPaidFallback === true) throw new ConnectorError("paid_fallback_forbidden", "Automatic provider fallback remains disabled.");
-          if (raw.classifierProvider === OPENCODE_GO_PROVIDER || raw.classifierMode === OPENCODE_GO_MODE) {
+          if (raw.classifierProvider === ZEN_RESPONSES_PROVIDER || raw.classifierMode === ZEN_RESPONSES_MODE) {
+            if (String(raw.model ?? ZEN_RESPONSES_MODEL) !== ZEN_RESPONSES_MODEL) throw new ConnectorError("provider_model_not_allowed", `The exact model ${ZEN_RESPONSES_MODEL} is required for Zen Responses.`);
+            const receipt = await readSuccessfulZenResponsesCapabilityReceipt(context.env, {
+              maxBillableRequests: Number(raw.maxBillableRequests),
+              maxEstimatedSpendUsd: Number(raw.maxEstimatedSpendUsd),
+            });
+            if (!receipt) throw new ConnectorError("provider_capability_receipt_required", "A successful, unexpired ODL-REQ-025 Zen Responses capability receipt with the exact budget identity is required before candidate classification.");
+          } else if (raw.classifierProvider === OPENCODE_GO_PROVIDER || raw.classifierMode === OPENCODE_GO_MODE) {
             if (String(raw.model ?? OPENCODE_GO_MODEL) !== OPENCODE_GO_MODEL) throw new ConnectorError("provider_model_not_allowed", `The exact model ${OPENCODE_GO_MODEL} is required for OpenCode Go.`);
             const receipt = await readSuccessfulOpenCodeGoCapabilityReceipt(context.env, {
               maxBillableRequests: Number(raw.maxBillableRequests),
