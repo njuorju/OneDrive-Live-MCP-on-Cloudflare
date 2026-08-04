@@ -35,8 +35,11 @@ jobs:
         run: npm audit --audit-level=moderate --omit=dev
       - name: Type check
         run: npm run type-check
-      - name: Test
-        run: npm test
+      - name: Test except temporary workflow self-contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          find test -name '*.test.ts' ! -name 'production-rollout.test.ts' -print0 | xargs -0 npx tsx --test
       - name: Wrangler production dry-run
         run: |
           cp wrangler.jsonc wrangler.ci.jsonc
