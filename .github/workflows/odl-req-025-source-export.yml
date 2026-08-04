@@ -1,9 +1,9 @@
 name: ODL-REQ-025 source export
 
 on:
-  push:
+  pull_request:
     branches:
-      - feature/odl-req-025-attachment-zen-responses
+      - main
 
 permissions:
   contents: read
@@ -15,11 +15,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
-      - name: Verify exact branch
+      - name: Verify exact PR head
         run: |
           set -euo pipefail
-          test "$(git branch --show-current)" = "feature/odl-req-025-attachment-zen-responses"
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
           git status --short
       - name: Package source
         run: |
