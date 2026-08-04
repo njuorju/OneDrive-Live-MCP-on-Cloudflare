@@ -159,7 +159,7 @@ test("pair validation fails on key set or expected count drift", async () => {
   const customFetch: typeof fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const raw = input instanceof URL ? input.href : typeof input === "string" ? input : input.url;
     const url = new URL(raw);
-    if (url.pathname === "/mismatch") return new Response(JSON.stringify([["source_record_id","name"],["ACA-9999","X"]]), { status: 200, headers: { "content-type": "application/json" } });
+    if (url.pathname === "/mismatch") return new Response(JSON.stringify([{ source_record_id: "ACA-9999", name: "X" }]), { status: 200, headers: { "content-type": "application/json" } });
     return mappedFetch(input, init);
   }) as typeof fetch;
   await assert.rejects(() => validateCataloguePairFilesStrict({ csvFile: ref("/csv", "x.csv", "text/csv"), jsonFile: ref("/mismatch", "x.json", "application/json"), recordKeyField: "source_record_id" }, 1024, customFetch), (e: unknown) => e instanceof ConnectorError && e.code === "catalogue_key_set_mismatch");
@@ -258,5 +258,5 @@ test("same-host redirect is allowed only when explicitly enabled and no authoriz
 
 test("declared byte size is enforced and included only as sanitized metadata", async () => {
   await assert.rejects(() => loadConnectorTextFile({ ...ref("/csv", "catalogue.csv", "text/csv"), size: 1 }, "target.csv", 1024, undefined, undefined, mappedFetch), (error: unknown) => error instanceof ConnectorError && error.code === "connector_file_content_invalid");
-  await assert.rejects(() => loadConnectorTextFile({ ...ref("/csv", "catalogue.csv", "text/csv"), size: 10_000 }, "target.csv", 1024, undefined, undefined, mappedFetch), (error: unknown) => error instanceof ConnectorError && e.code === "connector_file_too_large");
+  await assert.rejects(() => loadConnectorTextFile({ ...ref("/csv", "catalogue.csv", "text/csv"), size: 10_000 }, "target.csv", 1024, undefined, undefined, mappedFetch), (error: unknown) => error instanceof ConnectorError && error.code === "connector_file_too_large");
 });

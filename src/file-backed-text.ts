@@ -473,6 +473,10 @@ export async function validateCataloguePairFilesStrict(
       json: { filename: jsonIncoming.fileName, bytes: jsonIncoming.byteLength, sha256: jsonIncoming.sha256, declaredMimeType: jsonIncoming.declaredMimeType, sourceMimeType: jsonIncoming.sourceMimeType },
     },
     parity,
+    parsed: {
+      csv: { recordCount: parity.recordCount, headerWidth: parseCsvCatalogue(csvIncoming.text).columns.length },
+      json: { recordCount: parity.recordCount, rootType: (input.jsonRecordsPath ?? "").trim() ? "object_path" : "array" },
+    },
     runtimeReferenceShape: { csv: csvIncoming.runtimeShape, json: jsonIncoming.runtimeShape },
     networkPolicy: { csv: csvIncoming.networkReceipt, json: jsonIncoming.networkReceipt },
     oneDriveCalled: false,

@@ -305,6 +305,38 @@ export function decodeStrictUtf8(bytes: Uint8Array): string {
   return text;
 }
 
+function assertStructuredTextContent(fileName: string, text: string): void {
+  const ext = extension(fileName);
+  const clean = text.replace(/^\uFEFF/, "");
+  if (ext === "json") {
+    try { JSON.parse(clean); }
+    catch { throw boundaryError("connector_file_content_invalid", "The connector JSON file is malformed."); }
+    return;
+  }
+  if (ext !== "csv") return;
+  let quoted = false;
+  let fieldStarted = false;
+  for (let index = 0; index < clean.length; index += 1) {
+    const character = clean[index];
+    if (quoted) {
+      if (character === '"') {
+        if (clean[index + 1] === '"') index += 1;
+        else quoted = false;
+      }
+      continue;
+    }
+    if (character === '"') {
+      if (fieldStarted) throw boundaryError("connector_file_content_invalid", "The connector CSV file is malformed.");
+      quoted = true;
+    } else if (character === "," || character === "\n" || character === "\r") {
+      fieldStarted = false;
+    } else {
+      fieldStarted = true;
+    }
+  }
+  if (quoted) throw boundaryError("connector_file_content_invalid", "The connector CSV file is malformed.");
+}
+
 function requireAuthorizedParameter(options: ConnectorFileNetworkOptions): void {
   if (!options.enforceAuthorizedFileParam) return;
   const name = options.authorizedTopLevelFileParam ?? "";
@@ -402,6 +434,7 @@ export async function loadConnectorTextFile(
   if (reference.size !== undefined && bytes.byteLength !== reference.size) throw boundaryError("connector_file_content_invalid", "The connector file byte size does not match platform metadata.", { details: { expectedByteLength: reference.size, actualByteLength: bytes.byteLength } });
   if (expectedByteLength !== undefined && bytes.byteLength !== expectedByteLength) throw boundaryError("connector_file_content_invalid", "The connector file byte size does not match the expected value.", { details: { expectedByteLength, actualByteLength: bytes.byteLength } });
   const text = decodeStrictUtf8(bytes);
+  assertStructuredTextContent(fileName, text);
   const signature = validateFileSignature(fileName, exactArrayBuffer(bytes));
   if (!signature.compatible) throw boundaryError("connector_file_content_invalid", "The connector file content does not match the requested textual format.", { details: { detected: signature.detected, reason: signature.reason ?? null } });
   const sha256 = await sha256Hex(bytes);
