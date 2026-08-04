@@ -25,12 +25,12 @@ jobs:
       - name: Package source
         run: |
           set -euo pipefail
-          tar --exclude=.git --exclude=node_modules --exclude=dist --exclude=dist-production -czf odl-req-025-source.tgz .
-          sha256sum odl-req-025-source.tgz > odl-req-025-source.sha256
+          tar --exclude=.git --exclude=node_modules --exclude=dist --exclude=dist-production -czf /tmp/odl-req-025-source.tgz .
+          sha256sum /tmp/odl-req-025-source.tgz > /tmp/odl-req-025-source.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: odl-req-025-source
           path: |
-            odl-req-025-source.tgz
-            odl-req-025-source.sha256
+            /tmp/odl-req-025-source.tgz
+            /tmp/odl-req-025-source.sha256
           retention-days: 1
