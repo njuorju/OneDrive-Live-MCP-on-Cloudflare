@@ -1,20 +1,17 @@
-name: ODL-REQ-025 dependency lock repair
+name: ODL-REQ-025 dependency lock artifact
 
 on:
-  push:
-    branches:
-      - feature/odl-req-025-attachment-zen-responses
+  pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: odl-req-025-lock-repair
+  group: odl-req-025-lock-artifact-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  repair-lock:
-    if: github.actor != 'github-actions[bot]'
+  generate-lock:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -46,17 +43,12 @@ jobs:
           sed -i 's/REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER/CI_TEST_ROOT/g' wrangler.ci.jsonc
           sed -i 's/REPLACE_WITH_KV_NAMESPACE_ID/00000000000000000000000000000000/g' wrangler.ci.jsonc
           npx wrangler deploy --dry-run --config wrangler.ci.jsonc --outdir dist
-      - name: Commit regenerated lockfile only
-        shell: bash
-        run: |
-          set -euo pipefail
-          git diff --exit-code -- package.json
-          git add package-lock.json
-          if git diff --cached --quiet; then
-            echo "Lockfile already current."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "chore: refresh audited dependency lock"
-          git push origin HEAD:feature/odl-req-025-attachment-zen-responses
+      - name: Verify package manifest unchanged
+        run: git diff --exit-code -- package.json
+      - name: Upload regenerated lockfile
+        uses: actions/upload-artifact@v4
+        with:
+          name: odl-req-025-package-lock
+          path: package-lock.json
+          if-no-files-found: error
+          retention-days: 1
