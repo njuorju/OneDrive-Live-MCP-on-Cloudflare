@@ -181,7 +181,8 @@ export function parseZenResponsesUsage(body: Record<string, unknown>): ZenRespon
   const outputTokens = boundedInteger(usage.output_tokens ?? usage.completion_tokens);
   const cachedReadTokens = boundedInteger(usage.cached_read_tokens ?? inputDetails.cached_tokens ?? inputDetails.cached_read_tokens);
   const cachedWriteTokens = boundedInteger(usage.cached_write_tokens ?? inputDetails.cached_write_tokens);
-  const totalTokens = boundedInteger(usage.total_tokens ?? ((inputTokens ?? 0) + (outputTokens ?? 0)));
+  const explicitTotalTokens = boundedInteger(usage.total_tokens);
+  const totalTokens = explicitTotalTokens ?? (inputTokens !== null || outputTokens !== null ? (inputTokens ?? 0) + (outputTokens ?? 0) : null);
   const reported = [inputTokens, outputTokens, cachedReadTokens, cachedWriteTokens, totalTokens].some((value) => value !== null);
   return { inputTokens, outputTokens, cachedReadTokens, cachedWriteTokens, totalTokens, reported };
 }
