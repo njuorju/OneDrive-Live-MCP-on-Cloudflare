@@ -1,0 +1,829 @@
+name: ODL-REQ-027 bounded implementation
+
+on:
+  push:
+    branches:
+      - feature/odl-req-027-regional-attachments-zen-post
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: 3f67b673280f2119de4eedd09745e20f
+      WORKER_NAME: nikolay-onedrive-mcp
+      OPENING_MAIN_SHA: 366ae62c2104e5fb6cfe1f74fca8a73fc0bc57ec
+      OPENING_VERSION_ID: a20c1194-3a7f-43c9-896f-d8cd5d473f2f
+      OPENING_DEPLOYMENT_ID: ba7df97f-6717-4008-89d3-2a31a5c2e1e9
+      BRANCH_NAME: feature/odl-req-027-regional-attachments-zen-post
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/odl-req-027-regional-attachments-zen-post
+          fetch-depth: 0
+      - name: Verify opening GitHub and production lease
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "$OPENING_MAIN_SHA"
+          test "$(git merge-base HEAD origin/main)" = "$OPENING_MAIN_SHA"
+          test -n "$CLOUDFLARE_API_TOKEN"
+          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
+          auth=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json")
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/deployments" > opening-deployments.json
+          jq -e --arg d "$OPENING_DEPLOYMENT_ID" --arg v "$OPENING_VERSION_ID" '.success == true and .result.deployments[0].id == $d and .result.deployments[0].versions == [{version_id:$v,percentage:100}]' opening-deployments.json >/dev/null
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/settings" > opening-settings.json
+          jq -S '[.result.bindings[] | {name,type}] | sort_by(.name)' opening-settings.json > opening-bindings.json
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/secrets" > opening-secrets.json
+          jq -S '[.result[] | {name,type}] | sort_by(.name)' opening-secrets.json > opening-secret-bindings.json
+          jq -e 'any(.[]; .name == "OPENCODE_ZEN_API_KEY" and .type == "secret_text")' opening-secret-bindings.json >/dev/null
+      - name: Apply exact source and test patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly one match, found {count}")
+              return text.replace(old, new, 1)
+
+          connector_path = Path('src/connector-files.ts')
+          connector = connector_path.read_text(encoding='utf-8')
+          connector = replace_once(
+              connector,
+              'export const CHATGPT_ATTACHMENT_HOST = "oaisdmntprindiasocentral.blob.core.windows.net" as const;\nexport const CHATGPT_ATTACHMENT_ETLD_PLUS_ONE = "blob.core.windows.net" as const;',
+              'export const CHATGPT_ATTACHMENT_HOST = "oaisdmntprindiasocentral.blob.core.windows.net" as const;\nexport const CHATGPT_ATTACHMENT_HOST_PATTERN = /^oaisdmntpr[a-z0-9]+\\.blob\\.core\\.windows\\.net$/;\nexport const CHATGPT_ATTACHMENT_ETLD_PLUS_ONE = "blob.core.windows.net" as const;',
+              'attachment constants',
+          )
+          connector = replace_once(
+              connector,
+              'function normalizedHostname(url: URL): string {\n  return url.hostname.replace(/\\.+$/, "").toLocaleLowerCase("en");\n}',
+              '''function normalizedHostname(url: URL): string {
+  const lower = url.hostname.toLocaleLowerCase("en");
+  return lower.endsWith(".") ? lower.slice(0, -1) : lower;
+}
+
+export function isTrustedChatGptAttachmentHostname(hostname: string): boolean {
+  const lower = hostname.toLocaleLowerCase("en");
+  const normalized = lower.endsWith(".") ? lower.slice(0, -1) : lower;
+  if (!normalized || normalized.endsWith(".") || normalized.split(".").some((label) => label.startsWith("xn--"))) return false;
+  return CHATGPT_ATTACHMENT_HOST_PATTERN.test(normalized);
+}''',
+              'hostname normalization',
+          )
+          connector = replace_once(
+              connector,
+              '''  if (host !== CHATGPT_ATTACHMENT_HOST) {
+    throw boundaryError("connector_file_download_forbidden", "The connector file download host is not permitted.", {
+      details: { scheme: url.protocol.replace(":", ""), normalizedHostname: host, effectivePort },
+    });
+  }''',
+              '''  if (!isTrustedChatGptAttachmentHostname(host)) {
+    throw boundaryError("connector_file_download_forbidden", "The connector file download host is not permitted.", {
+      details: { scheme: url.protocol.replace(":", ""), normalizedHostname: host, effectivePort },
+    });
+  }''',
+              'exact attachment host check',
+          )
+          connector_path.write_text(connector, encoding='utf-8')
+
+          zen_path = Path('src/visual-catalogue-zen-responses.ts')
+          zen = zen_path.read_text(encoding='utf-8')
+          zen = replace_once(
+              zen,
+              'const MAX_RESPONSE_BYTES = 64 * 1024;',
+              'const MAX_RESPONSE_BYTES = 64 * 1024;\nconst ZEN_RESPONSES_TIMEOUT_MS = 60_000;',
+              'Zen response constants',
+          )
+          transport_types = r'''
+export type ZenResponsesTransportReceipt = {
+  version: 1;
+  provider: typeof ZEN_RESPONSES_PROVIDER;
+  mode: typeof ZEN_RESPONSES_MODE;
+  model: typeof ZEN_RESPONSES_MODEL;
+  endpointClass: "responses_post";
+  stage: string;
+  requestByteCount: number | null;
+  requestShapeFingerprint: string | null;
+  timeoutMilliseconds: number;
+  fetchBegan: boolean;
+  credentialBindingExists: boolean;
+  correlationId: string;
+  httpStatus: number | null;
+  responseContentType: string | null;
+  declaredContentLength: number | null;
+  providerRequestId: string | null;
+  edgeRequestId: string | null;
+  responseByteCount: number | null;
+  responseShapeFingerprint: string | null;
+  parserResult: string;
+  schemaResult: string;
+  usagePresent: boolean | null;
+  localErrorCode: string | null;
+  localErrorClass: string | null;
+};
+
+export class ZenResponsesTransportError extends ConnectorError {
+  readonly receipt: ZenResponsesTransportReceipt;
+
+  constructor(
+    code: string,
+    message: string,
+    receipt: ZenResponsesTransportReceipt,
+    options: { retryable?: boolean; status?: number } = {},
+  ) {
+    super(code, message, {
+      ...options,
+      correlationId: receipt.correlationId,
+      details: { transportReceipt: receipt },
+    });
+    this.receipt = receipt;
+  }
+}
+
+export function isZenResponsesTransportError(error: unknown): error is ZenResponsesTransportError {
+  if (!error || typeof error !== "object") return false;
+  const record = error as Record<string, unknown>;
+  const receipt = record.receipt;
+  return typeof record.code === "string"
+    && Boolean(receipt && typeof receipt === "object" && (receipt as Record<string, unknown>).endpointClass === "responses_post");
+}
+
+'''
+          zen = replace_once(zen, 'function boundedInteger(value: unknown): number | null {', transport_types + 'function boundedInteger(value: unknown): number | null {', 'transport types')
+
+          helper_block = r'''
+function sanitizedStage(context: string): string {
+  const candidate = context.split(":").pop() ?? "unknown";
+  return /^[a-z0-9_.-]+$/i.test(candidate) ? candidate.slice(0, 120) : "unknown";
+}
+
+function boundedHeader(headers: Headers, names: string[]): string | null {
+  for (const name of names) {
+    const value = headers.get(name)?.trim();
+    if (value) return value.slice(0, 200);
+  }
+  return null;
+}
+
+function declaredContentLength(headers: Headers): number | null {
+  const value = headers.get("content-length");
+  if (!value) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function requestShape(body: Record<string, unknown>): Record<string, unknown> {
+  const inputItems = Array.isArray(body.input) ? body.input as Record<string, unknown>[] : [];
+  const contentTypes: string[] = [];
+  let imagePresent = false;
+  for (const item of inputItems) {
+    const content = Array.isArray(item?.content) ? item.content as Record<string, unknown>[] : [];
+    for (const part of content) {
+      const type = String(part?.type ?? "unknown");
+      contentTypes.push(type);
+      if (type === "input_image") imagePresent = true;
+    }
+  }
+  return {
+    topLevelKeys: Object.keys(body).sort(),
+    model: String(body.model ?? ""),
+    store: body.store === false,
+    inputItemCount: inputItems.length,
+    contentTypes: contentTypes.slice(0, 32),
+    imagePresent,
+    structuredSchemaPresent: Boolean(body.text && typeof body.text === "object"),
+    maxOutputTokensPresent: Number.isFinite(Number(body.max_output_tokens)),
+  };
+}
+
+function responseShape(body: Record<string, unknown>, status: number): Record<string, unknown> {
+  const output = Array.isArray(body.output) ? body.output as Record<string, unknown>[] : [];
+  const outputItemTypes = output.map((item) => String(item?.type ?? "unknown")).slice(0, 32);
+  const contentPartTypes: string[] = [];
+  for (const item of output) {
+    const content = Array.isArray(item?.content) ? item.content as Record<string, unknown>[] : [];
+    for (const part of content) contentPartTypes.push(String(part?.type ?? "unknown"));
+  }
+  return {
+    httpStatus: status,
+    topLevelKeys: Object.keys(body).sort().slice(0, 64),
+    completionStatus: typeof body.status === "string" ? body.status.slice(0, 80) : null,
+    outputItemTypes,
+    contentPartTypes: contentPartTypes.slice(0, 64),
+    usagePresent: Boolean(body.usage),
+  };
+}
+
+async function zenResponsesTransportReceiptKey(spendLedgerKey: string, correlationId: string): Promise<string> {
+  const scopeFingerprint = (await sha256HexUtf8(spendLedgerKey)).slice(0, 32);
+  return `visual-compiler/provider-transport/opencode-zen-responses/${ZEN_RESPONSES_MODEL}/${scopeFingerprint}/${correlationId}.json`;
+}
+
+async function persistZenResponsesTransportReceipt(
+  env: Pick<Env, "ARTIFACTS">,
+  key: string,
+  receipt: ZenResponsesTransportReceipt,
+): Promise<void> {
+  await putArtifact(env as Env, key, JSON.stringify(receipt, null, 2), "application/json; charset=utf-8", {
+    provider: receipt.provider,
+    model: receipt.model,
+    stage: receipt.stage,
+    status: receipt.localErrorCode ?? receipt.parserResult,
+  });
+}
+
+function receiptPersistError(receipt: ZenResponsesTransportReceipt): ZenResponsesTransportError {
+  const failed = {
+    ...receipt,
+    localErrorCode: "zen_responses_receipt_persist_failed",
+    localErrorClass: "receipt_persistence",
+  };
+  return new ZenResponsesTransportError(
+    "zen_responses_receipt_persist_failed",
+    "The sanitized Zen Responses transport receipt could not be persisted.",
+    failed,
+  );
+}
+
+async function persistZenResponsesTransportReceiptOrThrow(
+  env: Pick<Env, "ARTIFACTS">,
+  key: string,
+  receipt: ZenResponsesTransportReceipt,
+): Promise<void> {
+  try {
+    await persistZenResponsesTransportReceipt(env, key, receipt);
+  } catch {
+    throw receiptPersistError(receipt);
+  }
+}
+
+async function failZenResponsesTransport(
+  env: Pick<Env, "ARTIFACTS">,
+  key: string,
+  receipt: ZenResponsesTransportReceipt,
+  code: string,
+  message: string,
+  localErrorClass: string,
+  options: { retryable?: boolean; status?: number } = {},
+): Promise<never> {
+  const failed = { ...receipt, localErrorCode: code, localErrorClass };
+  try {
+    await persistZenResponsesTransportReceipt(env, key, failed);
+  } catch {
+    throw receiptPersistError(failed);
+  }
+  throw new ZenResponsesTransportError(code, message, failed, options);
+}
+
+async function readBoundedZenResponsesBody(response: Response): Promise<Uint8Array> {
+  const declared = declaredContentLength(response.headers);
+  if (declared !== null && declared > MAX_RESPONSE_BYTES) {
+    await response.body?.cancel();
+    throw new ConnectorError("zen_responses_body_too_large", "The Zen Responses body exceeded the bounded response ceiling.");
+  }
+  if (!response.body) {
+    let buffer: ArrayBuffer;
+    try { buffer = await response.arrayBuffer(); }
+    catch { throw new ConnectorError("zen_responses_body_read_failed", "The Zen Responses body could not be read.", { retryable: true }); }
+    if (buffer.byteLength > MAX_RESPONSE_BYTES) throw new ConnectorError("zen_responses_body_too_large", "The Zen Responses body exceeded the bounded response ceiling.");
+    return new Uint8Array(buffer);
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      let next: ReadableStreamReadResult<Uint8Array>;
+      try { next = await reader.read(); }
+      catch { throw new ConnectorError("zen_responses_body_read_failed", "The Zen Responses body could not be read.", { retryable: true }); }
+      if (next.done) break;
+      if (!next.value) continue;
+      total += next.value.byteLength;
+      if (total > MAX_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw new ConnectorError("zen_responses_body_too_large", "The Zen Responses body exceeded the bounded response ceiling.");
+      }
+      chunks.push(next.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { output.set(chunk, offset); offset += chunk.byteLength; }
+  return output;
+}
+
+'''
+          marker = 'export async function requestZenResponses(input: {'
+          zen = replace_once(zen, marker, helper_block + marker, 'transport helpers')
+          start = zen.index(marker)
+          end_marker = '\nexport async function responseFingerprint('
+          end = zen.index(end_marker, start)
+          request_impl = r'''export async function requestZenResponses(input: {
+  env: Pick<Env, "OPENCODE_ZEN_API_KEY" | "ARTIFACTS">;
+  spendLedgerKey: string;
+  body: Record<string, unknown>;
+  context: string;
+  requestIdentity?: string | null;
+  provider?: unknown;
+  mode?: unknown;
+  timeoutMilliseconds?: number;
+  fetchImpl?: typeof fetch;
+}): Promise<{ body: Record<string, unknown>; text: string; usage: ZenResponsesUsage; accounting: ZenResponsesSpendLedger; structuralReceipt: ZenResponsesStructuralReceipt; transportReceipt: ZenResponsesTransportReceipt; status: number; latencyMilliseconds: number }> {
+  const correlationId = crypto.randomUUID();
+  const timeoutMilliseconds = Math.max(1, Math.min(ZEN_RESPONSES_TIMEOUT_MS, Math.round(Number(input.timeoutMilliseconds ?? ZEN_RESPONSES_TIMEOUT_MS)) || ZEN_RESPONSES_TIMEOUT_MS));
+  const receiptKey = await zenResponsesTransportReceiptKey(input.spendLedgerKey, correlationId);
+  let receipt: ZenResponsesTransportReceipt = {
+    version: 1,
+    provider: ZEN_RESPONSES_PROVIDER,
+    mode: ZEN_RESPONSES_MODE,
+    model: ZEN_RESPONSES_MODEL,
+    endpointClass: "responses_post",
+    stage: sanitizedStage(input.context),
+    requestByteCount: null,
+    requestShapeFingerprint: null,
+    timeoutMilliseconds,
+    fetchBegan: false,
+    credentialBindingExists: false,
+    correlationId,
+    httpStatus: null,
+    responseContentType: null,
+    declaredContentLength: null,
+    providerRequestId: null,
+    edgeRequestId: null,
+    responseByteCount: null,
+    responseShapeFingerprint: null,
+    parserResult: "not_started",
+    schemaResult: "not_run",
+    usagePresent: null,
+    localErrorCode: null,
+    localErrorClass: null,
+  };
+
+  const provider = String(input.provider ?? ZEN_RESPONSES_PROVIDER);
+  const mode = String(input.mode ?? ZEN_RESPONSES_MODE);
+  if (provider !== ZEN_RESPONSES_PROVIDER || mode !== ZEN_RESPONSES_MODE || String(input.body.model ?? "") !== ZEN_RESPONSES_MODEL) {
+    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_fetch_not_started", "Zen Responses transport requires the exact provider, mode, and model identity.", "dispatch_validation");
+  }
+  if (input.body.store !== false) {
+    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_fetch_not_started", "Zen Responses transport requires the existing store=false request contract.", "request_validation");
+  }
+  const credential = typeof input.env.OPENCODE_ZEN_API_KEY === "string" ? input.env.OPENCODE_ZEN_API_KEY.trim() : "";
+  receipt = { ...receipt, credentialBindingExists: credential.length > 0 };
+  if (!credential) {
+    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_fetch_not_started", "The OPENCODE_ZEN_API_KEY binding is not configured.", "credential_validation");
+  }
+  if (typeof (input.fetchImpl ?? fetch) !== "function") {
+    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_fetch_not_started", "The Zen Responses fetch implementation was not invokable.", "fetch_invocation");
+  }
+
+  let serializedBody: string;
+  try {
+    serializedBody = JSON.stringify(input.body);
+  } catch {
+    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_fetch_not_started", "The existing Zen Responses request payload could not be serialized.", "body_serialization");
+  }
+  const requestBytes = new TextEncoder().encode(serializedBody);
+  const requestShapeFingerprint = await sha256HexUtf8(JSON.stringify(requestShape(input.body)));
+  await assertZenResponsesBudgetAvailable(input.env as Env, input.spendLedgerKey);
+
+  receipt = {
+    ...receipt,
+    requestByteCount: requestBytes.byteLength,
+    requestShapeFingerprint,
+    fetchBegan: true,
+    parserResult: "prefetch_receipt_persisted",
+  };
+  await persistZenResponsesTransportReceiptOrThrow(input.env, receiptKey, receipt);
+
+  const fetchImpl = input.fetchImpl ?? fetch;
+  const controller = new AbortController();
+  let timeoutFired = false;
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    timeoutHandle = setTimeout(() => {
+      timeoutFired = true;
+      controller.abort("zen_responses_timeout");
+      reject(new Error("zen_responses_timeout"));
+    }, timeoutMilliseconds);
+  });
+  const started = Date.now();
+  let response: Response;
+  try {
+    response = await Promise.race([
+      Promise.resolve().then(() => fetchImpl(ZEN_RESPONSES_ENDPOINT, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${credential}`, "Content-Type": "application/json" },
+        body: serializedBody,
+        redirect: "error",
+        signal: controller.signal,
+      })),
+      timeoutPromise,
+    ]);
+  } catch (error) {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    if (timeoutFired || controller.signal.aborted) {
+      return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_timeout", "The Zen Responses request exceeded the bounded transport timeout.", error instanceof Error ? error.name : typeof error, { retryable: true });
+    }
+    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_network_error", "The Zen Responses request failed before an HTTP response was received.", error instanceof Error ? error.name : typeof error, { retryable: true });
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+
+  receipt = {
+    ...receipt,
+    httpStatus: response.status,
+    responseContentType: response.headers.get("content-type")?.slice(0, 160) ?? null,
+    declaredContentLength: declaredContentLength(response.headers),
+    providerRequestId: boundedHeader(response.headers, ["x-request-id", "request-id", "openai-request-id"]),
+    edgeRequestId: boundedHeader(response.headers, ["cf-ray", "x-vercel-id", "x-envoy-upstream-service-time"]),
+    parserResult: "headers_received",
+  };
+  await persistZenResponsesTransportReceiptOrThrow(input.env, receiptKey, receipt);
+
+  let bytes: Uint8Array;
+  try {
+    bytes = await readBoundedZenResponsesBody(response);
+  } catch (error) {
+    const code = error instanceof ConnectorError && ["zen_responses_body_too_large", "zen_responses_body_read_failed"].includes(error.code)
+      ? error.code
+      : "zen_responses_body_read_failed";
+    return failZenResponsesTransport(input.env, receiptKey, receipt, code, code === "zen_responses_body_too_large" ? "The Zen Responses body exceeded the bounded response ceiling." : "The Zen Responses body could not be read.", error instanceof Error ? error.name : typeof error, { retryable: code === "zen_responses_body_read_failed", status: response.status });
+  }
+  receipt = { ...receipt, responseByteCount: bytes.byteLength, parserResult: "body_read" };
+  await persistZenResponsesTransportReceiptOrThrow(input.env, receiptKey, receipt);
+
+  let body: Record<string, unknown>;
+  try {
+    const decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const parsed = JSON.parse(decoded) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("root_not_object");
+    body = parsed as Record<string, unknown>;
+  } catch (error) {
+    const usage = parseZenResponsesUsage({});
+    await recordZenResponsesAccounting({ env: input.env as Env, key: input.spendLedgerKey, context: input.context, httpStatus: response.status, usage, requestIdentity: input.requestIdentity });
+    receipt = {
+      ...receipt,
+      responseShapeFingerprint: await sha256HexUtf8(JSON.stringify({ httpStatus: response.status, responseByteCount: bytes.byteLength, jsonObject: false })),
+      parserResult: "json_parse_failed",
+      schemaResult: "not_run",
+      usagePresent: false,
+    };
+    if (!response.ok) {
+      return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_http_error", "The Zen Responses endpoint returned a non-success HTTP status.", "http_status", { retryable: response.status === 429 || response.status >= 500, status: response.status });
+    }
+    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_response_malformed", "The Zen Responses body was not a valid JSON object.", error instanceof Error ? error.name : typeof error, { status: response.status });
+  }
+
+  const usage = parseZenResponsesUsage(body);
+  const accounting = await recordZenResponsesAccounting({ env: input.env as Env, key: input.spendLedgerKey, context: input.context, httpStatus: response.status, usage, requestIdentity: input.requestIdentity });
+  receipt = {
+    ...receipt,
+    responseShapeFingerprint: await sha256HexUtf8(JSON.stringify(responseShape(body, response.status))),
+    parserResult: "json_object_parsed",
+    usagePresent: Boolean(body.usage),
+  };
+  await persistZenResponsesTransportReceiptOrThrow(input.env, receiptKey, receipt);
+
+  if (!response.ok) {
+    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_http_error", "The Zen Responses endpoint returned a non-success HTTP status.", "http_status", { retryable: response.status === 429 || response.status >= 500, status: response.status });
+  }
+
+  let parsedOutput: { text: string; receipt: ZenResponsesStructuralReceipt };
+  try {
+    parsedOutput = parseZenResponsesOutput(body, response.status, requestShapeFingerprint);
+  } catch (error) {
+    const originalCode = error instanceof ConnectorError ? error.code : "zen_responses_response_malformed";
+    const mappedCode = ["classifier_output_missing", "provider_reasoning_only"].includes(originalCode)
+      ? "zen_responses_output_missing"
+      : originalCode;
+    const structuralReceipt = error instanceof ConnectorError && error.details?.structuralReceipt && typeof error.details.structuralReceipt === "object"
+      ? error.details.structuralReceipt as ZenResponsesStructuralReceipt
+      : null;
+    receipt = {
+      ...receipt,
+      parserResult: structuralReceipt?.responseClass ?? "output_parse_failed",
+      schemaResult: "not_run",
+    };
+    return failZenResponsesTransport(input.env, receiptKey, receipt, mappedCode, mappedCode === "zen_responses_output_missing" ? "The Zen Responses body contained no completed assistant output_text." : "The Zen Responses output failed structural validation.", error instanceof Error ? error.name : typeof error, { status: response.status });
+  }
+
+  const schemaRequested = Boolean(input.body.text && typeof input.body.text === "object");
+  let schemaResult = "not_requested";
+  if (schemaRequested) {
+    try {
+      const parsed = JSON.parse(parsedOutput.text) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("schema_root_not_object");
+      schemaResult = "json_object_parsed";
+    } catch (error) {
+      receipt = { ...receipt, parserResult: "output_text_parsed", schemaResult: "invalid" };
+      return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_schema_invalid", "The structured Zen Responses output was not a JSON object.", error instanceof Error ? error.name : typeof error, { status: response.status });
+    }
+  }
+
+  receipt = {
+    ...receipt,
+    parserResult: "output_text_parsed",
+    schemaResult,
+    usagePresent: Boolean(body.usage),
+  };
+  await persistZenResponsesTransportReceiptOrThrow(input.env, receiptKey, receipt);
+  return {
+    body,
+    text: parsedOutput.text,
+    usage,
+    accounting,
+    structuralReceipt: parsedOutput.receipt,
+    transportReceipt: receipt,
+    status: response.status,
+    latencyMilliseconds: Date.now() - started,
+  };
+}
+'''
+          zen = zen[:start] + request_impl + zen[end:]
+          zen_path.write_text(zen, encoding='utf-8')
+
+          capability_path = Path('src/visual-classifier-capability-zen-responses.ts')
+          capability = capability_path.read_text(encoding='utf-8')
+          capability = replace_once(capability, '  requestZenResponses,\n  updateZenResponsesPricing,', '  requestZenResponses,\n  isZenResponsesTransportError,\n  updateZenResponsesPricing,', 'capability transport import')
+          capability = replace_once(capability, '  type ZenResponsesStructuralReceipt,\n  type ZenResponsesUsage,', '  type ZenResponsesStructuralReceipt,\n  type ZenResponsesTransportReceipt,\n  type ZenResponsesUsage,', 'capability receipt type import')
+          capability = replace_once(capability, '  structuralReceipt: ZenResponsesStructuralReceipt | null;\n  discoveryReceipt: ZenModelsDiscoveryReceipt | null;', '  structuralReceipt: ZenResponsesStructuralReceipt | null;\n  transportReceipt: ZenResponsesTransportReceipt | null;\n  discoveryReceipt: ZenModelsDiscoveryReceipt | null;', 'attempt receipt type')
+          capability = replace_once(capability, '  let structuralReceipt: ZenResponsesStructuralReceipt | null = null;\n  let discoveryReceipt: ZenModelsDiscoveryReceipt | null = null;', '  let structuralReceipt: ZenResponsesStructuralReceipt | null = null;\n  let transportReceipt: ZenResponsesTransportReceipt | null = null;\n  let discoveryReceipt: ZenModelsDiscoveryReceipt | null = null;', 'attempt receipt variable')
+          capability = replace_once(capability, '      structuralReceipt = result.structuralReceipt;\n      usage = result.usage;', '      structuralReceipt = result.structuralReceipt;\n      transportReceipt = result.transportReceipt;\n      usage = result.usage;', 'successful transport receipt')
+          old_catch = '''    if (isZenModelsDiscoveryError(error)) {
+      discoveryReceipt = error.receipt;
+      httpStatus = error.receipt.httpStatus;
+      parserResult = error.receipt.parserResult;
+      schemaValidationResult = error.code === "zen_model_exact_id_absent" ? "exact_model_absent" : "failed";
+    } else {
+      parserResult = parserResult === "not_run" ? "stage_failed" : parserResult;
+      schemaValidationResult = schemaValidationResult === "not_run" ? "failed" : schemaValidationResult;
+    }'''
+          new_catch = '''    if (isZenModelsDiscoveryError(error)) {
+      discoveryReceipt = error.receipt;
+      httpStatus = error.receipt.httpStatus;
+      parserResult = error.receipt.parserResult;
+      schemaValidationResult = error.code === "zen_model_exact_id_absent" ? "exact_model_absent" : "failed";
+    } else if (isZenResponsesTransportError(error)) {
+      transportReceipt = error.receipt;
+      httpStatus = error.receipt.httpStatus;
+      parserResult = error.receipt.parserResult;
+      schemaValidationResult = error.receipt.schemaResult;
+    } else {
+      parserResult = parserResult === "not_run" ? "stage_failed" : parserResult;
+      schemaValidationResult = schemaValidationResult === "not_run" ? "failed" : schemaValidationResult;
+    }'''
+          capability = replace_once(capability, old_catch, new_catch, 'capability error receipt')
+          capability = replace_once(capability, '    httpStatus, status, parserResult, schemaValidationResult, structuralReceipt, discoveryReceipt, usage, accounting, errorCode: failure,', '    httpStatus, status, parserResult, schemaValidationResult, structuralReceipt, transportReceipt, discoveryReceipt, usage, accounting, errorCode: failure,', 'capability attempt return')
+          capability = replace_once(capability, 'structuralReceipt: attempt.structuralReceipt, discoveryReceipt: attempt.discoveryReceipt ?? null, errorCode:', 'structuralReceipt: attempt.structuralReceipt, transportReceipt: attempt.transportReceipt ?? null, discoveryReceipt: attempt.discoveryReceipt ?? null, errorCode:', 'capability status summary')
+          capability_path.write_text(capability, encoding='utf-8')
+
+          connector_test_path = Path('test/connector-file-contract.test.ts')
+          connector_tests = connector_test_path.read_text(encoding='utf-8')
+          connector_tests += r'''
+
+test("bounded ChatGPT regional attachment-host family accepts exact platform storage-account labels", () => {
+  for (const hostname of [
+    "oaisdmntprindiasocentral.blob.core.windows.net",
+    "oaisdmntprnznorth.blob.core.windows.net",
+    "oaisdmntprwestus3.blob.core.windows.net",
+    "OAISDMNTPRNZNORTH.BLOB.CORE.WINDOWS.NET",
+    "oaisdmntprnznorth.blob.core.windows.net.",
+  ]) {
+    assert.equal(trustedConnectorFileUrl(`https://${hostname}/mounted`).hostname, hostname.toLocaleLowerCase("en").replace(/\.$/, ""));
+  }
+});
+
+test("bounded ChatGPT regional attachment-host family rejects broadened Azure, label, suffix, IDN and transport variants", () => {
+  const forbidden = [
+    "https://nznorth.blob.core.windows.net/file",
+    "https://oaisdmnt.blob.core.windows.net/file",
+    "https://oaisdmntpr.example.blob.core.windows.net/file",
+    "https://oaisdmntprnznorth.extra.blob.core.windows.net/file",
+    "https://oaisdmntprnznorth.blob.core.windows.net.attacker.example/file",
+    "https://oaisdmntpr-nznorth.blob.core.windows.net/file",
+    "https://oaisdmntpr_nznorth.blob.core.windows.net/file",
+    "https://oaisdmntprnz.north.blob.core.windows.net/file",
+    "https://xn--oaisdmntprnznorth-9za.blob.core.windows.net/file",
+    "https://oaisdmntprnznorth.blob.core.windows.net../file",
+    "http://oaisdmntprnznorth.blob.core.windows.net/file",
+    "https://oaisdmntprnznorth.blob.core.windows.net:444/file",
+    "https://user@oaisdmntprnznorth.blob.core.windows.net/file",
+    "https://127.0.0.1/file",
+    "https://[::1]/file",
+  ];
+  for (const value of forbidden) {
+    assert.throws(() => trustedConnectorFileUrl(value), (error: unknown) => error instanceof ConnectorError && error.code === "connector_file_download_forbidden");
+  }
+});
+
+test("regional host acceptance never substitutes for the platform file-reference object or fileParams declaration", async () => {
+  assert.throws(
+    () => normalizeConnectorFileReference("https://oaisdmntprnznorth.blob.core.windows.net/file"),
+    (error: unknown) => error instanceof ConnectorError && error.code === "connector_file_reference_malformed",
+  );
+  const regional = { download_url: "https://oaisdmntprnznorth.blob.core.windows.net/csv", file_id: "file_regional", file_name: "catalogue.csv", mime_type: "text/csv" };
+  await assert.rejects(
+    () => loadConnectorTextFile(regional, "catalogue.csv", 1024, undefined, undefined, mappedFetch, { enforceAuthorizedFileParam: true, authorizedTopLevelFileParam: "file", declaredFileParams: [] }),
+    (error: unknown) => error instanceof ConnectorError && error.code === "connector_file_parameter_not_authorized",
+  );
+});
+
+test("regional-host failures expose only sanitized diagnostics", async () => {
+  const reference = { download_url: "https://oaisdmntpr-nznorth.blob.core.windows.net/file?token=REGIONAL_SECRET", file_id: "file_REGIONAL_SECRET", file_name: "secret.csv", mime_type: "text/csv" };
+  let caught: unknown;
+  try { await loadConnectorTextFile(reference, "secret.csv", 1024, undefined, undefined, mappedFetch); } catch (error) { caught = error; }
+  const rendered = JSON.stringify(safeErrorResult(caught));
+  assert.equal(rendered.includes("REGIONAL_SECRET"), false);
+  assert.equal(rendered.includes("download_url"), false);
+  assert.equal(rendered.includes("file_REGIONAL_SECRET"), false);
+});
+'''
+          connector_test_path.write_text(connector_tests, encoding='utf-8')
+
+          transport_test = r'''import test from "node:test";
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { ConnectorError, safeErrorResult } from "../src/errors";
+import {
+  ZEN_RESPONSES_ENDPOINT,
+  ZEN_RESPONSES_MODE,
+  ZEN_RESPONSES_MODEL,
+  ZEN_RESPONSES_PROVIDER,
+  buildZenResponsesRequest,
+  initializeZenResponsesSpendLedger,
+  isZenResponsesTransportError,
+  requestZenResponses,
+} from "../src/visual-catalogue-zen-responses";
+
+class MemoryR2 {
+  values = new Map<string, { body: Uint8Array; customMetadata?: Record<string, string> }>();
+  failWrites = false;
+  async get(key: string) {
+    const value = this.values.get(key);
+    if (!value) return null;
+    return { text: async () => new TextDecoder().decode(value.body), arrayBuffer: async () => value.body.slice().buffer, customMetadata: value.customMetadata };
+  }
+  async put(key: string, body: string | ArrayBuffer | Uint8Array, options?: any) {
+    if (this.failWrites) throw new Error("r2 unavailable");
+    const bytes = typeof body === "string" ? new TextEncoder().encode(body) : body instanceof Uint8Array ? body : new Uint8Array(body);
+    this.values.set(key, { body: bytes, customMetadata: options?.customMetadata });
+  }
+  async head(key: string) { return this.values.has(key) ? {} : null; }
+}
+
+function completed(text: string, usage: Record<string, unknown> = { input_tokens: 12, output_tokens: 4, total_tokens: 16 }) {
+  return { id: "resp_test", status: "completed", output: [{ type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text }] }], usage };
+}
+
+async function setup(scope: string) {
+  const r2 = new MemoryR2();
+  const env = { ARTIFACTS: r2, OPENCODE_ZEN_API_KEY: "zen-secret" } as any;
+  const ledger = await initializeZenResponsesSpendLedger(env, scope, 75, 1);
+  return { r2, env, ledger };
+}
+
+function transportObjects(r2: MemoryR2) {
+  return [...r2.values.entries()].filter(([key]) => key.includes("/provider-transport/")).map(([key, value]) => ({ key, receipt: JSON.parse(new TextDecoder().decode(value.body)) as any }));
+}
+
+test("Zen Responses POST persists a sanitized pre-fetch receipt before exact endpoint dispatch", async () => {
+  const { r2, env, ledger } = await setup("transport-success");
+  let observed = false;
+  const fetchImpl: typeof fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = input instanceof URL ? input.href : typeof input === "string" ? input : input.url;
+    assert.equal(url, ZEN_RESPONSES_ENDPOINT);
+    assert.equal(init?.method, "POST");
+    assert.equal(JSON.parse(String(init?.body)).model, ZEN_RESPONSES_MODEL);
+    const existing = transportObjects(r2);
+    assert.equal(existing.length, 1);
+    assert.equal(existing[0].receipt.fetchBegan, true);
+    assert.equal(existing[0].receipt.httpStatus, null);
+    assert.equal(existing[0].receipt.endpointClass, "responses_post");
+    observed = true;
+    return new Response(JSON.stringify(completed('{"ok":true,"probe":"odl-req-025"}')), { status: 200, headers: { "content-type": "application/json", "x-request-id": "req-safe", "cf-ray": "edge-safe" } });
+  }) as typeof fetch;
+  const request = buildZenResponsesRequest({ text: "PRIVATE_PROMPT", maxOutputTokens: 128, schema: { name: "probe", schema: { type: "object" } } });
+  const result = await requestZenResponses({ env, spendLedgerKey: ledger.key, body: request, context: "capability:text_structured_output", requestIdentity: "job:stage", fetchImpl });
+  assert.equal(observed, true);
+  assert.equal(result.status, 200);
+  assert.equal(result.transportReceipt.httpStatus, 200);
+  assert.equal(result.transportReceipt.parserResult, "output_text_parsed");
+  assert.equal(result.transportReceipt.schemaResult, "json_object_parsed");
+  assert.equal(result.transportReceipt.providerRequestId, "req-safe");
+  assert.equal(result.transportReceipt.edgeRequestId, "edge-safe");
+  assert.equal(result.accounting.billableRequestCount, 1);
+  assert.equal(result.accounting.inputTokens, 12);
+  const rendered = JSON.stringify(result.transportReceipt);
+  for (const forbidden of ["PRIVATE_PROMPT", "zen-secret", "https://", "Bearer ", "output_text\",\"text", "data:image"]) assert.equal(rendered.includes(forbidden), false, forbidden);
+});
+
+test("exact provider, mode, model, credential and fetch implementation are validated before fetch", async () => {
+  const { r2, env, ledger } = await setup("transport-prefetch");
+  let calls = 0;
+  const fetchImpl = (async () => { calls += 1; return new Response("{}"); }) as typeof fetch;
+  const body = buildZenResponsesRequest({ text: "x", maxOutputTokens: 64 });
+  await assert.rejects(() => requestZenResponses({ env, spendLedgerKey: ledger.key, body, context: "test", provider: "opencode_go", mode: ZEN_RESPONSES_MODE, fetchImpl }), (error: unknown) => isZenResponsesTransportError(error) && error.code === "zen_responses_fetch_not_started" && error.receipt.fetchBegan === false);
+  await assert.rejects(() => requestZenResponses({ env: { ...env, OPENCODE_ZEN_API_KEY: "" }, spendLedgerKey: ledger.key, body, context: "test", fetchImpl }), (error: unknown) => isZenResponsesTransportError(error) && error.code === "zen_responses_fetch_not_started" && error.receipt.credentialBindingExists === false);
+  await assert.rejects(() => requestZenResponses({ env, spendLedgerKey: ledger.key, body, context: "test", fetchImpl: null as any }), (error: unknown) => isZenResponsesTransportError(error) && error.code === "zen_responses_fetch_not_started");
+  assert.equal(calls, 0);
+  assert.ok(transportObjects(r2).length >= 3);
+});
+
+test("bounded timeout settles even when the fetch promise never settles", async () => {
+  const { env, ledger } = await setup("transport-timeout");
+  const never = (() => new Promise<Response>(() => {})) as typeof fetch;
+  const started = Date.now();
+  await assert.rejects(() => requestZenResponses({ env, spendLedgerKey: ledger.key, body: buildZenResponsesRequest({ text: "x", maxOutputTokens: 64 }), context: "test", timeoutMilliseconds: 20, fetchImpl: never }), (error: unknown) => isZenResponsesTransportError(error) && error.code === "zen_responses_timeout" && error.receipt.fetchBegan === true);
+  assert.ok(Date.now() - started < 1000);
+});
+
+test("network failure has a precise pre-HTTP classification and does not increment accounting", async () => {
+  const { env, ledger } = await setup("transport-network");
+  const failing = (async () => { throw new TypeError("network down"); }) as typeof fetch;
+  await assert.rejects(() => requestZenResponses({ env, spendLedgerKey: ledger.key, body: buildZenResponsesRequest({ text: "x", maxOutputTokens: 64 }), context: "test", fetchImpl: failing }), (error: unknown) => isZenResponsesTransportError(error) && error.code === "zen_responses_network_error" && error.receipt.httpStatus === null);
+  const stored = JSON.parse(await (await env.ARTIFACTS.get(ledger.key)).text());
+  assert.equal(stored.billableRequestCount, 0);
+});
+
+test("non-2xx HTTP is recorded structurally and remains non-billable", async () => {
+  const { env, ledger } = await setup("transport-http");
+  const fetchImpl = (async () => new Response(JSON.stringify({ error: { type: "bad_request" } }), { status: 503, headers: { "content-type": "application/json", "content-length": "32", "x-request-id": "req-503" } })) as typeof fetch;
+  await assert.rejects(() => requestZenResponses({ env, spendLedgerKey: ledger.key, body: buildZenResponsesRequest({ text: "x", maxOutputTokens: 64 }), context: "test", fetchImpl }), (error: unknown) => isZenResponsesTransportError(error) && error.code === "zen_responses_http_error" && error.receipt.httpStatus === 503 && error.receipt.providerRequestId === "req-503");
+  const stored = JSON.parse(await (await env.ARTIFACTS.get(ledger.key)).text());
+  assert.equal(stored.billableRequestCount, 0);
+});
+
+test("bounded response-body handling distinguishes oversized and failed reads", async () => {
+  const oversized = await setup("transport-large");
+  const largeFetch = (async () => new Response("x", { status: 200, headers: { "content-type": "application/json", "content-length": "70000" } })) as typeof fetch;
+  await assert.rejects(() => requestZenResponses({ env: oversized.env, spendLedgerKey: oversized.ledger.key, body: buildZenResponsesRequest({ text: "x", maxOutputTokens: 64 }), context: "test", fetchImpl: largeFetch }), (error: unknown) => isZenResponsesTransportError(error) && error.code === "zen_responses_body_too_large");
+
+  const failed = await setup("transport-read-fail");
+  const stream = new ReadableStream<Uint8Array>({ pull(controller) { controller.error(new Error("read failure")); } });
+  const failedFetch = (async () => new Response(stream, { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch;
+  await assert.rejects(() => requestZenResponses({ env: failed.env, spendLedgerKey: failed.ledger.key, body: buildZenResponsesRequest({ text: "x", maxOutputTokens: 64 }), context: "test", fetchImpl: failedFetch }), (error: unknown) => isZenResponsesTransportError(error) && error.code === "zen_responses_body_read_failed");
+});
+
+test("malformed JSON, missing output and invalid structured JSON retain precise receipts", async () => {
+  const malformed = await setup("transport-malformed");
+  await assert.rejects(() => requestZenResponses({ env: malformed.env, spendLedgerKey: malformed.ledger.key, body: buildZenResponsesRequest({ text: "x", maxOutputTokens: 64 }), context: "test", fetchImpl: (async () => new Response("not-json", { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch }), (error: unknown) => isZenResponsesTransportError(error) && error.code === "zen_responses_response_malformed" && error.receipt.responseByteCount === 8);
+
+  const missing = await setup("transport-missing");
+  await assert.rejects(() => requestZenResponses({ env: missing.env, spendLedgerKey: missing.ledger.key, body: buildZenResponsesRequest({ text: "x", maxOutputTokens: 64 }), context: "test", fetchImpl: (async () => new Response(JSON.stringify({ status: "completed", output: [] }), { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch }), (error: unknown) => isZenResponsesTransportError(error) && error.code === "zen_responses_output_missing");
+
+  const invalidSchema = await setup("transport-schema");
+  const structured = buildZenResponsesRequest({ text: "x", maxOutputTokens: 64, schema: { name: "probe", schema: { type: "object" } } });
+  await assert.rejects(() => requestZenResponses({ env: invalidSchema.env, spendLedgerKey: invalidSchema.ledger.key, body: structured, context: "test", fetchImpl: (async () => new Response(JSON.stringify(completed("not-json")), { status: 200, headers: { "content-type": "application/json" } })) as typeof fetch }), (error: unknown) => isZenResponsesTransportError(error) && error.code === "zen_responses_schema_invalid" && error.receipt.schemaResult === "invalid");
+});
+
+test("receipt persistence failure prevents provider dispatch and is classified exactly", async () => {
+  const { r2, env, ledger } = await setup("transport-receipt-fail");
+  r2.failWrites = true;
+  let calls = 0;
+  const fetchImpl = (async () => { calls += 1; return new Response("{}"); }) as typeof fetch;
+  await assert.rejects(() => requestZenResponses({ env, spendLedgerKey: ledger.key, body: buildZenResponsesRequest({ text: "x", maxOutputTokens: 64 }), context: "test", fetchImpl }), (error: unknown) => isZenResponsesTransportError(error) && error.code === "zen_responses_receipt_persist_failed");
+  assert.equal(calls, 0);
+});
+
+test("sanitized transport errors never expose prompt, generated content, image, URL, token, file ID or secret", async () => {
+  const { env, ledger } = await setup("transport-leakage");
+  const body = buildZenResponsesRequest({ text: "PROMPT_SECRET", imageDataUrl: "data:image/jpeg;base64,IMAGE_SECRET", maxOutputTokens: 64 });
+  let caught: unknown;
+  try { await requestZenResponses({ env, spendLedgerKey: ledger.key, body, context: "test", requestIdentity: "file_SECRET", fetchImpl: (async () => { throw new Error("TOKEN_SECRET"); }) as typeof fetch }); } catch (error) { caught = error; }
+  const rendered = JSON.stringify(safeErrorResult(caught));
+  for (const forbidden of ["PROMPT_SECRET", "IMAGE_SECRET", "TOKEN_SECRET", "file_SECRET", "zen-secret", ZEN_RESPONSES_ENDPOINT, "Authorization", "Bearer"]) assert.equal(rendered.includes(forbidden), false, forbidden);
+});
+
+test("capability workflow persists precise transport receipts while discovery and other providers remain isolated", async () => {
+  const capability = await readFile(new URL("../src/visual-classifier-capability-zen-responses.ts", import.meta.url), "utf8");
+  assert.match(capability, /isZenResponsesTransportError/);
+  assert.match(capability, /transportReceipt/);
+  assert.match(capability, /timeout: "2 minutes"/);
+  const discovery = await readFile(new URL("../src/visual-classifier-zen-model-discovery.ts", import.meta.url), "utf8");
+  assert.match(discovery, /ZEN_RESPONSES_MODELS_ENDPOINT/);
+  assert.doesNotMatch(discovery, /responses_post|requestZenResponses/);
+  const transport = await readFile(new URL("../src/visual-catalogue-zen-responses.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(transport, /OPENCODE_GO|mimo-v2\.5|OPENAI_API_KEY|api\.openai\.com/);
+  assert.match(transport, /MAX_RESPONSE_BYTES = 64 \* 1024/);
+  assert.match(transport, /ZEN_RESPONSES_TIMEOUT_MS = 60_000/);
+});
+'''
+          Path('test/visual-catalogue-zen-responses-transport.test.ts').write_text(transport_test, encoding='utf-8')
+          PY
+          rm -f .github/workflows/odl-req-027-self-patch.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "fix: bound regional attachments and Zen POST transport"
+          git push origin HEAD:feature/odl-req-027-regional-attachments-zen-post
