@@ -6,7 +6,7 @@ import {
   ZenResponsesTransportError,
   isZenResponsesTransportError,
   requestZenResponses as requestZenResponsesBase,
-  type ZenResponsesTransportReceipt,
+  type ZenResponsesTransportReceipt as BaseZenResponsesTransportReceipt,
 } from "./visual-catalogue-zen-responses-base";
 import { sha256HexUtf8 } from "./paid-core";
 
@@ -47,10 +47,23 @@ export type ZenResponsesRedirectReceipt = {
   finalEndpointClass: "documented_canonical" | "documented_slash_variant" | "not_reached";
 };
 
+export type ZenResponsesTransportReceipt = Omit<BaseZenResponsesTransportReceipt, "redirectMode"> & {
+  redirectMode: "error" | "manual";
+  redirectDisposition?: ZenResponsesRedirectDisposition;
+  redirectStatus?: number | null;
+  redirectHopCount?: number;
+  redirectOriginClass?: ZenResponsesRedirectReceipt["redirectOriginClass"];
+  redirectAllowlistDecision?: ZenResponsesRedirectReceipt["redirectAllowlistDecision"];
+  redirectSchemeClass?: ZenResponsesRedirectReceipt["redirectSchemeClass"];
+  redirectHostFingerprint?: string | null;
+  redirectPathFingerprint?: string | null;
+  finalEndpointClass?: ZenResponsesRedirectReceipt["finalEndpointClass"];
+};
+
 type RequestInput = Parameters<typeof requestZenResponsesBase>[0];
-type RedirectedTransportReceipt = Omit<ZenResponsesTransportReceipt, "redirectMode"> & ZenResponsesRedirectReceipt;
+type RedirectedTransportReceipt = Omit<BaseZenResponsesTransportReceipt, "redirectMode"> & ZenResponsesRedirectReceipt;
 type RequestResult = Omit<Awaited<ReturnType<typeof requestZenResponsesBase>>, "transportReceipt"> & {
-  transportReceipt: ZenResponsesTransportReceipt | RedirectedTransportReceipt;
+  transportReceipt: ZenResponsesTransportReceipt;
 };
 type FetchFunction = typeof fetch;
 
@@ -390,7 +403,7 @@ export function createBoundedZenResponsesRedirectFetch(underlyingFetch: FetchFun
 }
 
 async function redirectReceipt(
-  base: ZenResponsesTransportReceipt,
+  base: BaseZenResponsesTransportReceipt,
   trace: RedirectTrace,
 ): Promise<RedirectedTransportReceipt> {
   return {
@@ -458,7 +471,7 @@ export async function requestZenResponses(input: RequestInput): Promise<RequestR
       throw new ZenResponsesTransportError(
         trace.failure.code,
         trace.failure.message,
-        failed as unknown as ZenResponsesTransportReceipt,
+        failed as unknown as BaseZenResponsesTransportReceipt,
         { retryable: false },
       );
     }
