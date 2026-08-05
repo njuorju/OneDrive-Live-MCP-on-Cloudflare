@@ -162,6 +162,14 @@ export type ZenResponsesTransportReceipt = {
   usagePresent: boolean | null;
   localErrorCode: string | null;
   localErrorClass: string | null;
+  errorName: string | null;
+  errorMessage: string | null;
+  codeLocation: string | null;
+  requestMethod: "POST";
+  headerNames: string[];
+  signalPresent: boolean;
+  redirectMode: "error";
+  fetchImplementationClass: "unresolved" | "invalid_explicit" | "global_fetch_missing" | "explicit_injected" | "global_fetch_bound";
 };
 
 export class ZenResponsesTransportError extends ConnectorError {
@@ -466,6 +474,78 @@ function sanitizedStage(context: string): string {
   return /^[a-z0-9_.-]+$/i.test(candidate) ? candidate.slice(0, 120) : "unknown";
 }
 
+export const ZEN_RESPONSES_ILLEGAL_INVOCATION_MESSAGE = "Illegal invocation: function called with incorrect this reference. See [documentation URL removed] for details." as const;
+
+function boundedZenResponsesFetchErrorMessage(error: unknown): string {
+  const raw = error instanceof Error ? error.message : "";
+  const normalized = raw.replace(/\s+/g, " ").trim();
+  if (/illegal invocation/i.test(normalized) && /incorrect [`'"]?this[`'"]? reference/i.test(normalized)) {
+    return ZEN_RESPONSES_ILLEGAL_INVOCATION_MESSAGE;
+  }
+  if (/^(fetch failed|network connection lost|the operation was aborted|this operation was aborted|invalid url|failed to parse url)$/i.test(normalized)) {
+    return normalized.slice(0, 240);
+  }
+  if (/^failed to construct ['"]request['"]:/i.test(normalized) && !/https?:\/\//i.test(normalized)) {
+    return normalized.slice(0, 240);
+  }
+  return "Fetch failed before an HTTP response.";
+}
+
+function classifyZenResponsesFetchFailure(error: unknown): {
+  code: string;
+  message: string;
+  localErrorClass: string;
+  retryable: boolean;
+  errorName: string;
+  errorMessage: string;
+  codeLocation: string;
+} {
+  const errorName = error instanceof Error ? error.name.slice(0, 80) : typeof error;
+  const rawMessage = error instanceof Error ? error.message : String(error ?? "");
+  const lower = rawMessage.toLocaleLowerCase("en");
+  const common = {
+    errorName,
+    errorMessage: boundedZenResponsesFetchErrorMessage(error),
+    codeLocation: "visual-catalogue-zen-responses.requestZenResponses.fetch",
+  };
+  if (errorName === "TypeError" && (lower.includes("illegal invocation") || lower.includes("incorrect this reference"))) {
+    return { ...common, code: "zen_responses_fetch_illegal_invocation", message: "The Zen Responses runtime fetch was called without its required receiver.", localErrorClass: "runtime_fetch_binding", retryable: false };
+  }
+  if (errorName === "TypeError" && lower.includes("header")) {
+    return { ...common, code: "zen_responses_invalid_headers", message: "The Zen Responses request headers were rejected locally.", localErrorClass: "request_headers", retryable: false };
+  }
+  if (errorName === "TypeError" && lower.includes("signal")) {
+    return { ...common, code: "zen_responses_invalid_signal", message: "The Zen Responses abort signal was rejected locally.", localErrorClass: "request_signal", retryable: false };
+  }
+  if (errorName === "TypeError" && lower.includes("redirect")) {
+    return { ...common, code: "zen_responses_invalid_redirect", message: "The Zen Responses redirect mode was rejected locally.", localErrorClass: "request_redirect", retryable: false };
+  }
+  if (errorName === "TypeError" && lower.includes("body")) {
+    return { ...common, code: "zen_responses_invalid_body", message: "The Zen Responses request body was rejected locally.", localErrorClass: "request_body", retryable: false };
+  }
+  if (errorName === "TypeError" && (lower.includes("url") || lower.includes("request"))) {
+    return { ...common, code: "zen_responses_invalid_endpoint", message: "The Zen Responses endpoint value was rejected locally.", localErrorClass: "request_endpoint", retryable: false };
+  }
+  return { ...common, code: "zen_responses_network_error", message: "The Zen Responses request failed before an HTTP response was received.", localErrorClass: errorName, retryable: true };
+}
+
+export function createZenResponsesFetchInit(credential: string, serializedBody: string, signal: AbortSignal): RequestInit {
+  const headers: Record<string, string> = {
+    Authorization: String(`Bearer ${credential}`),
+    "Content-Type": String("application/json"),
+  };
+  const init: RequestInit = {
+    method: "POST",
+    headers,
+    body: String(serializedBody),
+    redirect: "error",
+    signal,
+  };
+  Object.freeze(headers);
+  Object.freeze(init);
+  return init;
+}
+
 function boundedHeader(headers: Headers, names: string[]): string | null {
   for (const name of names) {
     const value = headers.get(name)?.trim();
@@ -662,6 +742,14 @@ export async function requestZenResponses(input: {
     usagePresent: null,
     localErrorCode: null,
     localErrorClass: null,
+    errorName: null,
+    errorMessage: null,
+    codeLocation: null,
+    requestMethod: "POST",
+    headerNames: ["authorization", "content-type"],
+    signalPresent: false,
+    redirectMode: "error",
+    fetchImplementationClass: "unresolved",
   };
 
   const provider = String(input.provider ?? ZEN_RESPONSES_PROVIDER);
@@ -677,9 +765,20 @@ export async function requestZenResponses(input: {
   if (!credential) {
     return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_fetch_not_started", "The OPENCODE_ZEN_API_KEY binding is not configured.", "credential_validation");
   }
-  if (typeof (input.fetchImpl ?? fetch) !== "function") {
-    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_fetch_not_started", "The Zen Responses fetch implementation was not invokable.", "fetch_invocation");
+  const hasExplicitFetch = Object.prototype.hasOwnProperty.call(input, "fetchImpl");
+  const explicitFetch = hasExplicitFetch ? input.fetchImpl : undefined;
+  if (hasExplicitFetch && typeof explicitFetch !== "function") {
+    receipt = { ...receipt, fetchImplementationClass: "invalid_explicit" };
+    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_fetch_not_started", "The explicitly supplied Zen Responses fetch implementation was not invokable.", "fetch_invocation");
   }
+  if (!hasExplicitFetch && typeof globalThis.fetch !== "function") {
+    receipt = { ...receipt, fetchImplementationClass: "global_fetch_missing" };
+    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_fetch_not_started", "The Worker runtime fetch implementation was unavailable.", "fetch_invocation");
+  }
+  const fetchImpl = hasExplicitFetch
+    ? explicitFetch as typeof fetch
+    : globalThis.fetch.bind(globalThis) as typeof fetch;
+  receipt = { ...receipt, fetchImplementationClass: hasExplicitFetch ? "explicit_injected" : "global_fetch_bound" };
 
   let serializedBody: string;
   try {
@@ -691,17 +790,18 @@ export async function requestZenResponses(input: {
   const requestShapeFingerprint = await sha256HexUtf8(JSON.stringify(requestShape(input.body)));
   await assertZenResponsesBudgetAvailable(input.env as Env, input.spendLedgerKey);
 
+  const controller = new AbortController();
+  const requestInit = createZenResponsesFetchInit(credential, serializedBody, controller.signal);
   receipt = {
     ...receipt,
     requestByteCount: requestBytes.byteLength,
     requestShapeFingerprint,
     fetchBegan: true,
+    signalPresent: Boolean(requestInit.signal),
     parserResult: "prefetch_receipt_persisted",
   };
   await persistZenResponsesTransportReceiptOrThrow(input.env, receiptKey, receipt);
 
-  const fetchImpl = input.fetchImpl ?? fetch;
-  const controller = new AbortController();
   let timeoutFired = false;
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<never>((_resolve, reject) => {
@@ -715,21 +815,23 @@ export async function requestZenResponses(input: {
   let response: Response;
   try {
     response = await Promise.race([
-      Promise.resolve().then(() => fetchImpl(ZEN_RESPONSES_ENDPOINT, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${credential}`, "Content-Type": "application/json" },
-        body: serializedBody,
-        redirect: "error",
-        signal: controller.signal,
-      })),
+      Promise.resolve().then(() => fetchImpl(ZEN_RESPONSES_ENDPOINT, requestInit)),
       timeoutPromise,
     ]);
   } catch (error) {
     if (timeoutHandle) clearTimeout(timeoutHandle);
     if (timeoutFired || controller.signal.aborted) {
-      return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_timeout", "The Zen Responses request exceeded the bounded transport timeout.", error instanceof Error ? error.name : typeof error, { retryable: true });
+      const timeoutReceipt = {
+        ...receipt,
+        errorName: error instanceof Error ? error.name.slice(0, 80) : typeof error,
+        errorMessage: "The bounded Zen Responses transport timeout fired.",
+        codeLocation: "visual-catalogue-zen-responses.requestZenResponses.timeout_race",
+      };
+      return failZenResponsesTransport(input.env, receiptKey, timeoutReceipt, "zen_responses_timeout", "The Zen Responses request exceeded the bounded transport timeout.", error instanceof Error ? error.name : typeof error, { retryable: true });
     }
-    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_network_error", "The Zen Responses request failed before an HTTP response was received.", error instanceof Error ? error.name : typeof error, { retryable: true });
+    const failure = classifyZenResponsesFetchFailure(error);
+    const failedReceipt = { ...receipt, errorName: failure.errorName, errorMessage: failure.errorMessage, codeLocation: failure.codeLocation };
+    return failZenResponsesTransport(input.env, receiptKey, failedReceipt, failure.code, failure.message, failure.localErrorClass, { retryable: failure.retryable });
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);
   }
