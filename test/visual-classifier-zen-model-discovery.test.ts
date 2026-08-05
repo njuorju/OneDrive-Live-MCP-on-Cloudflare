@@ -92,7 +92,7 @@ test("non-2xx and network failures preserve whether fetch began", async () => {
   });
 });
 
-test("missing binding and local dispatch fail before fetch with no secret or provider body leakage", async () => {
+test("missing binding, local dispatch, and missing fetch implementation fail before fetch without leakage", async () => {
   let calls = 0;
   const observing = (async () => { calls += 1; return new Response("{}"); }) as typeof fetch;
   await assert.rejects(discoverZenResponsesModelWithReceipt({ OPENCODE_ZEN_API_KEY: "" } as any, {}, observing), (error: unknown) => {
@@ -107,12 +107,18 @@ test("missing binding and local dispatch fail before fetch with no secret or pro
     assert.equal((error as any).receipt.fetchBegan, false);
     return true;
   });
+  await assert.rejects(discoverZenResponsesModelWithReceipt(env, {}, null as any), (error: unknown) => {
+    assert.equal((error as any).code, "zen_models_fetch_not_started");
+    assert.equal((error as any).receipt.fetchBegan, false);
+    assert.equal((error as any).receipt.credentialBindingExists, true);
+    return true;
+  });
   assert.equal(calls, 0);
 });
 
-test("discovery repair is isolated from OpenCode Go, direct OpenAI, OneDrive, source, cache, and catalogue routes", async () => {
+test("discovery repair is isolated from OpenCode Go, direct OpenAI, OneDrive, source, cache, and catalogue mutation routes", async () => {
   const source = await readFile(new URL("../src/visual-classifier-zen-model-discovery.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(source, /OPENCODE_GO|OPENAI_API_KEY|api\.openai\.com|graphFetch|read_onedrive|render|catalogue|publish/);
+  assert.doesNotMatch(source, /OPENCODE_GO|OPENAI_API_KEY|api\.openai\.com|graphFetch|read_onedrive|render_document|publish_cached|replace_catalogue|prepare_catalogue|commit_visual/);
   assert.match(source, /billableRequestIncrement: 0/);
   assert.match(source, /spendIncrementUsd: 0/);
 });
