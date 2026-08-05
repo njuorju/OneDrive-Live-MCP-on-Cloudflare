@@ -86,8 +86,8 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: 3f67b673280f2119de4eedd09745e20f
       WORKER_NAME: nikolay-onedrive-mcp
-      OPENING_VERSION_ID: 50e0887d-5868-4a48-bfb4-76081f0148a2
-      OPENING_DEPLOYMENT_ID: c65a0e7f-d855-4acf-a94e-c279646da11d
+      OPENING_VERSION_ID: b1c31b28-4c1a-4425-a176-4b11b894d091
+      OPENING_DEPLOYMENT_ID: a5abdd4a-c481-4188-86a3-516486c9295d
     steps:
       - uses: actions/checkout@v4
         with:
@@ -176,7 +176,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          npx wrangler deploy --config wrangler.production.json --name "$WORKER_NAME" --message "Deploy ODL-REQ-028 exact main $GITHUB_SHA" --tag "odl-req-028-${GITHUB_SHA:0:12}" 2>&1 | tee deployment.log
+          npx wrangler deploy --config wrangler.production.json --name "$WORKER_NAME" --message "Deploy ODL-REQ-029 exact main $GITHUB_SHA" --tag "odl-req-029-${GITHUB_SHA:0:12}" 2>&1 | tee deployment.log
       - name: Verify deployment, traffic, bindings, secrets, and health
         shell: bash
         run: |
@@ -208,7 +208,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: odl-req-028-deployment-evidence
+          name: odl-req-029-deployment-evidence
           path: |
             deployment.log
             deployment-evidence.json

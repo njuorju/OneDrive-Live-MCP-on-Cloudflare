@@ -101,7 +101,7 @@ test("regional host retains private-address and DNS-rebinding rejection before f
       ...baseOptions,
       resolveHost: async () => ["169.254.169.254"],
     }),
-    (error: unknown) => error instanceof ConnectorError && error.code === "connector_file_dns_forbidden",
+    (error: unknown) => error instanceof ConnectorError && error.code === "connector_file_dns_private_address",
   );
 
   let resolutions = 0;
