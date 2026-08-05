@@ -22,16 +22,83 @@ jobs:
           set -euo pipefail
           python3 - <<'BOOT'
           from pathlib import Path
+          import subprocess
+
           source = Path('.github/workflows/odl-req-028-apply.yml').read_text(encoding='utf-8')
           marker = "          python3 - <<'PY'\n"
           start = source.index(marker) + len(marker)
           end = source.index("\n          PY\n", start)
           lines = source[start:end].splitlines()
           script = "\n".join(line[10:] if line.startswith("          ") else line for line in lines) + "\n"
-          Path('/tmp/odl_req_028_apply.py').write_text(script, encoding='utf-8')
+          script = script[:script.index('# Restore the normal CI workflow')]
+          exec(compile(script, '/tmp/odl_req_028_source_patch.py', 'exec'), {})
+
+          subprocess.run(['git', 'fetch', 'origin', 'main'], check=True)
+          subprocess.run(['git', 'checkout', 'origin/main', '--', '.github/workflows/ci.yml'], check=True)
+          ci_path = Path('.github/workflows/ci.yml')
+          ci = ci_path.read_text(encoding='utf-8')
+
+          def replace_once(old: str, new: str, label: str) -> None:
+              global ci
+              count = ci.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly one match, found {count}')
+              ci = ci.replace(old, new, 1)
+
+          replace_once(
+              '      OPENING_VERSION_ID: edc3677f-15c3-40df-aea2-f7fbe8a26459',
+              '      OPENING_VERSION_ID: 50e0887d-5868-4a48-bfb4-76081f0148a2',
+              'opening version lease',
+          )
+          replace_once(
+              '      OPENING_DEPLOYMENT_ID: 995fdd5c-6342-490d-9df2-b19483457a2a',
+              '      OPENING_DEPLOYMENT_ID: c65a0e7f-d855-4acf-a94e-c279646da11d',
+              'opening deployment lease',
+          )
+          replace_once(
+              '--message "Deploy ODL-REQ-025 exact main $GITHUB_SHA" --tag "odl-req-025-${GITHUB_SHA:0:12}"',
+              '--message "Deploy ODL-REQ-028 exact main $GITHUB_SHA" --tag "odl-req-028-${GITHUB_SHA:0:12}"',
+              'deployment identity',
+          )
+          replace_once(
+              '          name: odl-req-025-deployment-evidence',
+              '          name: odl-req-028-deployment-evidence',
+              'deployment evidence artifact',
+          )
+
+          dependency_step = '''      - name: Production dependency security gate
+        run: npm audit --audit-level=high --omit=dev'''
+          merge_tree_step = '''      - name: Verify exact pull-request merge tree
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "${{ github.base_ref }}"
+          test "$(git rev-parse HEAD^1)" = "$(git rev-parse origin/${{ github.base_ref }})"
+          test "$(git rev-parse HEAD^2)" = "${{ github.event.pull_request.head.sha }}"
+'''
+          replace_once(dependency_step, merge_tree_step + dependency_step, 'merge-tree verification')
+
+          pre_bindings = "          jq -S '[.result.bindings[] | {name,type}] | sort_by(.name)' pre-settings.json > pre-bindings.json\n"
+          replace_once(pre_bindings, pre_bindings + '          test "$(jq length pre-bindings.json)" = "44"\n', 'pre binding count')
+
+          pre_secrets = "          jq -S '[.result[] | {name,type}] | sort_by(.name)' pre-secrets.json > pre-secret-bindings.json\n"
+          replace_once(pre_secrets, pre_secrets + '          test "$(jq length pre-secret-bindings.json)" = "4"\n', 'pre secret count')
+
+          post_settings = '          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/settings" > post-settings.json\n'
+          post_source = post_settings + '          jq -e --arg source "repo-$GITHUB_SHA" \'any(.result.bindings[]; .name == "WORKER_DEPLOYMENT_ID" and .type == "plain_text" and .text == $source)\' post-settings.json >/dev/null\n'
+          replace_once(post_settings, post_source, 'deployed source verification')
+
+          post_bindings = "          jq -S '[.result.bindings[] | {name,type}] | sort_by(.name)' post-settings.json > post-bindings.json\n"
+          replace_once(post_bindings, post_bindings + '          test "$(jq length post-bindings.json)" = "44"\n', 'post binding count')
+
+          post_secrets = "          jq -S '[.result[] | {name,type}] | sort_by(.name)' post-secrets.json > post-secret-bindings.json\n"
+          replace_once(post_secrets, post_secrets + '          test "$(jq length post-secret-bindings.json)" = "4"\n', 'post secret count')
+
+          ci_path.write_text(ci, encoding='utf-8')
+          Path('.github/workflows/odl-req-028-apply.yml').unlink()
+          Path('.github/workflows/odl-req-028-pr-bootstrap.yml').unlink()
           BOOT
-          python3 /tmp/odl_req_028_apply.py
-          rm -f .github/workflows/odl-req-028-pr-bootstrap.yml
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add -A
