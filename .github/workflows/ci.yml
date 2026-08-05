@@ -1,62 +1,54 @@
 name: CI
 
 on:
+  push:
+    branches:
+      - main
+      - work/**
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
-  apply-odl-req-028:
-    if: github.head_ref == 'feature/odl-req-028-zen-responses-fetch-binding'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          ref: feature/odl-req-028-zen-responses-fetch-binding
-          fetch-depth: 0
-      - name: Apply bounded Zen Responses repair and restore final CI
+          node-version: "22.18.0"
+          cache: npm
+      - name: Install pinned dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+      - name: Type check
         shell: bash
         run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import subprocess
-
-          apply_source = Path('.github/workflows/odl-req-028-apply.yml').read_text(encoding='utf-8')
-          marker = "          python3 - <<'PY'\n"
-          start = apply_source.index(marker) + len(marker)
-          end = apply_source.index("\n          PY\n", start)
-          lines = apply_source[start:end].splitlines()
-          source_patch = "\n".join(line[10:] if line.startswith("          ") else line for line in lines) + "\n"
-          source_patch = source_patch[:source_patch.index('# Restore the normal CI workflow')]
-          exec(compile(source_patch, '/tmp/odl_req_028_source_patch.py', 'exec'), {})
-
-          subprocess.run(['git', 'fetch', 'origin', 'main'], check=True)
-          subprocess.run(['git', 'checkout', 'origin/main', '--', '.github/workflows/ci.yml'], check=True)
-          ci_path = Path('.github/workflows/ci.yml')
-          ci = ci_path.read_text(encoding='utf-8')
-
-          def replace_once(old: str, new: str, label: str) -> None:
-              global ci
-              count = ci.count(old)
-              if count != 1:
-                  raise SystemExit(f'{label}: expected exactly one match, found {count}')
-              ci = ci.replace(old, new, 1)
-
-          replace_once('      OPENING_VERSION_ID: edc3677f-15c3-40df-aea2-f7fbe8a26459', '      OPENING_VERSION_ID: 50e0887d-5868-4a48-bfb4-76081f0148a2', 'opening version lease')
-          replace_once('      OPENING_DEPLOYMENT_ID: 995fdd5c-6342-490d-9df2-b19483457a2a', '      OPENING_DEPLOYMENT_ID: c65a0e7f-d855-4acf-a94e-c279646da11d', 'opening deployment lease')
-          replace_once('--message "Deploy ODL-REQ-025 exact main $GITHUB_SHA" --tag "odl-req-025-${GITHUB_SHA:0:12}"', '--message "Deploy ODL-REQ-028 exact main $GITHUB_SHA" --tag "odl-req-028-${GITHUB_SHA:0:12}"', 'deployment identity')
-          replace_once('          name: odl-req-025-deployment-evidence', '          name: odl-req-028-deployment-evidence', 'deployment evidence artifact')
-
-          dependency_step = '''      - name: Production dependency security gate
-        run: npm audit --audit-level=high --omit=dev'''
-          merge_tree_step = '''      - name: Verify exact pull-request merge tree
+          set -o pipefail
+          npm run type-check 2>&1 | tee typecheck.log
+      - name: Test
+        shell: bash
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test.log
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-diagnostics-${{ github.event_name }}
+          path: |
+            typecheck.log
+            test.log
+          if-no-files-found: ignore
+          retention-days: 1
+      - name: Verify exact pull-request merge tree
         if: github.event_name == 'pull_request'
         shell: bash
         run: |
@@ -64,27 +56,163 @@ jobs:
           git fetch origin "${{ github.base_ref }}"
           test "$(git rev-parse HEAD^1)" = "$(git rev-parse origin/${{ github.base_ref }})"
           test "$(git rev-parse HEAD^2)" = "${{ github.event.pull_request.head.sha }}"
-'''
-          replace_once(dependency_step, merge_tree_step + dependency_step, 'merge-tree verification')
+      - name: Production dependency security gate
+        run: npm audit --audit-level=high --omit=dev
+      - name: Full dependency advisory report
+        continue-on-error: true
+        run: npm audit --audit-level=high
+      - name: Dry-run Worker bundle with non-secret test placeholders
+        run: |
+          cp wrangler.jsonc wrangler.ci.jsonc
+          sed -i 's/REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER/CI_TEST_ROOT/g' wrangler.ci.jsonc
+          sed -i 's/REPLACE_WITH_KV_NAMESPACE_ID/00000000000000000000000000000000/g' wrangler.ci.jsonc
+          npx wrangler deploy --dry-run --config wrangler.ci.jsonc --outdir dist
+      - name: Upload non-secret Worker bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker-bundle-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
 
-          pre_bindings = "          jq -S '[.result.bindings[] | {name,type}] | sort_by(.name)' pre-settings.json > pre-bindings.json\n"
-          replace_once(pre_bindings, pre_bindings + '          test "$(jq length pre-bindings.json)" = "44"\n', 'pre binding count')
-          pre_secrets = "          jq -S '[.result[] | {name,type}] | sort_by(.name)' pre-secrets.json > pre-secret-bindings.json\n"
-          replace_once(pre_secrets, pre_secrets + '          test "$(jq length pre-secret-bindings.json)" = "4"\n', 'pre secret count')
-
-          post_settings = '          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/settings" > post-settings.json\n'
-          replace_once(post_settings, post_settings + '          jq -e --arg source "repo-$GITHUB_SHA" \'any(.result.bindings[]; .name == "WORKER_DEPLOYMENT_ID" and .type == "plain_text" and .text == $source)\' post-settings.json >/dev/null\n', 'deployed source verification')
-          post_bindings = "          jq -S '[.result.bindings[] | {name,type}] | sort_by(.name)' post-settings.json > post-bindings.json\n"
-          replace_once(post_bindings, post_bindings + '          test "$(jq length post-bindings.json)" = "44"\n', 'post binding count')
-          post_secrets = "          jq -S '[.result[] | {name,type}] | sort_by(.name)' post-secrets.json > post-secret-bindings.json\n"
-          replace_once(post_secrets, post_secrets + '          test "$(jq length post-secret-bindings.json)" = "4"\n', 'post secret count')
-
-          ci_path.write_text(ci, encoding='utf-8')
-          for path in ['.github/workflows/odl-req-028-apply.yml', '.github/workflows/odl-req-028-pr-bootstrap.yml']:
-              Path(path).unlink(missing_ok=True)
+  deploy-production:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: 3f67b673280f2119de4eedd09745e20f
+      WORKER_NAME: nikolay-onedrive-mcp
+      OPENING_VERSION_ID: 50e0887d-5868-4a48-bfb4-76081f0148a2
+      OPENING_DEPLOYMENT_ID: c65a0e7f-d855-4acf-a94e-c279646da11d
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+      - name: Generate production configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          cfg = json.loads(Path('wrangler.jsonc').read_text())
+          sha = os.environ['GITHUB_SHA']
+          cfg['name'] = os.environ['WORKER_NAME']
+          cfg['keep_vars'] = True
+          cfg['kv_namespaces'] = [{'binding': 'OAUTH_KV', 'id': 'a3ead543dad24b8596ab9193b10f1b9f'}]
+          cfg['vars'].update({
+            'CONNECTOR_NAME': 'OneDrive Live MCP',
+            'ONEDRIVE_ROOT': 'Работа',
+            'MAX_FILE_MB': '20',
+            'MAX_ORIGINAL_FILE_MB': '25',
+            'MAX_TEXT_WRITE_KB': '4096',
+            'MAX_READ_CHARS': '50000',
+            'CACHE_TTL_SECONDS': '604800',
+            'MAX_IMAGE_INPUT_MB': '15',
+            'MAX_IMAGE_PIXELS': '40000000',
+            'MAX_IMAGE_DIMENSION': '8192',
+            'MAX_IMAGE_PAGES': '8',
+            'IMAGE_PROCESSING_TIMEOUT_MS': '15000',
+            'INTEGRITY_LEASE_SECONDS': '600',
+            'PAID_MAX_SOURCE_MB': '500',
+            'PAID_VISUAL_PARSE_MB': '40',
+            'PAID_RENDER_ORIGIN': 'https://nikolay-onedrive-mcp.fdas201290.workers.dev',
+            'VISUAL_CLASSIFIER_PROVIDER': 'openai',
+            'VISUAL_CLASSIFIER_MODEL': 'gpt-5.2-2025-12-11',
+            'OPENCODE_ZEN_MODEL': 'mimo-v2.5-free',
+            'OPENCODE_ZEN_DISCOVERY_TTL_SECONDS': '3600',
+            'VISUAL_CLASSIFIER_CONCURRENCY': '2',
+            'VISUAL_CLASSIFIER_MAX_DIMENSION': '1280',
+            'VISUAL_CLASSIFIER_JPEG_QUALITY': '82',
+            'VISUAL_RUBRIC_VERSION': 'uca-visual-rubric-2026-08-02',
+            'VISUAL_PROMPT_VERSION': 'visual-source-classifier-opencode-mimo-2026-08-02',
+            'VISUAL_RENDERER_VERSION': 'pdfjs-cache-v1',
+            'WORKER_DEPLOYMENT_ID': f'repo-{sha}',
+          })
+          Path('wrangler.production.json').write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n')
           PY
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add -A
-          git commit -m "fix: bind Zen Responses runtime fetch"
-          git push origin HEAD:feature/odl-req-028-zen-responses-fetch-binding
+      - name: Verify opening lease and binding surfaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN"
+          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
+          auth=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json")
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/deployments" > pre-deployments.json
+          jq -e --arg d "$OPENING_DEPLOYMENT_ID" --arg v "$OPENING_VERSION_ID" '.success == true and .result.deployments[0].id == $d and .result.deployments[0].versions == [{version_id:$v,percentage:100}]' pre-deployments.json >/dev/null
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/settings" > pre-settings.json
+          jq -S '[.result.bindings[] | {name,type}] | sort_by(.name)' pre-settings.json > pre-bindings.json
+          test "$(jq length pre-bindings.json)" = "44"
+          jq -e '
+            any(.[]; .name == "VISUAL_CATALOGUE_WORKFLOW" and .type == "workflow") and
+            any(.[]; .name == "PAID_WORKFLOW" and .type == "workflow") and
+            any(.[]; .name == "PAID_JOBS" and .type == "queue") and
+            any(.[]; .name == "ARTIFACTS" and .type == "r2_bucket") and
+            any(.[]; .name == "IMAGES" and .type == "images") and
+            any(.[]; .name == "MCP_OBJECT" and .type == "durable_object_namespace") and
+            any(.[]; .name == "AUTH_STATE" and .type == "durable_object_namespace") and
+            any(.[]; .name == "PAID_COORDINATOR" and .type == "durable_object_namespace") and
+            any(.[]; .name == "AI" and .type == "ai") and
+            any(.[]; .name == "OAUTH_KV" and .type == "kv_namespace")
+          ' pre-bindings.json >/dev/null
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/secrets" > pre-secrets.json
+          jq -S '[.result[] | {name,type}] | sort_by(.name)' pre-secrets.json > pre-secret-bindings.json
+          test "$(jq length pre-secret-bindings.json)" = "4"
+          jq -e 'any(.[]; .name == "OPENCODE_ZEN_API_KEY" and .type == "secret_text")' pre-secret-bindings.json >/dev/null
+      - name: Deploy exact merged main
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          npx wrangler deploy --config wrangler.production.json --name "$WORKER_NAME" --message "Deploy ODL-REQ-028 exact main $GITHUB_SHA" --tag "odl-req-028-${GITHUB_SHA:0:12}" 2>&1 | tee deployment.log
+      - name: Verify deployment, traffic, bindings, secrets, and health
+        shell: bash
+        run: |
+          set -euo pipefail
+          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
+          auth=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json")
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/deployments" > post-deployments.json
+          jq -e --arg old "$OPENING_DEPLOYMENT_ID" '.success == true and .result.deployments[0].id != $old and (.result.deployments[0].versions|length)==1 and .result.deployments[0].versions[0].percentage==100' post-deployments.json >/dev/null
+          deployment_id=$(jq -r '.result.deployments[0].id' post-deployments.json)
+          version_id=$(jq -r '.result.deployments[0].versions[0].version_id' post-deployments.json)
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/versions?deployable=true" > post-versions.json
+          version_number=$(jq -r --arg v "$version_id" '[.result.items[]|select(.id==$v)][0].number' post-versions.json)
+          test "$version_number" != "null"
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/settings" > post-settings.json
+          jq -e --arg source "repo-$GITHUB_SHA" 'any(.result.bindings[]; .name == "WORKER_DEPLOYMENT_ID" and .type == "plain_text" and .text == $source)' post-settings.json >/dev/null
+          jq -S '[.result.bindings[] | {name,type}] | sort_by(.name)' post-settings.json > post-bindings.json
+          test "$(jq length post-bindings.json)" = "44"
+          cmp pre-bindings.json post-bindings.json
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/secrets" > post-secrets.json
+          jq -S '[.result[] | {name,type}] | sort_by(.name)' post-secrets.json > post-secret-bindings.json
+          test "$(jq length post-secret-bindings.json)" = "4"
+          cmp pre-secret-bindings.json post-secret-bindings.json
+          health=$(curl -fsS --retry 8 --retry-all-errors --retry-delay 2 "https://nikolay-onedrive-mcp.fdas201290.workers.dev/health")
+          jq -e '.ok == true' <<<"$health" >/dev/null
+          zen_secret_present=$(jq 'any(.[]; .name == "OPENCODE_ZEN_API_KEY" and .type == "secret_text")' post-secret-bindings.json)
+          jq -n --arg sourceCommit "$GITHUB_SHA" --arg deploymentId "$deployment_id" --arg versionId "$version_id" --argjson versionNumber "$version_number" --argjson zenSecretPresent "$zen_secret_present" '{sourceCommit:$sourceCommit,deploymentId:$deploymentId,versionId:$versionId,versionNumber:$versionNumber,trafficPercent:100,bindingsUnchanged:true,secretBindingsUnchanged:true,opencodeZenSecretPresent:$zenSecretPresent,healthHttp200:true}' > deployment-evidence.json
+          cat deployment-evidence.json
+      - name: Upload sanitized deployment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: odl-req-028-deployment-evidence
+          path: |
+            deployment.log
+            deployment-evidence.json
+            pre-bindings.json
+            post-bindings.json
+            pre-secret-bindings.json
+            post-secret-bindings.json
+          if-no-files-found: warn
+          retention-days: 7
