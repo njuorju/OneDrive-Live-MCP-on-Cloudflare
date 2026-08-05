@@ -1,0 +1,65 @@
+name: ODL-REQ-027 PR patch trigger
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.head_ref == 'feature/odl-req-027-regional-attachments-zen-post'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: 3f67b673280f2119de4eedd09745e20f
+      WORKER_NAME: nikolay-onedrive-mcp
+      OPENING_MAIN_SHA: 366ae62c2104e5fb6cfe1f74fca8a73fc0bc57ec
+      OPENING_VERSION_ID: a20c1194-3a7f-43c9-896f-d8cd5d473f2f
+      OPENING_DEPLOYMENT_ID: ba7df97f-6717-4008-89d3-2a31a5c2e1e9
+      BRANCH_NAME: feature/odl-req-027-regional-attachments-zen-post
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/odl-req-027-regional-attachments-zen-post
+          fetch-depth: 0
+      - name: Verify opening GitHub and production lease
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "$OPENING_MAIN_SHA"
+          test "$(git merge-base HEAD origin/main)" = "$OPENING_MAIN_SHA"
+          test -n "$CLOUDFLARE_API_TOKEN"
+          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
+          auth=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json")
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/deployments" > opening-deployments.json
+          jq -e --arg d "$OPENING_DEPLOYMENT_ID" --arg v "$OPENING_VERSION_ID" '.success == true and .result.deployments[0].id == $d and .result.deployments[0].versions == [{version_id:$v,percentage:100}]' opening-deployments.json >/dev/null
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/settings" > opening-settings.json
+          jq -S '[.result.bindings[] | {name,type}] | sort_by(.name)' opening-settings.json > opening-bindings.json
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/secrets" > opening-secrets.json
+          jq -S '[.result[] | {name,type}] | sort_by(.name)' opening-secrets.json > opening-secret-bindings.json
+          jq -e 'any(.[]; .name == "OPENCODE_ZEN_API_KEY" and .type == "secret_text")' opening-secret-bindings.json >/dev/null
+      - name: Execute embedded bounded patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path('.github/workflows/odl-req-027-self-patch.yml').read_text(encoding='utf-8')
+          marker = "          python3 - <<'PY'\n"
+          start = source.index(marker) + len(marker)
+          end = source.index("\n          PY\n", start)
+          lines = source[start:end].splitlines()
+          script = "\n".join(line[10:] if line.startswith("          ") else line for line in lines)
+          exec(compile(script, 'odl-req-027-embedded-patch.py', 'exec'))
+          PY
+          rm -f .github/workflows/odl-req-027-self-patch.yml .github/workflows/odl-req-027-pr-trigger.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "fix: bound regional attachments and Zen POST transport"
+          git push origin HEAD:feature/odl-req-027-regional-attachments-zen-post
