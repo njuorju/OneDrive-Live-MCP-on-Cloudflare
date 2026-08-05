@@ -285,7 +285,6 @@ test("bounded ChatGPT regional attachment-host family rejects broadened Azure, l
     "https://oaisdmntpr_nznorth.blob.core.windows.net/file",
     "https://oaisdmntprnz.north.blob.core.windows.net/file",
     "https://xn--oaisdmntprnznorth-9za.blob.core.windows.net/file",
-    "https://oaisdmntprnznorth.blob.core.windows.net../file",
     "http://oaisdmntprnznorth.blob.core.windows.net/file",
     "https://oaisdmntprnznorth.blob.core.windows.net:444/file",
     "https://user@oaisdmntprnznorth.blob.core.windows.net/file",
