@@ -1,4 +1,5 @@
 import { promises as dnsPromises } from "node:dns";
+import { normalizeConnectorDnsAnswer } from "./connector-dns-answer-normalizer";
 import { ConnectorError } from "./errors";
 
 const DEFAULT_DNS_TIMEOUT_MS = 2_500;
@@ -213,22 +214,16 @@ function noDataError(error: unknown): boolean {
 }
 
 function parseFamilyResponse(value: unknown, family: AddressFamily): FamilyResolution {
-  if (!Array.isArray(value)) return emptyFamily("malformed", "MALFORMED_RESPONSE", "resolver_response");
-  if (!value.length) return emptyFamily("no_data");
-  const addresses: string[] = [];
-  for (const entry of value) {
-    const address = typeof entry === "string"
-      ? entry
-      : entry && typeof entry === "object" && typeof (entry as { address?: unknown }).address === "string"
-        ? String((entry as { address: string }).address)
-        : null;
-    if (!address || (family === 4 ? ipv4Number(address) === null : expandIpv6(address) === null)) {
-      return emptyFamily("malformed", "MALFORMED_RESPONSE", "resolver_response");
-    }
-    addresses.push(address.toLocaleLowerCase("en"));
-  }
-  const unique = [...new Set(addresses)].sort();
-  return { status: "success", addressCount: unique.length, errorCode: null, errorClass: null, addresses: unique };
+  const normalized = normalizeConnectorDnsAnswer(value, family);
+  if (normalized.status === "malformed") return emptyFamily("malformed", "MALFORMED_RESPONSE", "resolver_response");
+  if (normalized.status === "no_data") return emptyFamily("no_data");
+  return {
+    status: "success",
+    addressCount: normalized.addresses.length,
+    errorCode: null,
+    errorClass: null,
+    addresses: normalized.addresses,
+  };
 }
 
 async function resolveFamily(
