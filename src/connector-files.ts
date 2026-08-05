@@ -4,6 +4,7 @@ import { isAllowedTextFile, validateFileSignature } from "./file-types";
 import { validateItemName } from "./graph-core";
 
 export const CHATGPT_ATTACHMENT_HOST = "oaisdmntprindiasocentral.blob.core.windows.net" as const;
+export const CHATGPT_ATTACHMENT_HOST_PATTERN = /^oaisdmntpr[a-z0-9]+\.blob\.core\.windows\.net$/;
 export const CHATGPT_ATTACHMENT_ETLD_PLUS_ONE = "blob.core.windows.net" as const;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const IP_LITERAL = /^(?:\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-f:.]+\]|[0-9a-f]*:[0-9a-f:.]+)$/i;
@@ -114,7 +115,15 @@ export function normalizeConnectorFileReference(value: unknown): ConnectorFileRe
 }
 
 function normalizedHostname(url: URL): string {
-  return url.hostname.replace(/\.+$/, "").toLocaleLowerCase("en");
+  const lower = url.hostname.toLocaleLowerCase("en");
+  return lower.endsWith(".") ? lower.slice(0, -1) : lower;
+}
+
+export function isTrustedChatGptAttachmentHostname(hostname: string): boolean {
+  const lower = hostname.toLocaleLowerCase("en");
+  const normalized = lower.endsWith(".") ? lower.slice(0, -1) : lower;
+  if (!normalized || normalized.endsWith(".") || normalized.split(".").some((label) => label.startsWith("xn--"))) return false;
+  return CHATGPT_ATTACHMENT_HOST_PATTERN.test(normalized);
 }
 
 export function trustedConnectorFileUrl(reference: string): URL {
@@ -126,7 +135,7 @@ export function trustedConnectorFileUrl(reference: string): URL {
   if (url.protocol !== "https:" || effectivePort !== 443 || url.username || url.password || !host || IP_LITERAL.test(host)) {
     throw boundaryError("connector_file_download_forbidden", "The connector file download URL is not permitted.");
   }
-  if (host !== CHATGPT_ATTACHMENT_HOST) {
+  if (!isTrustedChatGptAttachmentHostname(host)) {
     throw boundaryError("connector_file_download_forbidden", "The connector file download host is not permitted.", {
       details: { scheme: url.protocol.replace(":", ""), normalizedHostname: host, effectivePort },
     });
