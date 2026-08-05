@@ -49,18 +49,27 @@ test("production runbook requires forward recovery and plugin refresh", () => {
   assert.match(runbook, /Never create replacement production resources/);
 });
 
-test("ODL-REQ-025 deployment is exact-main, post-CI, leased, and does not retry terminal MiMo diagnostics", () => {
+test("ODL-REQ-028 deployment is exact-main, post-CI, leased, and does not run provider diagnostics", () => {
   const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
   assert.match(workflow, /deploy-production:/);
   assert.match(workflow, /if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/);
   assert.match(workflow, /needs: validate/);
   assert.match(workflow, /test "\$\(git rev-parse HEAD\)" = "\$GITHUB_SHA"/);
-  assert.match(workflow, /OPENING_VERSION_ID: edc3677f-15c3-40df-aea2-f7fbe8a26459/);
-  assert.match(workflow, /OPENING_DEPLOYMENT_ID: 995fdd5c-6342-490d-9df2-b19483457a2a/);
+  assert.match(workflow, /OPENING_VERSION_ID: 50e0887d-5868-4a48-bfb4-76081f0148a2/);
+  assert.match(workflow, /OPENING_DEPLOYMENT_ID: c65a0e7f-d855-4acf-a94e-c279646da11d/);
+  assert.match(workflow, /Verify exact pull-request merge tree/);
+  assert.match(workflow, /git rev-parse HEAD\^1/);
+  assert.match(workflow, /git rev-parse HEAD\^2/);
   assert.match(workflow, /npx wrangler deploy --config wrangler\.production\.json/);
-  assert.match(workflow, /Deploy ODL-REQ-025 exact main/);
-  assert.match(workflow, /odl-req-025-\$\{GITHUB_SHA:0:12\}/);
+  assert.match(workflow, /Deploy ODL-REQ-028 exact main/);
+  assert.match(workflow, /odl-req-028-\$\{GITHUB_SHA:0:12\}/);
   assert.match(workflow, /\.result\.deployments\[0\]\.versions\[0\]\.percentage==100/);
+  assert.match(workflow, /WORKER_DEPLOYMENT_ID/);
+  assert.match(workflow, /repo-\$GITHUB_SHA/);
+  assert.match(workflow, /test "\$\(jq length pre-bindings\.json\)" = "44"/);
+  assert.match(workflow, /test "\$\(jq length post-bindings\.json\)" = "44"/);
+  assert.match(workflow, /test "\$\(jq length pre-secret-bindings\.json\)" = "4"/);
+  assert.match(workflow, /test "\$\(jq length post-secret-bindings\.json\)" = "4"/);
   assert.match(workflow, /cmp pre-bindings\.json post-bindings\.json/);
   assert.match(workflow, /cmp pre-secret-bindings\.json post-secret-bindings\.json/);
   assert.match(workflow, /OPENCODE_ZEN_API_KEY/);
@@ -68,7 +77,7 @@ test("ODL-REQ-025 deployment is exact-main, post-CI, leased, and does not retry 
   assert.match(workflow, /OAUTH_KV/);
   assert.match(workflow, /healthHttp200:true/);
   assert.match(workflow, /if: always\(\)/);
-  assert.match(workflow, /odl-req-025-deployment-evidence/);
+  assert.match(workflow, /odl-req-028-deployment-evidence/);
   assert.doesNotMatch(workflow, /__odlReq024GoVisionDiagnostic|Run bounded synthetic OpenCode Go diagnostic|mimo-v2\.5-pro/);
   assert.doesNotMatch(workflow, /start_visual_catalogue_job|sourceItemId|pageStart|pageEnd|workflow_dispatch|deployment-only|transport branch/i);
 });
