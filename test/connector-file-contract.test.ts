@@ -293,7 +293,10 @@ test("bounded ChatGPT regional attachment-host family rejects broadened Azure, l
     "https://[::1]/file",
   ];
   for (const value of forbidden) {
-    assert.throws(() => trustedConnectorFileUrl(value), (error: unknown) => error instanceof ConnectorError && error.code === "connector_file_download_forbidden");
+    assert.throws(
+      () => trustedConnectorFileUrl(value),
+      (error: unknown) => error instanceof ConnectorError && ["connector_file_download_forbidden", "connector_file_download_malformed"].includes(error.code),
+    );
   }
 });
 

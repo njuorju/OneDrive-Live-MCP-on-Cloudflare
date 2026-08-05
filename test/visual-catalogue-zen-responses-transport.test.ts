@@ -82,7 +82,7 @@ test("exact provider, mode, model, credential and fetch implementation are valid
   const body = buildZenResponsesRequest({ text: "x", maxOutputTokens: 64 });
   await assert.rejects(() => requestZenResponses({ env, spendLedgerKey: ledger.key, body, context: "test", provider: "opencode_go", mode: ZEN_RESPONSES_MODE, fetchImpl }), (error: unknown) => isZenResponsesTransportError(error) && error.code === "zen_responses_fetch_not_started" && error.receipt.fetchBegan === false);
   await assert.rejects(() => requestZenResponses({ env: { ...env, OPENCODE_ZEN_API_KEY: "" }, spendLedgerKey: ledger.key, body, context: "test", fetchImpl }), (error: unknown) => isZenResponsesTransportError(error) && error.code === "zen_responses_fetch_not_started" && error.receipt.credentialBindingExists === false);
-  await assert.rejects(() => requestZenResponses({ env, spendLedgerKey: ledger.key, body, context: "test", fetchImpl: null as any }), (error: unknown) => isZenResponsesTransportError(error) && error.code === "zen_responses_fetch_not_started");
+  await assert.rejects(() => requestZenResponses({ env, spendLedgerKey: ledger.key, body, context: "test", fetchImpl: {} as any }), (error: unknown) => isZenResponsesTransportError(error) && error.code === "zen_responses_fetch_not_started");
   assert.equal(calls, 0);
   assert.ok(transportObjects(r2).length >= 3);
 });
