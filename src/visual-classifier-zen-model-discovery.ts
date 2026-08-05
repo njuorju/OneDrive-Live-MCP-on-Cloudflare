@@ -138,6 +138,15 @@ export async function discoverZenResponsesModelWithReceipt(
     );
   }
 
+  if (typeof fetchImpl !== "function") {
+    failure(
+      "zen_models_fetch_not_started",
+      "The Zen models fetch implementation was not invokable.",
+      receipt,
+      "fetch_invocation",
+    );
+  }
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort("zen_models_timeout"), MODELS_FETCH_TIMEOUT_MS);
   let response: Response;
