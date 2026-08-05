@@ -239,7 +239,7 @@ test("DNS rebinding and private DNS results fail before connection", async () =>
   );
   await assert.rejects(
     () => loadConnectorTextFile(ref("/csv", "catalogue.csv", "text/csv"), "target.csv", 1024, undefined, undefined, mappedFetch, { enforceAuthorizedFileParam: true, authorizedTopLevelFileParam: "csvFile", declaredFileParams: ["csvFile"], resolveHost: async () => ["169.254.169.254"] }),
-    (error: unknown) => error instanceof ConnectorError && error.code === "connector_file_dns_forbidden",
+    (error: unknown) => error instanceof ConnectorError && error.code === "connector_file_dns_private_address",
   );
 });
 
