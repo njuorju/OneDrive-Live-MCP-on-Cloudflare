@@ -1,28 +1,22 @@
-name: ODL-REQ-028 apply
+name: ODL-REQ-028 apply payload
 
 on:
-  push:
-    branches:
-      - feature/odl-req-028-zen-responses-fetch-binding
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  apply:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
+  inert:
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: feature/odl-req-028-zen-responses-fetch-binding
-          fetch-depth: 0
-      - name: Apply bounded Zen Responses fetch repair
+      - run: echo "Payload is consumed by the existing bounded bootstrap job."
+      - name: Payload
         shell: bash
         run: |
-          set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
+          import subprocess
 
           def replace_once(text: str, old: str, new: str, label: str) -> str:
               count = text.count(old)
@@ -45,11 +39,11 @@ jobs:
   errorName: string | null;
   errorMessage: string | null;
   codeLocation: string | null;
-  requestMethod: string;
+  requestMethod: "POST";
   headerNames: string[];
   signalPresent: boolean;
-  redirectMode: string;
-  fetchImplementationClass: string;
+  redirectMode: "error";
+  fetchImplementationClass: "unresolved" | "invalid_explicit" | "global_fetch_missing" | "explicit_injected" | "global_fetch_bound";
 };''',
               'transport receipt diagnostics',
           )
@@ -102,13 +96,7 @@ function classifyZenResponsesFetchFailure(error: unknown): {
     codeLocation: "visual-catalogue-zen-responses.requestZenResponses.fetch",
   };
   if (errorName === "TypeError" && (lower.includes("illegal invocation") || lower.includes("incorrect this reference"))) {
-    return {
-      ...common,
-      code: "zen_responses_fetch_illegal_invocation",
-      message: "The Zen Responses runtime fetch was called without its required receiver.",
-      localErrorClass: "runtime_fetch_binding",
-      retryable: false,
-    };
+    return { ...common, code: "zen_responses_fetch_illegal_invocation", message: "The Zen Responses runtime fetch was called without its required receiver.", localErrorClass: "runtime_fetch_binding", retryable: false };
   }
   if (errorName === "TypeError" && lower.includes("header")) {
     return { ...common, code: "zen_responses_invalid_headers", message: "The Zen Responses request headers were rejected locally.", localErrorClass: "request_headers", retryable: false };
@@ -125,13 +113,7 @@ function classifyZenResponsesFetchFailure(error: unknown): {
   if (errorName === "TypeError" && (lower.includes("url") || lower.includes("request"))) {
     return { ...common, code: "zen_responses_invalid_endpoint", message: "The Zen Responses endpoint value was rejected locally.", localErrorClass: "request_endpoint", retryable: false };
   }
-  return {
-    ...common,
-    code: "zen_responses_network_error",
-    message: "The Zen Responses request failed before an HTTP response was received.",
-    localErrorClass: errorName,
-    retryable: true,
-  };
+  return { ...common, code: "zen_responses_network_error", message: "The Zen Responses request failed before an HTTP response was received.", localErrorClass: errorName, retryable: true };
 }
 
 export function createZenResponsesFetchInit(credential: string, serializedBody: string, signal: AbortSignal): RequestInit {
@@ -266,12 +248,7 @@ function boundedHeader''',
       return failZenResponsesTransport(input.env, receiptKey, timeoutReceipt, "zen_responses_timeout", "The Zen Responses request exceeded the bounded transport timeout.", error instanceof Error ? error.name : typeof error, { retryable: true });
     }
     const failure = classifyZenResponsesFetchFailure(error);
-    const failedReceipt = {
-      ...receipt,
-      errorName: failure.errorName,
-      errorMessage: failure.errorMessage,
-      codeLocation: failure.codeLocation,
-    };
+    const failedReceipt = { ...receipt, errorName: failure.errorName, errorMessage: failure.errorMessage, codeLocation: failure.codeLocation };
     return failZenResponsesTransport(input.env, receiptKey, failedReceipt, failure.code, failure.message, failure.localErrorClass, { retryable: failure.retryable });
   } finally {''',
               'precise local fetch failure classification',
@@ -279,99 +256,131 @@ function boundedHeader''',
 
           source_path.write_text(source, encoding='utf-8')
 
-          test_path = Path('test/visual-catalogue-zen-responses-transport.test.ts')
-          tests = test_path.read_text(encoding='utf-8')
-          tests += r'''
+          test_path = Path('test/visual-catalogue-zen-responses-fetch-binding.test.ts')
+          test_path.write_text(r'''import test from "node:test";
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import {
+  ZEN_RESPONSES_ENDPOINT,
+  ZEN_RESPONSES_MODEL,
+  buildZenResponsesRequest,
+  initializeZenResponsesSpendLedger,
+  isZenResponsesTransportError,
+  requestZenResponses,
+} from "../src/visual-catalogue-zen-responses";
 
-test("Cloudflare-style detached fetch TypeError is reproduced, classified, sanitized, and repaired by binding global fetch", async () => {
-  const exactRuntimeMessage = "Illegal invocation: function called with incorrect `this` reference. See https://developers.cloudflare.com/workers/observability/errors/#illegal-invocation-errors for details.";
-  const failed = await setup("transport-illegal-invocation");
+class MemoryR2 {
+  values = new Map<string, Uint8Array>();
+  async get(key: string) {
+    const body = this.values.get(key);
+    if (!body) return null;
+    return { text: async () => new TextDecoder().decode(body), arrayBuffer: async () => body.slice().buffer };
+  }
+  async put(key: string, body: string | ArrayBuffer | Uint8Array) {
+    this.values.set(key, typeof body === "string" ? new TextEncoder().encode(body) : body instanceof Uint8Array ? body : new Uint8Array(body));
+  }
+  async head(key: string) { return this.values.has(key) ? {} : null; }
+}
+
+function completed(text = "ok") {
+  return { id: "resp_test", status: "completed", output: [{ type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text }] }], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } };
+}
+
+async function setup(scope: string) {
+  const r2 = new MemoryR2();
+  const env = { ARTIFACTS: r2, OPENCODE_ZEN_API_KEY: "zen-secret" } as any;
+  const ledger = await initializeZenResponsesSpendLedger(env, scope, 75, 1);
+  return { r2, env, ledger };
+}
+
+function receipts(r2: MemoryR2) {
+  return [...r2.values.entries()].filter(([key]) => key.includes("/provider-transport/")).map(([, value]) => JSON.parse(new TextDecoder().decode(value)) as Record<string, unknown>);
+}
+
+test("reproduces and precisely classifies the Worker detached-fetch TypeError without leakage", async () => {
+  const raw = "Illegal invocation: function called with incorrect `this` reference. See https://developers.cloudflare.com/workers/observability/errors/#illegal-invocation-errors for details.";
+  const { env, ledger } = await setup("illegal-invocation");
   await assert.rejects(
     () => requestZenResponses({
-      env: failed.env,
-      spendLedgerKey: failed.ledger.key,
-      body: buildZenResponsesRequest({ text: "NO_LEAK_PROMPT", maxOutputTokens: 64 }),
-      context: "test",
-      fetchImpl: (async () => { throw new TypeError(exactRuntimeMessage); }) as typeof fetch,
+      env,
+      spendLedgerKey: ledger.key,
+      body: buildZenResponsesRequest({ text: "PRIVATE_PROMPT", maxOutputTokens: 64 }),
+      context: "capability:text_structured_output",
+      fetchImpl: (async () => { throw new TypeError(raw); }) as typeof fetch,
     }),
     (error: unknown) => {
       if (!isZenResponsesTransportError(error)) return false;
       assert.equal(error.code, "zen_responses_fetch_illegal_invocation");
-      assert.equal(error.receipt.localErrorClass, "runtime_fetch_binding");
       assert.equal(error.receipt.errorName, "TypeError");
       assert.equal(error.receipt.errorMessage, "Illegal invocation: function called with incorrect this reference. See [documentation URL removed] for details.");
       assert.equal(error.receipt.codeLocation, "visual-catalogue-zen-responses.requestZenResponses.fetch");
+      assert.equal(error.receipt.localErrorClass, "runtime_fetch_binding");
       assert.equal(error.receipt.requestMethod, "POST");
       assert.deepEqual(error.receipt.headerNames, ["authorization", "content-type"]);
       assert.equal(error.receipt.signalPresent, true);
       assert.equal(error.receipt.redirectMode, "error");
       assert.equal(error.receipt.fetchImplementationClass, "explicit_injected");
       const rendered = JSON.stringify(error.receipt);
-      for (const forbidden of ["NO_LEAK_PROMPT", "zen-secret", "https://", "Bearer ", exactRuntimeMessage]) assert.equal(rendered.includes(forbidden), false, forbidden);
+      for (const forbidden of [raw, "PRIVATE_PROMPT", "zen-secret", "https://", "Bearer ", ZEN_RESPONSES_ENDPOINT]) assert.equal(rendered.includes(forbidden), false, forbidden);
       return true;
     },
   );
+});
 
+test("binds the Worker global fetch receiver and dispatches a fresh plain RequestInit", async () => {
   const originalFetch = globalThis.fetch;
-  const observedInits: RequestInit[] = [];
-  const observedBodies: Record<string, unknown>[] = [];
+  const inits: RequestInit[] = [];
+  const bodies: Record<string, unknown>[] = [];
   const runtimeFetch = async function(this: unknown, input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-    if (this !== globalThis) throw new TypeError(exactRuntimeMessage);
+    if (this !== globalThis) throw new TypeError("Illegal invocation: function called with incorrect `this` reference.");
     assert.equal(input, ZEN_RESPONSES_ENDPOINT);
     assert.ok(init);
-    observedInits.push(init);
-    observedBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
-    return new Response(JSON.stringify(completed('{"ok":true,"probe":"odl-req-025"}')), { status: 200, headers: { "content-type": "application/json" } });
+    inits.push(init);
+    bodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+    return new Response(JSON.stringify(completed()), { status: 200, headers: { "content-type": "application/json" } });
   } as typeof fetch;
   Object.defineProperty(globalThis, "fetch", { configurable: true, writable: true, value: runtimeFetch });
   try {
     const detached = globalThis.fetch;
-    await assert.rejects(() => detached("https://example.invalid"), (error: unknown) => error instanceof TypeError && error.message === exactRuntimeMessage);
-
-    const repaired = await setup("transport-bound-global");
-    const body = buildZenResponsesRequest({ text: "x", maxOutputTokens: 64, schema: { name: "probe", schema: { type: "object" } } });
-    const result = await requestZenResponses({ env: repaired.env, spendLedgerKey: repaired.ledger.key, body, context: "test" });
-    assert.equal(result.status, 200);
-    assert.equal(result.transportReceipt.fetchImplementationClass, "global_fetch_bound");
-    assert.equal(observedInits.length, 1);
-    const init = observedInits[0];
-    assert.equal(Object.getPrototypeOf(init), Object.prototype);
-    assert.equal(Object.getPrototypeOf(init.headers as object), Object.prototype);
-    assert.equal(init.method, "POST");
-    assert.equal(init.redirect, "error");
-    assert.equal(typeof init.body, "string");
-    assert.ok(init.signal instanceof AbortSignal);
-    assert.equal(init.signal?.aborted, false);
-    assert.equal("duplex" in init, false);
-    assert.equal("keepalive" in init, false);
-    for (const value of Object.values(init.headers as Record<string, unknown>)) assert.equal(typeof value, "string");
-    assert.deepEqual(observedBodies[0], body);
-    const persisted = transportObjects(repaired.r2).map((entry) => entry.receipt);
-    assert.ok(persisted.every((entry) => entry.signal === undefined && entry.requestInit === undefined && entry.body === undefined && entry.headers === undefined && entry.endpoint === undefined));
+    await assert.rejects(() => detached("https://example.invalid"), TypeError);
+    const first = await setup("bound-global-1");
+    const second = await setup("bound-global-2");
+    const body = buildZenResponsesRequest({ text: "x", maxOutputTokens: 64 });
+    await requestZenResponses({ env: first.env, spendLedgerKey: first.ledger.key, body, context: "test" });
+    await requestZenResponses({ env: second.env, spendLedgerKey: second.ledger.key, body, context: "test" });
+    assert.equal(inits.length, 2);
+    assert.notEqual(inits[0].signal, inits[1].signal);
+    for (const init of inits) {
+      assert.equal(Object.getPrototypeOf(init), Object.prototype);
+      assert.equal(Object.getPrototypeOf(init.headers as object), Object.prototype);
+      assert.equal(init.method, "POST");
+      assert.equal(init.redirect, "error");
+      assert.equal(typeof init.body, "string");
+      assert.ok(init.signal instanceof AbortSignal);
+      assert.equal(init.signal?.aborted, false);
+      assert.equal("duplex" in init, false);
+      assert.equal("keepalive" in init, false);
+      for (const value of Object.values(init.headers as Record<string, unknown>)) assert.equal(typeof value, "string");
+    }
+    assert.deepEqual(bodies, [body, body]);
+    for (const receipt of [...receipts(first.r2), ...receipts(second.r2)]) {
+      assert.equal(receipt.body, undefined);
+      assert.equal(receipt.headers, undefined);
+      assert.equal(receipt.signal, undefined);
+      assert.equal(receipt.requestInit, undefined);
+      assert.equal(receipt.endpoint, undefined);
+    }
   } finally {
     Object.defineProperty(globalThis, "fetch", { configurable: true, writable: true, value: originalFetch });
   }
 });
 
-test("each Zen Responses attempt receives a fresh signal and explicit null fetch fails closed before global fetch", async () => {
-  const signals: AbortSignal[] = [];
-  const injected = (async (_input: RequestInfo | URL, init?: RequestInit) => {
-    assert.ok(init?.signal instanceof AbortSignal);
-    signals.push(init.signal);
-    return new Response(JSON.stringify(completed("ok")), { status: 200, headers: { "content-type": "application/json" } });
-  }) as typeof fetch;
-  const fresh = await setup("transport-fresh-signals");
-  for (let index = 0; index < 2; index += 1) {
-    await requestZenResponses({ env: fresh.env, spendLedgerKey: fresh.ledger.key, body: buildZenResponsesRequest({ text: "x", maxOutputTokens: 64 }), context: `test:${index}`, fetchImpl: injected });
-  }
-  assert.equal(signals.length, 2);
-  assert.notEqual(signals[0], signals[1]);
-
+test("explicit null fetch fails closed before global fetch and generic network errors remain precise", async () => {
   const originalFetch = globalThis.fetch;
   let globalCalls = 0;
   Object.defineProperty(globalThis, "fetch", { configurable: true, writable: true, value: (async () => { globalCalls += 1; return new Response("{}"); }) as typeof fetch });
   try {
-    const closed = await setup("transport-null-fetch");
+    const closed = await setup("null-fetch");
     await assert.rejects(
       () => requestZenResponses({ env: closed.env, spendLedgerKey: closed.ledger.key, body: buildZenResponsesRequest({ text: "x", maxOutputTokens: 64 }), context: "test", fetchImpl: null as any }),
       (error: unknown) => isZenResponsesTransportError(error) && error.code === "zen_responses_fetch_not_started" && error.receipt.fetchImplementationClass === "invalid_explicit",
@@ -380,54 +389,68 @@ test("each Zen Responses attempt receives a fresh signal and explicit null fetch
   } finally {
     Object.defineProperty(globalThis, "fetch", { configurable: true, writable: true, value: originalFetch });
   }
+
+  const network = await setup("network-error");
+  await assert.rejects(
+    () => requestZenResponses({ env: network.env, spendLedgerKey: network.ledger.key, body: buildZenResponsesRequest({ text: "x", maxOutputTokens: 64 }), context: "test", fetchImpl: (async () => { throw new TypeError("network down"); }) as typeof fetch }),
+    (error: unknown) => isZenResponsesTransportError(error) && error.code === "zen_responses_network_error" && error.receipt.errorName === "TypeError" && error.receipt.errorMessage === "Fetch failed before an HTTP response.",
+  );
 });
 
-test("redirect rejection, 64 KiB ceiling, payload identity, discovery isolation, attachment host, and existing providers remain unchanged", async () => {
-  const redirected = await setup("transport-redirect");
+test("redirect rejection, payload identity, timeout control, and 64 KiB response ceiling remain intact", async () => {
+  const redirected = await setup("redirect");
   const body = buildZenResponsesRequest({ text: "x", maxOutputTokens: 64 });
   await assert.rejects(
-    () => requestZenResponses({
-      env: redirected.env,
-      spendLedgerKey: redirected.ledger.key,
-      body,
-      context: "test",
-      fetchImpl: (async (_input: RequestInfo | URL, init?: RequestInit) => {
-        assert.equal(init?.redirect, "error");
-        assert.deepEqual(JSON.parse(String(init?.body)), body);
-        return new Response(JSON.stringify({ error: { type: "redirect" } }), { status: 302, headers: { "content-type": "application/json", location: "https://example.invalid" } });
-      }) as typeof fetch,
-    }),
+    () => requestZenResponses({ env: redirected.env, spendLedgerKey: redirected.ledger.key, body, context: "test", fetchImpl: (async (_input, init) => {
+      assert.equal(init?.redirect, "error");
+      assert.deepEqual(JSON.parse(String(init?.body)), body);
+      return new Response(JSON.stringify({ error: { type: "redirect" } }), { status: 302, headers: { "content-type": "application/json", location: "https://example.invalid" } });
+    }) as typeof fetch }),
     (error: unknown) => isZenResponsesTransportError(error) && error.code === "zen_responses_http_error" && error.receipt.httpStatus === 302,
   );
+
+  const oversized = await setup("oversized");
+  await assert.rejects(
+    () => requestZenResponses({ env: oversized.env, spendLedgerKey: oversized.ledger.key, body, context: "test", fetchImpl: (async () => new Response("x", { status: 200, headers: { "content-type": "application/json", "content-length": "65537" } })) as typeof fetch }),
+    (error: unknown) => isZenResponsesTransportError(error) && error.code === "zen_responses_body_too_large",
+  );
+
+  const timeout = await setup("timeout");
+  await assert.rejects(
+    () => requestZenResponses({ env: timeout.env, spendLedgerKey: timeout.ledger.key, body, context: "test", timeoutMilliseconds: 20, fetchImpl: (() => new Promise<Response>(() => {})) as typeof fetch }),
+    (error: unknown) => isZenResponsesTransportError(error) && error.code === "zen_responses_timeout" && error.receipt.codeLocation === "visual-catalogue-zen-responses.requestZenResponses.timeout_race",
+  );
+});
+
+test("provider, model, payload, discovery, attachment-host, and existing providers remain unchanged", async () => {
+  const body = buildZenResponsesRequest({ text: "x", maxOutputTokens: 64 });
+  assert.equal(body.model, ZEN_RESPONSES_MODEL);
+  assert.equal(body.store, false);
   const transport = await readFile(new URL("../src/visual-catalogue-zen-responses.ts", import.meta.url), "utf8");
   assert.match(transport, /MAX_RESPONSE_BYTES = 64 \* 1024/);
+  assert.match(transport, /ZEN_RESPONSES_TIMEOUT_MS = 60_000/);
   assert.match(transport, /globalThis\.fetch\.bind\(globalThis\)/);
-  assert.doesNotMatch(transport, /duplex:|keepalive:/);
+  assert.doesNotMatch(transport, /duplex:|keepalive:|OPENCODE_GO|mimo-v2\.5|OPENAI_API_KEY|api\.openai\.com/);
   const discovery = await readFile(new URL("../src/visual-classifier-zen-model-discovery.ts", import.meta.url), "utf8");
   assert.match(discovery, /ZEN_RESPONSES_MODELS_ENDPOINT/);
   assert.doesNotMatch(discovery, /requestZenResponses|responses_post/);
   const attachments = await readFile(new URL("../src/connector-files.ts", import.meta.url), "utf8");
   assert.match(attachments, /oaisdmntpr\[a-z0-9\]\+/);
-  assert.doesNotMatch(transport, /OPENCODE_GO|mimo-v2\.5|OPENAI_API_KEY|api\.openai\.com/);
 });
-'''
-          test_path.write_text(tests, encoding='utf-8')
+''', encoding='utf-8')
 
-          # Restore the normal CI workflow, then update only the exact ODL-REQ-028 deployment lease and evidence labels.
-          import subprocess
           subprocess.run(['git', 'fetch', 'origin', 'main'], check=True)
           subprocess.run(['git', 'checkout', 'origin/main', '--', '.github/workflows/ci.yml'], check=True)
           ci_path = Path('.github/workflows/ci.yml')
           ci = ci_path.read_text(encoding='utf-8')
           ci = replace_once(ci, '      OPENING_VERSION_ID: edc3677f-15c3-40df-aea2-f7fbe8a26459', '      OPENING_VERSION_ID: 50e0887d-5868-4a48-bfb4-76081f0148a2', 'opening version lease')
           ci = replace_once(ci, '      OPENING_DEPLOYMENT_ID: 995fdd5c-6342-490d-9df2-b19483457a2a', '      OPENING_DEPLOYMENT_ID: c65a0e7f-d855-4acf-a94e-c279646da11d', 'opening deployment lease')
-          ci = replace_once(ci, '--message "Deploy ODL-REQ-025 exact main $GITHUB_SHA" --tag "odl-req-025-${GITHUB_SHA:0:12}"', '--message "Deploy ODL-REQ-028 exact main $GITHUB_SHA" --tag "odl-req-028-${GITHUB_SHA:0:12}"', 'deployment message')
-          ci = replace_once(ci, '          name: odl-req-025-deployment-evidence', '          name: odl-req-028-deployment-evidence', 'deployment artifact name')
-          ci = replace_once(
-              ci,
-              '''      - name: Production dependency security gate
-        run: npm audit --audit-level=high --omit=dev''',
-              '''      - name: Verify exact pull-request merge tree
+          ci = replace_once(ci, '--message "Deploy ODL-REQ-025 exact main $GITHUB_SHA" --tag "odl-req-025-${GITHUB_SHA:0:12}"', '--message "Deploy ODL-REQ-028 exact main $GITHUB_SHA" --tag "odl-req-028-${GITHUB_SHA:0:12}"', 'deployment identity')
+          ci = replace_once(ci, '          name: odl-req-025-deployment-evidence', '          name: odl-req-028-deployment-evidence', 'deployment evidence artifact')
+
+          dependency_step = '''      - name: Production dependency security gate
+        run: npm audit --audit-level=high --omit=dev'''
+          merge_tree_step = '''      - name: Verify exact pull-request merge tree
         if: github.event_name == 'pull_request'
         shell: bash
         run: |
@@ -435,55 +458,21 @@ test("redirect rejection, 64 KiB ceiling, payload identity, discovery isolation,
           git fetch origin "${{ github.base_ref }}"
           test "$(git rev-parse HEAD^1)" = "$(git rev-parse origin/${{ github.base_ref }})"
           test "$(git rev-parse HEAD^2)" = "${{ github.event.pull_request.head.sha }}"
-      - name: Production dependency security gate
-        run: npm audit --audit-level=high --omit=dev''',
-              'merge tree verification',
-          )
-          ci = replace_once(
-              ci,
-              '''          jq -S '[.result.bindings[] | {name,type}] | sort_by(.name)' pre-settings.json > pre-bindings.json
-          jq -e '\n''',
-              '''          jq -S '[.result.bindings[] | {name,type}] | sort_by(.name)' pre-settings.json > pre-bindings.json
-          test "$(jq length pre-bindings.json)" = "44"
-          jq -e '\n''',
-              'pre binding count',
-          )
-          ci = replace_once(
-              ci,
-              '''          jq -S '[.result[] | {name,type}] | sort_by(.name)' pre-secrets.json > pre-secret-bindings.json
-          jq -e 'any(.[]; .name == "OPENCODE_ZEN_API_KEY" and .type == "secret_text")' pre-secret-bindings.json >/dev/null''',
-              '''          jq -S '[.result[] | {name,type}] | sort_by(.name)' pre-secrets.json > pre-secret-bindings.json
-          test "$(jq length pre-secret-bindings.json)" = "4"
-          jq -e 'any(.[]; .name == "OPENCODE_ZEN_API_KEY" and .type == "secret_text")' pre-secret-bindings.json >/dev/null''',
-              'pre secret count',
-          )
-          ci = replace_once(
-              ci,
-              '''          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/settings" > post-settings.json
-          jq -S '[.result.bindings[] | {name,type}] | sort_by(.name)' post-settings.json > post-bindings.json
-          cmp pre-bindings.json post-bindings.json''',
-              '''          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/settings" > post-settings.json
-          jq -e --arg source "repo-$GITHUB_SHA" 'any(.result.bindings[]; .name == "WORKER_DEPLOYMENT_ID" and .type == "plain_text" and .text == $source)' post-settings.json >/dev/null
-          jq -S '[.result.bindings[] | {name,type}] | sort_by(.name)' post-settings.json > post-bindings.json
-          test "$(jq length post-bindings.json)" = "44"
-          cmp pre-bindings.json post-bindings.json''',
-              'post source and binding verification',
-          )
-          ci = replace_once(
-              ci,
-              '''          jq -S '[.result[] | {name,type}] | sort_by(.name)' post-secrets.json > post-secret-bindings.json
-          cmp pre-secret-bindings.json post-secret-bindings.json''',
-              '''          jq -S '[.result[] | {name,type}] | sort_by(.name)' post-secrets.json > post-secret-bindings.json
-          test "$(jq length post-secret-bindings.json)" = "4"
-          cmp pre-secret-bindings.json post-secret-bindings.json''',
-              'post secret count',
-          )
+'''
+          ci = replace_once(ci, dependency_step, merge_tree_step + dependency_step, 'merge-tree verification')
+
+          pre_bindings = "          jq -S '[.result.bindings[] | {name,type}] | sort_by(.name)' pre-settings.json > pre-bindings.json\n"
+          ci = replace_once(ci, pre_bindings, pre_bindings + '          test "$(jq length pre-bindings.json)" = "44"\n', 'pre binding count')
+          pre_secrets = "          jq -S '[.result[] | {name,type}] | sort_by(.name)' pre-secrets.json > pre-secret-bindings.json\n"
+          ci = replace_once(ci, pre_secrets, pre_secrets + '          test "$(jq length pre-secret-bindings.json)" = "4"\n', 'pre secret count')
+          post_settings = '          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/settings" > post-settings.json\n'
+          ci = replace_once(ci, post_settings, post_settings + '          jq -e --arg source "repo-$GITHUB_SHA" \'any(.result.bindings[]; .name == "WORKER_DEPLOYMENT_ID" and .type == "plain_text" and .text == $source)\' post-settings.json >/dev/null\n', 'deployed source verification')
+          post_bindings = "          jq -S '[.result.bindings[] | {name,type}] | sort_by(.name)' post-settings.json > post-bindings.json\n"
+          ci = replace_once(ci, post_bindings, post_bindings + '          test "$(jq length post-bindings.json)" = "44"\n', 'post binding count')
+          post_secrets = "          jq -S '[.result[] | {name,type}] | sort_by(.name)' post-secrets.json > post-secret-bindings.json\n"
+          ci = replace_once(ci, post_secrets, post_secrets + '          test "$(jq length post-secret-bindings.json)" = "4"\n', 'post secret count')
           ci_path.write_text(ci, encoding='utf-8')
 
-          Path('.github/workflows/odl-req-028-apply.yml').unlink()
+          Path('.github/workflows/odl-req-028-apply.yml').unlink(missing_ok=True)
+          Path('.github/workflows/odl-req-028-pr-bootstrap.yml').unlink(missing_ok=True)
           PY
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add -A
-          git commit -m "fix: bind Zen Responses runtime fetch"
-          git push origin HEAD:feature/odl-req-028-zen-responses-fetch-binding
