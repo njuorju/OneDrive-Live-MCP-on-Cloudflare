@@ -10,6 +10,8 @@ import {
 } from "./visual-catalogue-zen-responses-base";
 import { sha256HexUtf8 } from "./paid-core";
 
+// Compatibility-visible base invariants remain MAX_RESPONSE_BYTES = 64 * 1024
+// and ZEN_RESPONSES_TIMEOUT_MS = 60_000 in visual-catalogue-zen-responses-base.ts.
 const ZEN_RESPONSES_REDIRECT_MAX_HOPS = 1;
 const ZEN_RESPONSES_ALLOWED_HOST = "opencode.ai";
 const ZEN_RESPONSES_ALLOWED_PATHS = new Set([
@@ -436,6 +438,17 @@ async function persistRedirectReceipt(
   });
 }
 
+async function persistRedirectReceiptBestEffort(
+  input: RequestInput,
+  receipt: RedirectedTransportReceipt,
+): Promise<void> {
+  try {
+    await persistRedirectReceipt(input, receipt);
+  } catch {
+    // Preserve the already-classified transport or redirect failure.
+  }
+}
+
 function selectUnderlyingFetch(input: RequestInput): FetchFunction | null {
   const hasExplicitFetch = Object.prototype.hasOwnProperty.call(input, "fetchImpl");
   if (hasExplicitFetch) return typeof input.fetchImpl === "function" ? input.fetchImpl : null;
@@ -467,7 +480,7 @@ export async function requestZenResponses(input: RequestInput): Promise<RequestR
         errorMessage: trace.failure.message,
         codeLocation: "visual-catalogue-zen-responses.requestZenResponses.redirect_policy",
       } as RedirectedTransportReceipt;
-      await persistRedirectReceipt(input, failed);
+      await persistRedirectReceiptBestEffort(input, failed);
       throw new ZenResponsesTransportError(
         trace.failure.code,
         trace.failure.message,
@@ -479,7 +492,7 @@ export async function requestZenResponses(input: RequestInput): Promise<RequestR
     Object.assign(error.receipt as object, patched);
     const details = (error as unknown as { details?: { transportReceipt?: unknown } }).details;
     if (details) details.transportReceipt = error.receipt;
-    await persistRedirectReceipt(input, patched);
+    await persistRedirectReceiptBestEffort(input, patched);
     throw error;
   }
 }
