@@ -1,0 +1,38 @@
+name: ODL-REQ-026 branch patch trigger
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  apply-branch-patch:
+    if: github.head_ref == 'feature/odl-req-026-zen-model-discovery'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/odl-req-026-zen-model-discovery
+          fetch-depth: 0
+      - name: Execute bounded embedded patch
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path('.github/workflows/odl-req-026-self-patch.yml').read_text(encoding='utf-8')
+          marker = "          python3 - <<'PY'\n"
+          start = source.index(marker) + len(marker)
+          end = source.index("\n          PY\n", start)
+          lines = source[start:end].splitlines()
+          script = "\n".join(line[10:] if line.startswith("          ") else line for line in lines)
+          exec(compile(script, 'odl-req-026-embedded-patch.py', 'exec'))
+          PY
+          rm -f .github/workflows/odl-req-026-self-patch.yml .github/workflows/odl-req-026-trigger.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "fix: complete bounded Zen Responses discovery repair"
+          git push origin HEAD:feature/odl-req-026-zen-model-discovery
