@@ -1,0 +1,489 @@
+name: ODL-REQ-028 apply
+
+on:
+  push:
+    branches:
+      - feature/odl-req-028-zen-responses-fetch-binding
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/odl-req-028-zen-responses-fetch-binding
+          fetch-depth: 0
+      - name: Apply bounded Zen Responses fetch repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly one match, found {count}")
+              return text.replace(old, new, 1)
+
+          source_path = Path('src/visual-catalogue-zen-responses.ts')
+          source = source_path.read_text(encoding='utf-8')
+
+          source = replace_once(
+              source,
+              '''  usagePresent: boolean | null;
+  localErrorCode: string | null;
+  localErrorClass: string | null;
+};''',
+              '''  usagePresent: boolean | null;
+  localErrorCode: string | null;
+  localErrorClass: string | null;
+  errorName: string | null;
+  errorMessage: string | null;
+  codeLocation: string | null;
+  requestMethod: string;
+  headerNames: string[];
+  signalPresent: boolean;
+  redirectMode: string;
+  fetchImplementationClass: string;
+};''',
+              'transport receipt diagnostics',
+          )
+
+          source = replace_once(
+              source,
+              '''function sanitizedStage(context: string): string {
+  const candidate = context.split(":").pop() ?? "unknown";
+  return /^[a-z0-9_.-]+$/i.test(candidate) ? candidate.slice(0, 120) : "unknown";
+}
+
+function boundedHeader''',
+              '''function sanitizedStage(context: string): string {
+  const candidate = context.split(":").pop() ?? "unknown";
+  return /^[a-z0-9_.-]+$/i.test(candidate) ? candidate.slice(0, 120) : "unknown";
+}
+
+export const ZEN_RESPONSES_ILLEGAL_INVOCATION_MESSAGE = "Illegal invocation: function called with incorrect this reference. See [documentation URL removed] for details." as const;
+
+function boundedZenResponsesFetchErrorMessage(error: unknown): string {
+  const raw = error instanceof Error ? error.message : "";
+  const normalized = raw.replace(/\\s+/g, " ").trim();
+  if (/illegal invocation/i.test(normalized) && /incorrect [`'\"]?this[`'\"]? reference/i.test(normalized)) {
+    return ZEN_RESPONSES_ILLEGAL_INVOCATION_MESSAGE;
+  }
+  if (/^(fetch failed|network connection lost|the operation was aborted|this operation was aborted|invalid url|failed to parse url)$/i.test(normalized)) {
+    return normalized.slice(0, 240);
+  }
+  if (/^failed to construct ['\"]request['\"]:/i.test(normalized) && !/https?:\\/\\//i.test(normalized)) {
+    return normalized.slice(0, 240);
+  }
+  return "Fetch failed before an HTTP response.";
+}
+
+function classifyZenResponsesFetchFailure(error: unknown): {
+  code: string;
+  message: string;
+  localErrorClass: string;
+  retryable: boolean;
+  errorName: string;
+  errorMessage: string;
+  codeLocation: string;
+} {
+  const errorName = error instanceof Error ? error.name.slice(0, 80) : typeof error;
+  const rawMessage = error instanceof Error ? error.message : String(error ?? "");
+  const lower = rawMessage.toLocaleLowerCase("en");
+  const common = {
+    errorName,
+    errorMessage: boundedZenResponsesFetchErrorMessage(error),
+    codeLocation: "visual-catalogue-zen-responses.requestZenResponses.fetch",
+  };
+  if (errorName === "TypeError" && (lower.includes("illegal invocation") || lower.includes("incorrect this reference"))) {
+    return {
+      ...common,
+      code: "zen_responses_fetch_illegal_invocation",
+      message: "The Zen Responses runtime fetch was called without its required receiver.",
+      localErrorClass: "runtime_fetch_binding",
+      retryable: false,
+    };
+  }
+  if (errorName === "TypeError" && lower.includes("header")) {
+    return { ...common, code: "zen_responses_invalid_headers", message: "The Zen Responses request headers were rejected locally.", localErrorClass: "request_headers", retryable: false };
+  }
+  if (errorName === "TypeError" && lower.includes("signal")) {
+    return { ...common, code: "zen_responses_invalid_signal", message: "The Zen Responses abort signal was rejected locally.", localErrorClass: "request_signal", retryable: false };
+  }
+  if (errorName === "TypeError" && lower.includes("redirect")) {
+    return { ...common, code: "zen_responses_invalid_redirect", message: "The Zen Responses redirect mode was rejected locally.", localErrorClass: "request_redirect", retryable: false };
+  }
+  if (errorName === "TypeError" && lower.includes("body")) {
+    return { ...common, code: "zen_responses_invalid_body", message: "The Zen Responses request body was rejected locally.", localErrorClass: "request_body", retryable: false };
+  }
+  if (errorName === "TypeError" && (lower.includes("url") || lower.includes("request"))) {
+    return { ...common, code: "zen_responses_invalid_endpoint", message: "The Zen Responses endpoint value was rejected locally.", localErrorClass: "request_endpoint", retryable: false };
+  }
+  return {
+    ...common,
+    code: "zen_responses_network_error",
+    message: "The Zen Responses request failed before an HTTP response was received.",
+    localErrorClass: errorName,
+    retryable: true,
+  };
+}
+
+export function createZenResponsesFetchInit(credential: string, serializedBody: string, signal: AbortSignal): RequestInit {
+  const headers: Record<string, string> = {
+    Authorization: String(`Bearer ${credential}`),
+    "Content-Type": String("application/json"),
+  };
+  const init: RequestInit = {
+    method: "POST",
+    headers,
+    body: String(serializedBody),
+    redirect: "error",
+    signal,
+  };
+  Object.freeze(headers);
+  Object.freeze(init);
+  return init;
+}
+
+function boundedHeader''',
+              'safe fetch diagnostics and request init',
+          )
+
+          source = replace_once(
+              source,
+              '''    usagePresent: null,
+    localErrorCode: null,
+    localErrorClass: null,
+  };''',
+              '''    usagePresent: null,
+    localErrorCode: null,
+    localErrorClass: null,
+    errorName: null,
+    errorMessage: null,
+    codeLocation: null,
+    requestMethod: "POST",
+    headerNames: ["authorization", "content-type"],
+    signalPresent: false,
+    redirectMode: "error",
+    fetchImplementationClass: "unresolved",
+  };''',
+              'receipt defaults',
+          )
+
+          source = replace_once(
+              source,
+              '''  if (typeof (input.fetchImpl ?? fetch) !== "function") {
+    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_fetch_not_started", "The Zen Responses fetch implementation was not invokable.", "fetch_invocation");
+  }
+
+  let serializedBody: string;''',
+              '''  const hasExplicitFetch = Object.prototype.hasOwnProperty.call(input, "fetchImpl");
+  const explicitFetch = hasExplicitFetch ? input.fetchImpl : undefined;
+  if (hasExplicitFetch && typeof explicitFetch !== "function") {
+    receipt = { ...receipt, fetchImplementationClass: "invalid_explicit" };
+    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_fetch_not_started", "The explicitly supplied Zen Responses fetch implementation was not invokable.", "fetch_invocation");
+  }
+  if (!hasExplicitFetch && typeof globalThis.fetch !== "function") {
+    receipt = { ...receipt, fetchImplementationClass: "global_fetch_missing" };
+    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_fetch_not_started", "The Worker runtime fetch implementation was unavailable.", "fetch_invocation");
+  }
+  const fetchImpl = hasExplicitFetch
+    ? explicitFetch as typeof fetch
+    : globalThis.fetch.bind(globalThis) as typeof fetch;
+  receipt = { ...receipt, fetchImplementationClass: hasExplicitFetch ? "explicit_injected" : "global_fetch_bound" };
+
+  let serializedBody: string;''',
+              'bound runtime fetch resolution',
+          )
+
+          source = replace_once(
+              source,
+              '''  receipt = {
+    ...receipt,
+    requestByteCount: requestBytes.byteLength,
+    requestShapeFingerprint,
+    fetchBegan: true,
+    parserResult: "prefetch_receipt_persisted",
+  };
+  await persistZenResponsesTransportReceiptOrThrow(input.env, receiptKey, receipt);
+
+  const fetchImpl = input.fetchImpl ?? fetch;
+  const controller = new AbortController();
+  let timeoutFired = false;''',
+              '''  const controller = new AbortController();
+  const requestInit = createZenResponsesFetchInit(credential, serializedBody, controller.signal);
+  receipt = {
+    ...receipt,
+    requestByteCount: requestBytes.byteLength,
+    requestShapeFingerprint,
+    fetchBegan: true,
+    signalPresent: Boolean(requestInit.signal),
+    parserResult: "prefetch_receipt_persisted",
+  };
+  await persistZenResponsesTransportReceiptOrThrow(input.env, receiptKey, receipt);
+
+  let timeoutFired = false;''',
+              'fresh plain request init before dispatch',
+          )
+
+          source = replace_once(
+              source,
+              '''      Promise.resolve().then(() => fetchImpl(ZEN_RESPONSES_ENDPOINT, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${credential}`, "Content-Type": "application/json" },
+        body: serializedBody,
+        redirect: "error",
+        signal: controller.signal,
+      })),''',
+              '''      Promise.resolve().then(() => fetchImpl(ZEN_RESPONSES_ENDPOINT, requestInit)),''',
+              'plain request init dispatch',
+          )
+
+          source = replace_once(
+              source,
+              '''  } catch (error) {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    if (timeoutFired || controller.signal.aborted) {
+      return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_timeout", "The Zen Responses request exceeded the bounded transport timeout.", error instanceof Error ? error.name : typeof error, { retryable: true });
+    }
+    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_network_error", "The Zen Responses request failed before an HTTP response was received.", error instanceof Error ? error.name : typeof error, { retryable: true });
+  } finally {''',
+              '''  } catch (error) {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    if (timeoutFired || controller.signal.aborted) {
+      const timeoutReceipt = {
+        ...receipt,
+        errorName: error instanceof Error ? error.name.slice(0, 80) : typeof error,
+        errorMessage: "The bounded Zen Responses transport timeout fired.",
+        codeLocation: "visual-catalogue-zen-responses.requestZenResponses.timeout_race",
+      };
+      return failZenResponsesTransport(input.env, receiptKey, timeoutReceipt, "zen_responses_timeout", "The Zen Responses request exceeded the bounded transport timeout.", error instanceof Error ? error.name : typeof error, { retryable: true });
+    }
+    const failure = classifyZenResponsesFetchFailure(error);
+    const failedReceipt = {
+      ...receipt,
+      errorName: failure.errorName,
+      errorMessage: failure.errorMessage,
+      codeLocation: failure.codeLocation,
+    };
+    return failZenResponsesTransport(input.env, receiptKey, failedReceipt, failure.code, failure.message, failure.localErrorClass, { retryable: failure.retryable });
+  } finally {''',
+              'precise local fetch failure classification',
+          )
+
+          source_path.write_text(source, encoding='utf-8')
+
+          test_path = Path('test/visual-catalogue-zen-responses-transport.test.ts')
+          tests = test_path.read_text(encoding='utf-8')
+          tests += r'''
+
+test("Cloudflare-style detached fetch TypeError is reproduced, classified, sanitized, and repaired by binding global fetch", async () => {
+  const exactRuntimeMessage = "Illegal invocation: function called with incorrect `this` reference. See https://developers.cloudflare.com/workers/observability/errors/#illegal-invocation-errors for details.";
+  const failed = await setup("transport-illegal-invocation");
+  await assert.rejects(
+    () => requestZenResponses({
+      env: failed.env,
+      spendLedgerKey: failed.ledger.key,
+      body: buildZenResponsesRequest({ text: "NO_LEAK_PROMPT", maxOutputTokens: 64 }),
+      context: "test",
+      fetchImpl: (async () => { throw new TypeError(exactRuntimeMessage); }) as typeof fetch,
+    }),
+    (error: unknown) => {
+      if (!isZenResponsesTransportError(error)) return false;
+      assert.equal(error.code, "zen_responses_fetch_illegal_invocation");
+      assert.equal(error.receipt.localErrorClass, "runtime_fetch_binding");
+      assert.equal(error.receipt.errorName, "TypeError");
+      assert.equal(error.receipt.errorMessage, "Illegal invocation: function called with incorrect this reference. See [documentation URL removed] for details.");
+      assert.equal(error.receipt.codeLocation, "visual-catalogue-zen-responses.requestZenResponses.fetch");
+      assert.equal(error.receipt.requestMethod, "POST");
+      assert.deepEqual(error.receipt.headerNames, ["authorization", "content-type"]);
+      assert.equal(error.receipt.signalPresent, true);
+      assert.equal(error.receipt.redirectMode, "error");
+      assert.equal(error.receipt.fetchImplementationClass, "explicit_injected");
+      const rendered = JSON.stringify(error.receipt);
+      for (const forbidden of ["NO_LEAK_PROMPT", "zen-secret", "https://", "Bearer ", exactRuntimeMessage]) assert.equal(rendered.includes(forbidden), false, forbidden);
+      return true;
+    },
+  );
+
+  const originalFetch = globalThis.fetch;
+  const observedInits: RequestInit[] = [];
+  const observedBodies: Record<string, unknown>[] = [];
+  const runtimeFetch = async function(this: unknown, input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    if (this !== globalThis) throw new TypeError(exactRuntimeMessage);
+    assert.equal(input, ZEN_RESPONSES_ENDPOINT);
+    assert.ok(init);
+    observedInits.push(init);
+    observedBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+    return new Response(JSON.stringify(completed('{"ok":true,"probe":"odl-req-025"}')), { status: 200, headers: { "content-type": "application/json" } });
+  } as typeof fetch;
+  Object.defineProperty(globalThis, "fetch", { configurable: true, writable: true, value: runtimeFetch });
+  try {
+    const detached = globalThis.fetch;
+    await assert.rejects(() => detached("https://example.invalid"), (error: unknown) => error instanceof TypeError && error.message === exactRuntimeMessage);
+
+    const repaired = await setup("transport-bound-global");
+    const body = buildZenResponsesRequest({ text: "x", maxOutputTokens: 64, schema: { name: "probe", schema: { type: "object" } } });
+    const result = await requestZenResponses({ env: repaired.env, spendLedgerKey: repaired.ledger.key, body, context: "test" });
+    assert.equal(result.status, 200);
+    assert.equal(result.transportReceipt.fetchImplementationClass, "global_fetch_bound");
+    assert.equal(observedInits.length, 1);
+    const init = observedInits[0];
+    assert.equal(Object.getPrototypeOf(init), Object.prototype);
+    assert.equal(Object.getPrototypeOf(init.headers as object), Object.prototype);
+    assert.equal(init.method, "POST");
+    assert.equal(init.redirect, "error");
+    assert.equal(typeof init.body, "string");
+    assert.ok(init.signal instanceof AbortSignal);
+    assert.equal(init.signal?.aborted, false);
+    assert.equal("duplex" in init, false);
+    assert.equal("keepalive" in init, false);
+    for (const value of Object.values(init.headers as Record<string, unknown>)) assert.equal(typeof value, "string");
+    assert.deepEqual(observedBodies[0], body);
+    const persisted = transportObjects(repaired.r2).map((entry) => entry.receipt);
+    assert.ok(persisted.every((entry) => entry.signal === undefined && entry.requestInit === undefined && entry.body === undefined && entry.headers === undefined && entry.endpoint === undefined));
+  } finally {
+    Object.defineProperty(globalThis, "fetch", { configurable: true, writable: true, value: originalFetch });
+  }
+});
+
+test("each Zen Responses attempt receives a fresh signal and explicit null fetch fails closed before global fetch", async () => {
+  const signals: AbortSignal[] = [];
+  const injected = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    assert.ok(init?.signal instanceof AbortSignal);
+    signals.push(init.signal);
+    return new Response(JSON.stringify(completed("ok")), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  const fresh = await setup("transport-fresh-signals");
+  for (let index = 0; index < 2; index += 1) {
+    await requestZenResponses({ env: fresh.env, spendLedgerKey: fresh.ledger.key, body: buildZenResponsesRequest({ text: "x", maxOutputTokens: 64 }), context: `test:${index}`, fetchImpl: injected });
+  }
+  assert.equal(signals.length, 2);
+  assert.notEqual(signals[0], signals[1]);
+
+  const originalFetch = globalThis.fetch;
+  let globalCalls = 0;
+  Object.defineProperty(globalThis, "fetch", { configurable: true, writable: true, value: (async () => { globalCalls += 1; return new Response("{}"); }) as typeof fetch });
+  try {
+    const closed = await setup("transport-null-fetch");
+    await assert.rejects(
+      () => requestZenResponses({ env: closed.env, spendLedgerKey: closed.ledger.key, body: buildZenResponsesRequest({ text: "x", maxOutputTokens: 64 }), context: "test", fetchImpl: null as any }),
+      (error: unknown) => isZenResponsesTransportError(error) && error.code === "zen_responses_fetch_not_started" && error.receipt.fetchImplementationClass === "invalid_explicit",
+    );
+    assert.equal(globalCalls, 0);
+  } finally {
+    Object.defineProperty(globalThis, "fetch", { configurable: true, writable: true, value: originalFetch });
+  }
+});
+
+test("redirect rejection, 64 KiB ceiling, payload identity, discovery isolation, attachment host, and existing providers remain unchanged", async () => {
+  const redirected = await setup("transport-redirect");
+  const body = buildZenResponsesRequest({ text: "x", maxOutputTokens: 64 });
+  await assert.rejects(
+    () => requestZenResponses({
+      env: redirected.env,
+      spendLedgerKey: redirected.ledger.key,
+      body,
+      context: "test",
+      fetchImpl: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        assert.equal(init?.redirect, "error");
+        assert.deepEqual(JSON.parse(String(init?.body)), body);
+        return new Response(JSON.stringify({ error: { type: "redirect" } }), { status: 302, headers: { "content-type": "application/json", location: "https://example.invalid" } });
+      }) as typeof fetch,
+    }),
+    (error: unknown) => isZenResponsesTransportError(error) && error.code === "zen_responses_http_error" && error.receipt.httpStatus === 302,
+  );
+  const transport = await readFile(new URL("../src/visual-catalogue-zen-responses.ts", import.meta.url), "utf8");
+  assert.match(transport, /MAX_RESPONSE_BYTES = 64 \* 1024/);
+  assert.match(transport, /globalThis\.fetch\.bind\(globalThis\)/);
+  assert.doesNotMatch(transport, /duplex:|keepalive:/);
+  const discovery = await readFile(new URL("../src/visual-classifier-zen-model-discovery.ts", import.meta.url), "utf8");
+  assert.match(discovery, /ZEN_RESPONSES_MODELS_ENDPOINT/);
+  assert.doesNotMatch(discovery, /requestZenResponses|responses_post/);
+  const attachments = await readFile(new URL("../src/connector-files.ts", import.meta.url), "utf8");
+  assert.match(attachments, /oaisdmntpr\[a-z0-9\]\+/);
+  assert.doesNotMatch(transport, /OPENCODE_GO|mimo-v2\.5|OPENAI_API_KEY|api\.openai\.com/);
+});
+'''
+          test_path.write_text(tests, encoding='utf-8')
+
+          # Restore the normal CI workflow, then update only the exact ODL-REQ-028 deployment lease and evidence labels.
+          import subprocess
+          subprocess.run(['git', 'fetch', 'origin', 'main'], check=True)
+          subprocess.run(['git', 'checkout', 'origin/main', '--', '.github/workflows/ci.yml'], check=True)
+          ci_path = Path('.github/workflows/ci.yml')
+          ci = ci_path.read_text(encoding='utf-8')
+          ci = replace_once(ci, '      OPENING_VERSION_ID: edc3677f-15c3-40df-aea2-f7fbe8a26459', '      OPENING_VERSION_ID: 50e0887d-5868-4a48-bfb4-76081f0148a2', 'opening version lease')
+          ci = replace_once(ci, '      OPENING_DEPLOYMENT_ID: 995fdd5c-6342-490d-9df2-b19483457a2a', '      OPENING_DEPLOYMENT_ID: c65a0e7f-d855-4acf-a94e-c279646da11d', 'opening deployment lease')
+          ci = replace_once(ci, '--message "Deploy ODL-REQ-025 exact main $GITHUB_SHA" --tag "odl-req-025-${GITHUB_SHA:0:12}"', '--message "Deploy ODL-REQ-028 exact main $GITHUB_SHA" --tag "odl-req-028-${GITHUB_SHA:0:12}"', 'deployment message')
+          ci = replace_once(ci, '          name: odl-req-025-deployment-evidence', '          name: odl-req-028-deployment-evidence', 'deployment artifact name')
+          ci = replace_once(
+              ci,
+              '''      - name: Production dependency security gate
+        run: npm audit --audit-level=high --omit=dev''',
+              '''      - name: Verify exact pull-request merge tree
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "${{ github.base_ref }}"
+          test "$(git rev-parse HEAD^1)" = "$(git rev-parse origin/${{ github.base_ref }})"
+          test "$(git rev-parse HEAD^2)" = "${{ github.event.pull_request.head.sha }}"
+      - name: Production dependency security gate
+        run: npm audit --audit-level=high --omit=dev''',
+              'merge tree verification',
+          )
+          ci = replace_once(
+              ci,
+              '''          jq -S '[.result.bindings[] | {name,type}] | sort_by(.name)' pre-settings.json > pre-bindings.json
+          jq -e '\n''',
+              '''          jq -S '[.result.bindings[] | {name,type}] | sort_by(.name)' pre-settings.json > pre-bindings.json
+          test "$(jq length pre-bindings.json)" = "44"
+          jq -e '\n''',
+              'pre binding count',
+          )
+          ci = replace_once(
+              ci,
+              '''          jq -S '[.result[] | {name,type}] | sort_by(.name)' pre-secrets.json > pre-secret-bindings.json
+          jq -e 'any(.[]; .name == "OPENCODE_ZEN_API_KEY" and .type == "secret_text")' pre-secret-bindings.json >/dev/null''',
+              '''          jq -S '[.result[] | {name,type}] | sort_by(.name)' pre-secrets.json > pre-secret-bindings.json
+          test "$(jq length pre-secret-bindings.json)" = "4"
+          jq -e 'any(.[]; .name == "OPENCODE_ZEN_API_KEY" and .type == "secret_text")' pre-secret-bindings.json >/dev/null''',
+              'pre secret count',
+          )
+          ci = replace_once(
+              ci,
+              '''          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/settings" > post-settings.json
+          jq -S '[.result.bindings[] | {name,type}] | sort_by(.name)' post-settings.json > post-bindings.json
+          cmp pre-bindings.json post-bindings.json''',
+              '''          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/settings" > post-settings.json
+          jq -e --arg source "repo-$GITHUB_SHA" 'any(.result.bindings[]; .name == "WORKER_DEPLOYMENT_ID" and .type == "plain_text" and .text == $source)' post-settings.json >/dev/null
+          jq -S '[.result.bindings[] | {name,type}] | sort_by(.name)' post-settings.json > post-bindings.json
+          test "$(jq length post-bindings.json)" = "44"
+          cmp pre-bindings.json post-bindings.json''',
+              'post source and binding verification',
+          )
+          ci = replace_once(
+              ci,
+              '''          jq -S '[.result[] | {name,type}] | sort_by(.name)' post-secrets.json > post-secret-bindings.json
+          cmp pre-secret-bindings.json post-secret-bindings.json''',
+              '''          jq -S '[.result[] | {name,type}] | sort_by(.name)' post-secrets.json > post-secret-bindings.json
+          test "$(jq length post-secret-bindings.json)" = "4"
+          cmp pre-secret-bindings.json post-secret-bindings.json''',
+              'post secret count',
+          )
+          ci_path.write_text(ci, encoding='utf-8')
+
+          Path('.github/workflows/odl-req-028-apply.yml').unlink()
+          PY
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "fix: bind Zen Responses runtime fetch"
+          git push origin HEAD:feature/odl-req-028-zen-responses-fetch-binding
