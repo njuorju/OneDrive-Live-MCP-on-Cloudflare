@@ -2,6 +2,13 @@ import { z } from "zod";
 import { ConnectorError } from "./errors";
 import { isAllowedTextFile, validateFileSignature } from "./file-types";
 import { validateItemName } from "./graph-core";
+import {
+  validateConnectorFileDns,
+  type ConnectorDnsResolver,
+  type ConnectorDnsValidationOptions,
+  type SanitizedConnectorDnsReceipt,
+} from "./connector-file-dns";
+export { isPublicRoutableAddress, validateConnectorFileDns } from "./connector-file-dns";
 
 export const CHATGPT_ATTACHMENT_HOST = "oaisdmntprindiasocentral.blob.core.windows.net" as const;
 export const CHATGPT_ATTACHMENT_HOST_PATTERN = /^oaisdmntpr[a-z0-9]+\.blob\.core\.windows\.net$/;
@@ -36,6 +43,7 @@ export type SanitizedConnectorNetworkReceipt = {
   dnsAddressCount: number;
   dnsRevalidated: boolean;
   connectionPinned: false;
+  dns: SanitizedConnectorDnsReceipt;
 };
 export type LoadedConnectorTextFile = {
   bytes: Uint8Array;
@@ -52,6 +60,9 @@ export type ConnectorFileNetworkOptions = {
   enforceAuthorizedFileParam?: boolean;
   authorizedTopLevelFileParam?: string;
   declaredFileParams?: readonly string[];
+  dnsResolver?: ConnectorDnsResolver | null;
+  dnsTimeoutMs?: number;
+  dnsCorrelationId?: string;
   resolveHost?: (hostname: string) => Promise<string[]>;
   allowSingleSameHostRedirect?: boolean;
 };
@@ -143,100 +154,6 @@ export function trustedConnectorFileUrl(reference: string): URL {
   url.hostname = host;
   url.port = "";
   return url;
-}
-
-function ipv4Number(address: string): number | null {
-  const parts = address.split(".");
-  if (parts.length !== 4) return null;
-  const values = parts.map(Number);
-  if (values.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return null;
-  return (((values[0] * 256 + values[1]) * 256 + values[2]) * 256 + values[3]) >>> 0;
-}
-
-function ipv4In(address: string, base: string, prefix: number): boolean {
-  const value = ipv4Number(address);
-  const start = ipv4Number(base);
-  if (value === null || start === null) return false;
-  if (prefix === 0) return true;
-  const mask = (0xffffffff << (32 - prefix)) >>> 0;
-  return (value & mask) === (start & mask);
-}
-
-function expandIpv6(address: string): number[] | null {
-  let raw = address.toLocaleLowerCase("en").split("%", 1)[0];
-  if (raw.includes(".")) {
-    const lastColon = raw.lastIndexOf(":");
-    const v4 = ipv4Number(raw.slice(lastColon + 1));
-    if (v4 === null) return null;
-    raw = `${raw.slice(0, lastColon)}:${((v4 >>> 16) & 0xffff).toString(16)}:${(v4 & 0xffff).toString(16)}`;
-  }
-  const halves = raw.split("::");
-  if (halves.length > 2) return null;
-  const left = halves[0] ? halves[0].split(":") : [];
-  const right = halves[1] ? halves[1].split(":") : [];
-  const missing = 8 - left.length - right.length;
-  if ((halves.length === 1 && missing !== 0) || missing < 0) return null;
-  const words = [...left, ...Array(missing).fill("0"), ...right].map((word) => Number.parseInt(word || "0", 16));
-  if (words.length !== 8 || words.some((word) => !Number.isInteger(word) || word < 0 || word > 0xffff)) return null;
-  return words;
-}
-
-export function isPublicRoutableAddress(address: string): boolean {
-  const v4 = ipv4Number(address);
-  if (v4 !== null) {
-    const blocked: Array<[string, number]> = [
-      ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16],
-      ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.0.2.0", 24], ["192.88.99.0", 24], ["192.168.0.0", 16],
-      ["198.18.0.0", 15], ["198.51.100.0", 24], ["203.0.113.0", 24], ["224.0.0.0", 4], ["240.0.0.0", 4],
-    ];
-    return !blocked.some(([base, prefix]) => ipv4In(address, base, prefix));
-  }
-  const words = expandIpv6(address);
-  if (!words) return false;
-  const first = words[0];
-  if (words.every((word) => word === 0) || words.slice(0, 7).every((word) => word === 0) && words[7] === 1) return false;
-  if ((first & 0xfe00) === 0xfc00) return false; // unique local
-  if ((first & 0xffc0) === 0xfe80) return false; // link local
-  if ((first & 0xff00) === 0xff00) return false; // multicast
-  if (first === 0x2001 && words[1] === 0x0db8) return false; // documentation
-  if (first === 0x2001 && words[1] === 0x0000) return false; // Teredo/reserved
-  if (words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff) {
-    const mapped = `${words[6] >>> 8}.${words[6] & 255}.${words[7] >>> 8}.${words[7] & 255}`;
-    return isPublicRoutableAddress(mapped);
-  }
-  return (first & 0xe000) === 0x2000; // public global unicast only
-}
-
-async function defaultResolveHost(hostname: string): Promise<string[]> {
-  const addresses = new Set<string>();
-  for (const type of ["A", "AAAA"] as const) {
-    const response = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=${type}`, {
-      headers: { Accept: "application/dns-json" }, redirect: "error",
-    });
-    if (!response.ok) throw boundaryError("connector_file_dns_validation_failed", "The connector file host could not be resolved safely.", { retryable: response.status >= 500 });
-    const body = await response.json() as { Answer?: Array<{ type?: number; data?: string }> };
-    for (const answer of body.Answer ?? []) {
-      if ((answer.type === 1 || answer.type === 28) && typeof answer.data === "string") addresses.add(answer.data);
-    }
-  }
-  return [...addresses].sort();
-}
-
-async function validatedResolution(hostname: string, resolver: (hostname: string) => Promise<string[]>): Promise<string[]> {
-  let addresses: string[];
-  try { addresses = [...new Set(await resolver(hostname))].sort(); }
-  catch (error) {
-    if (error instanceof ConnectorError) throw error;
-    throw boundaryError("connector_file_dns_validation_failed", "The connector file host could not be resolved safely.", { retryable: true });
-  }
-  if (!addresses.length || addresses.some((address) => !isPublicRoutableAddress(address))) {
-    throw boundaryError("connector_file_dns_forbidden", "The connector file host resolved to a non-public or reserved address.", { details: { addressCount: addresses.length } });
-  }
-  return addresses;
-}
-
-function sameAddressSet(first: string[], second: string[]): boolean {
-  return first.length === second.length && first.every((value, index) => value === second[index]);
 }
 
 function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
@@ -412,15 +329,16 @@ export async function loadConnectorTextFile(
   const url = trustedConnectorFileUrl(reference.download_url);
   const expectedByteLength = typeof expectedByteLengthOrFetch === "number" ? expectedByteLengthOrFetch : undefined;
   const fetchImpl = typeof expectedByteLengthOrFetch === "function" ? expectedByteLengthOrFetch : fetchImplMaybe;
-  const resolver = networkOptions.resolveHost ?? defaultResolveHost;
-  let firstResolution: string[] | null = null;
-  let secondResolution: string[] | null = null;
-  if (networkOptions.enforceAuthorizedFileParam || networkOptions.resolveHost) {
-    firstResolution = await validatedResolution(url.hostname, resolver);
-    secondResolution = await validatedResolution(url.hostname, resolver);
-    if (!sameAddressSet(firstResolution, secondResolution)) {
-      throw boundaryError("connector_file_dns_rebinding_detected", "The connector file host changed resolution before connection.", { details: { firstAddressCount: firstResolution.length, secondAddressCount: secondResolution.length } });
-    }
+  const hasExplicitDnsResolver = Object.prototype.hasOwnProperty.call(networkOptions, "dnsResolver");
+  let dnsValidation: Awaited<ReturnType<typeof validateConnectorFileDns>> | null = null;
+  if (networkOptions.enforceAuthorizedFileParam || networkOptions.resolveHost || hasExplicitDnsResolver) {
+    const dnsOptions: ConnectorDnsValidationOptions = {
+      ...(hasExplicitDnsResolver ? { resolver: networkOptions.dnsResolver } : {}),
+      ...(networkOptions.resolveHost ? { legacyResolveHost: networkOptions.resolveHost } : {}),
+      ...(networkOptions.dnsTimeoutMs === undefined ? {} : { timeoutMs: networkOptions.dnsTimeoutMs }),
+      ...(networkOptions.dnsCorrelationId === undefined ? {} : { correlationId: networkOptions.dnsCorrelationId }),
+    };
+    dnsValidation = await validateConnectorFileDns(url.hostname, dnsOptions);
   }
 
   let response: Response;
@@ -451,10 +369,13 @@ export async function loadConnectorTextFile(
     const expected = suppliedExpectedSha256.trim().toLocaleLowerCase("en");
     if (!SHA256_PATTERN.test(expected) || expected !== sha256) throw boundaryError("connector_file_hash_mismatch", "The connector file SHA-256 does not match the expected value.", { details: { expectedSha256: SHA256_PATTERN.test(expected) ? expected : null, actualSha256: sha256 } });
   }
-  const networkReceipt: SanitizedConnectorNetworkReceipt | null = secondResolution ? {
-    scheme: "https", hostname: CHATGPT_ATTACHMENT_HOST, effectivePort: 443,
+  const networkReceipt: SanitizedConnectorNetworkReceipt | null = dnsValidation ? {
+    scheme: "https", hostname: url.hostname, effectivePort: 443,
     eTldPlusOne: CHATGPT_ATTACHMENT_ETLD_PLUS_ONE, redirectCount,
-    dnsAddressCount: secondResolution.length, dnsRevalidated: true, connectionPinned: false,
+    dnsAddressCount: dnsValidation.addresses.length,
+    dnsRevalidated: dnsValidation.receipt.revalidationResult === "passed",
+    connectionPinned: false,
+    dns: dnsValidation.receipt,
   } : null;
   return {
     bytes, text, byteLength: bytes.byteLength, sha256, fileName,
