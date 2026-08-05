@@ -14,7 +14,6 @@ import {
   ZEN_RESPONSES_PROBE_VERSION,
   ZEN_RESPONSES_PROVIDER,
   buildZenResponsesRequest,
-  discoverZenResponsesModel,
   initializeZenResponsesSpendLedger,
   readZenResponsesCapabilityCache,
   readZenResponsesSpendLedger,
@@ -29,6 +28,11 @@ import {
   type ZenResponsesStructuralReceipt,
   type ZenResponsesUsage,
 } from "./visual-catalogue-zen-responses";
+import {
+  discoverZenResponsesModelWithReceipt,
+  isZenModelsDiscoveryError,
+  type ZenModelsDiscoveryReceipt,
+} from "./visual-classifier-zen-model-discovery";
 
 const PREFIX = `visual-compiler/provider-capability/${ZEN_RESPONSES_PROVIDER}/${ZEN_RESPONSES_MODEL}/${ZEN_RESPONSES_PROBE_VERSION}`;
 const RECEIPT_TTL_MS = 60 * 60 * 1000;
@@ -53,6 +57,7 @@ export type ZenResponsesCapabilityAttempt = {
   parserResult: string;
   schemaValidationResult: string;
   structuralReceipt: ZenResponsesStructuralReceipt | null;
+  discoveryReceipt: ZenModelsDiscoveryReceipt | null;
   usage: ZenResponsesUsage | null;
   accounting: ZenResponsesSpendLedger;
   errorCode: string | null;
@@ -83,6 +88,7 @@ export type ZenResponsesCapabilityTerminalReceipt = {
   visionUnstructuredWorked: boolean;
   visionStructuredOutputWorked: boolean;
   blockerClassification: string | null;
+  modelDiscoveryReceipt: ZenModelsDiscoveryReceipt | null;
   accounting: ZenResponsesSpendLedger;
   oneDriveAccessed: false;
   oneDriveMutationPerformed: false;
@@ -144,7 +150,9 @@ function stageOrder(): CapabilityStage[] {
 }
 
 function errorCode(error: unknown): string {
-  return error instanceof ConnectorError ? error.code : "provider_capability_failed";
+  if (error instanceof ConnectorError) return error.code;
+  if (error && typeof error === "object" && typeof (error as Record<string, unknown>).code === "string") return String((error as Record<string, unknown>).code);
+  return "provider_capability_failed";
 }
 
 function structuredSchema(): Record<string, unknown> {
@@ -173,6 +181,7 @@ async function runStage(env: Env, manifest: Manifest, stage: CapabilityStage): P
   let parserResult = "not_run";
   let schemaValidationResult = "not_run";
   let structuralReceipt: ZenResponsesStructuralReceipt | null = null;
+  let discoveryReceipt: ZenModelsDiscoveryReceipt | null = null;
   let usage: ZenResponsesUsage | null = null;
   let accounting = await readZenResponsesSpendLedger(env, manifest.spendLedgerKey);
   let status: "passed" | "failed" = "failed";
@@ -181,11 +190,13 @@ async function runStage(env: Env, manifest: Manifest, stage: CapabilityStage): P
   let imageByteSize: number | null = null;
   try {
     if (stage === "model_discovery") {
-      const metadata = await discoverZenResponsesModel(env);
-      manifest.modelMetadata = metadata;
-      accounting = await updateZenResponsesPricing(env, manifest.spendLedgerKey, metadata.pricing);
-      parserResult = "models_json_parsed";
-      schemaValidationResult = "exact_model_present_and_enabled";
+      const discovery = await discoverZenResponsesModelWithReceipt(env, { provider: ZEN_RESPONSES_PROVIDER, mode: ZEN_RESPONSES_MODE, model: ZEN_RESPONSES_MODEL });
+      discoveryReceipt = discovery.receipt;
+      httpStatus = discovery.receipt.httpStatus;
+      manifest.modelMetadata = discovery.metadata;
+      accounting = await updateZenResponsesPricing(env, manifest.spendLedgerKey, discovery.metadata.pricing);
+      parserResult = discovery.receipt.parserResult;
+      schemaValidationResult = "exact_model_present";
       status = "passed";
     } else {
       const fixture = stage.startsWith("vision_") ? syntheticVisionProbeJpegBytes() : null;
@@ -221,14 +232,21 @@ async function runStage(env: Env, manifest: Manifest, stage: CapabilityStage): P
     }
   } catch (error) {
     failure = errorCode(error);
-    parserResult = parserResult === "not_run" ? "stage_failed" : parserResult;
-    schemaValidationResult = schemaValidationResult === "not_run" ? "failed" : schemaValidationResult;
+    if (isZenModelsDiscoveryError(error)) {
+      discoveryReceipt = error.receipt;
+      httpStatus = error.receipt.httpStatus;
+      parserResult = error.receipt.parserResult;
+      schemaValidationResult = error.code === "zen_model_exact_id_absent" ? "exact_model_absent" : "failed";
+    } else {
+      parserResult = parserResult === "not_run" ? "stage_failed" : parserResult;
+      schemaValidationResult = schemaValidationResult === "not_run" ? "failed" : schemaValidationResult;
+    }
   }
   return {
     version: 1, jobId: manifest.jobId, attemptNumber, stage, provider: ZEN_RESPONSES_PROVIDER, mode: ZEN_RESPONSES_MODE,
     exactModel: ZEN_RESPONSES_MODEL, endpointFamily: ZEN_RESPONSES_ENDPOINT_FAMILY, probeVersion: ZEN_RESPONSES_PROBE_VERSION,
     credentialBindingName: ZEN_RESPONSES_CREDENTIAL_BINDING, startedAt, completedAt: nowIso(), latencyMilliseconds: Date.now() - started,
-    httpStatus, status, parserResult, schemaValidationResult, structuralReceipt, usage, accounting, errorCode: failure,
+    httpStatus, status, parserResult, schemaValidationResult, structuralReceipt, discoveryReceipt, usage, accounting, errorCode: failure,
     requestImageSha256: imageSha256, requestImageByteSize: imageByteSize, requestImageMimeType: imageByteSize === null ? null : "image/jpeg",
     oneDriveAccessed: false, oneDriveMutationPerformed: false,
   };
@@ -237,7 +255,7 @@ async function runStage(env: Env, manifest: Manifest, stage: CapabilityStage): P
 function blocker(manifest: Manifest): string | null {
   const failed = manifest.attempts.find((attempt) => attempt.status === "failed");
   if (!failed) return null;
-  return failed.errorCode === "opencode_zen_gpt_5_6_luna_unavailable" ? failed.errorCode : failed.errorCode ?? "opencode_zen_responses_capability_failed";
+  return failed.errorCode === "zen_model_exact_id_absent" ? "opencode_zen_gpt_5_6_luna_unavailable" : failed.errorCode ?? "opencode_zen_responses_capability_failed";
 }
 
 export function isZenResponsesCapabilityWorkflowPayload(payload: { input?: Record<string, unknown> } | undefined): boolean {
@@ -268,7 +286,7 @@ export async function runZenResponsesCapabilityWorkflow(env: Env, payload: Paylo
         status: "failed", startedAt: manifest.createdAt, completedAt: nowIso(), stageResults: { ...manifest.stageResults }, attempts: manifest.attempts,
         modelDiscoveryWorked: manifest.stageResults.model_discovery === "passed", textStructuredOutputWorked: manifest.stageResults.text_structured_output === "passed",
         visionUnstructuredWorked: manifest.stageResults.vision_unstructured === "passed", visionStructuredOutputWorked: manifest.stageResults.vision_structured_output === "passed",
-        blockerClassification: blocker(manifest), accounting, oneDriveAccessed: false, oneDriveMutationPerformed: false, sourcePdfRead: false, providerFallbackUsed: false,
+        blockerClassification: blocker(manifest), modelDiscoveryReceipt: manifest.attempts.find((entry) => entry.stage === "model_discovery")?.discoveryReceipt ?? null, accounting, oneDriveAccessed: false, oneDriveMutationPerformed: false, sourcePdfRead: false, providerFallbackUsed: false,
       };
       await writeManifest(env, manifest);
       await updateJob(env, payload.userId, payload.jobId, { status: "failed", progress: 100, stage: "failed", error: { code: manifest.terminalReceipt.blockerClassification ?? "opencode_zen_responses_capability_failed", message: "A mandatory Zen Responses capability stage failed.", retryable: false } });
@@ -296,7 +314,7 @@ export async function runZenResponsesCapabilityWorkflow(env: Env, payload: Paylo
     probeVersion: ZEN_RESPONSES_PROBE_VERSION, credentialBindingName: ZEN_RESPONSES_CREDENTIAL_BINDING,
     status: "passed", startedAt: manifest.createdAt, completedAt: nowIso(), stageResults: { ...manifest.stageResults }, attempts: manifest.attempts,
     modelDiscoveryWorked: true, textStructuredOutputWorked: true, visionUnstructuredWorked: true, visionStructuredOutputWorked: true,
-    blockerClassification: null, accounting, oneDriveAccessed: false, oneDriveMutationPerformed: false, sourcePdfRead: false, providerFallbackUsed: false,
+    blockerClassification: null, modelDiscoveryReceipt: manifest.attempts.find((entry) => entry.stage === "model_discovery")?.discoveryReceipt ?? null, accounting, oneDriveAccessed: false, oneDriveMutationPerformed: false, sourcePdfRead: false, providerFallbackUsed: false,
   };
   await writeManifest(env, manifest);
   await updateJob(env, payload.userId, payload.jobId, { status: "completed", progress: 100, stage: "completed", error: null });
@@ -339,7 +357,7 @@ export async function getZenResponsesCapabilityJob(context: HotfixContext, jobId
   const manifest = await readJson<Manifest>(context.env, manifestKey(jobId));
   if (!manifest) return null;
   const accounting = await readZenResponsesSpendLedger(context.env, manifest.spendLedgerKey);
-  return textResult({ jobId, workflowId: manifest.workflowId, status: manifest.status, currentStage: manifest.currentStage, provider: ZEN_RESPONSES_PROVIDER, mode: ZEN_RESPONSES_MODE, model: ZEN_RESPONSES_MODEL, endpointFamily: ZEN_RESPONSES_ENDPOINT_FAMILY, probeVersion: ZEN_RESPONSES_PROBE_VERSION, credentialBindingName: ZEN_RESPONSES_CREDENTIAL_BINDING, stageResults: manifest.stageResults, attemptHistorySummary: manifest.attempts.map((attempt) => ({ attemptNumber: attempt.attemptNumber, stage: attempt.stage, status: attempt.status, httpStatus: attempt.httpStatus, latencyMilliseconds: attempt.latencyMilliseconds, parserResult: attempt.parserResult, schemaValidationResult: attempt.schemaValidationResult, structuralReceipt: attempt.structuralReceipt, errorCode: attempt.errorCode })), accounting, terminalReceipt: manifest.terminalReceipt, privateUrlsReturned: false, secretValuesReturned: false, generatedContentReturned: false, oneDriveMutationPerformed: false });
+  return textResult({ jobId, workflowId: manifest.workflowId, status: manifest.status, currentStage: manifest.currentStage, provider: ZEN_RESPONSES_PROVIDER, mode: ZEN_RESPONSES_MODE, model: ZEN_RESPONSES_MODEL, endpointFamily: ZEN_RESPONSES_ENDPOINT_FAMILY, probeVersion: ZEN_RESPONSES_PROBE_VERSION, credentialBindingName: ZEN_RESPONSES_CREDENTIAL_BINDING, stageResults: manifest.stageResults, attemptHistorySummary: manifest.attempts.map((attempt) => ({ attemptNumber: attempt.attemptNumber, stage: attempt.stage, status: attempt.status, httpStatus: attempt.httpStatus, latencyMilliseconds: attempt.latencyMilliseconds, parserResult: attempt.parserResult, schemaValidationResult: attempt.schemaValidationResult, structuralReceipt: attempt.structuralReceipt, discoveryReceipt: attempt.discoveryReceipt ?? null, errorCode: attempt.errorCode })), accounting, terminalReceipt: manifest.terminalReceipt, privateUrlsReturned: false, secretValuesReturned: false, generatedContentReturned: false, oneDriveMutationPerformed: false });
 }
 
 export async function readSuccessfulZenResponsesCapabilityReceipt(env: Env, expected: { maxBillableRequests?: number; maxEstimatedSpendUsd?: number }): Promise<ZenResponsesCapabilityReceipt | null> {
