@@ -13,6 +13,7 @@ export const ZEN_RESPONSES_MAX_BILLABLE_REQUESTS = 75;
 export const ZEN_RESPONSES_MAX_ESTIMATED_SPEND_USD = 1;
 export const ZEN_RESPONSES_FALLBACK_PRICING_VERSION = "gpt-5.6-luna-fallback-2026-08-04" as const;
 const MAX_RESPONSE_BYTES = 64 * 1024;
+const ZEN_RESPONSES_TIMEOUT_MS = 60_000;
 
 export type ZenResponsesPricing = {
   inputPerMillionUsd: number;
@@ -134,6 +135,60 @@ export type ZenResponsesStructuralReceipt = {
   httpStatus: number;
   responseClass: "completed_output" | "incomplete" | "refusal" | "reasoning_only" | "malformed";
 };
+
+
+export type ZenResponsesTransportReceipt = {
+  version: 1;
+  provider: typeof ZEN_RESPONSES_PROVIDER;
+  mode: typeof ZEN_RESPONSES_MODE;
+  model: typeof ZEN_RESPONSES_MODEL;
+  endpointClass: "responses_post";
+  stage: string;
+  requestByteCount: number | null;
+  requestShapeFingerprint: string | null;
+  timeoutMilliseconds: number;
+  fetchBegan: boolean;
+  credentialBindingExists: boolean;
+  correlationId: string;
+  httpStatus: number | null;
+  responseContentType: string | null;
+  declaredContentLength: number | null;
+  providerRequestId: string | null;
+  edgeRequestId: string | null;
+  responseByteCount: number | null;
+  responseShapeFingerprint: string | null;
+  parserResult: string;
+  schemaResult: string;
+  usagePresent: boolean | null;
+  localErrorCode: string | null;
+  localErrorClass: string | null;
+};
+
+export class ZenResponsesTransportError extends ConnectorError {
+  readonly receipt: ZenResponsesTransportReceipt;
+
+  constructor(
+    code: string,
+    message: string,
+    receipt: ZenResponsesTransportReceipt,
+    options: { retryable?: boolean; status?: number } = {},
+  ) {
+    super(code, message, {
+      ...options,
+      correlationId: receipt.correlationId,
+      details: { transportReceipt: receipt },
+    });
+    this.receipt = receipt;
+  }
+}
+
+export function isZenResponsesTransportError(error: unknown): error is ZenResponsesTransportError {
+  if (!error || typeof error !== "object") return false;
+  const record = error as Record<string, unknown>;
+  const receipt = record.receipt;
+  return typeof record.code === "string"
+    && Boolean(receipt && typeof receipt === "object" && (receipt as Record<string, unknown>).endpointClass === "responses_post");
+}
 
 function boundedInteger(value: unknown): number | null {
   const parsed = Number(value);
@@ -405,42 +460,388 @@ export function parseZenResponsesOutput(body: Record<string, unknown>, httpStatu
   return { text, receipt: { ...base, responseClass: "completed_output" } };
 }
 
+
+function sanitizedStage(context: string): string {
+  const candidate = context.split(":").pop() ?? "unknown";
+  return /^[a-z0-9_.-]+$/i.test(candidate) ? candidate.slice(0, 120) : "unknown";
+}
+
+function boundedHeader(headers: Headers, names: string[]): string | null {
+  for (const name of names) {
+    const value = headers.get(name)?.trim();
+    if (value) return value.slice(0, 200);
+  }
+  return null;
+}
+
+function declaredContentLength(headers: Headers): number | null {
+  const value = headers.get("content-length");
+  if (!value) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function requestShape(body: Record<string, unknown>): Record<string, unknown> {
+  const inputItems = Array.isArray(body.input) ? body.input as Record<string, unknown>[] : [];
+  const contentTypes: string[] = [];
+  let imagePresent = false;
+  for (const item of inputItems) {
+    const content = Array.isArray(item?.content) ? item.content as Record<string, unknown>[] : [];
+    for (const part of content) {
+      const type = String(part?.type ?? "unknown");
+      contentTypes.push(type);
+      if (type === "input_image") imagePresent = true;
+    }
+  }
+  return {
+    topLevelKeys: Object.keys(body).sort(),
+    model: String(body.model ?? ""),
+    store: body.store === false,
+    inputItemCount: inputItems.length,
+    contentTypes: contentTypes.slice(0, 32),
+    imagePresent,
+    structuredSchemaPresent: Boolean(body.text && typeof body.text === "object"),
+    maxOutputTokensPresent: Number.isFinite(Number(body.max_output_tokens)),
+  };
+}
+
+function responseShape(body: Record<string, unknown>, status: number): Record<string, unknown> {
+  const output = Array.isArray(body.output) ? body.output as Record<string, unknown>[] : [];
+  const outputItemTypes = output.map((item) => String(item?.type ?? "unknown")).slice(0, 32);
+  const contentPartTypes: string[] = [];
+  for (const item of output) {
+    const content = Array.isArray(item?.content) ? item.content as Record<string, unknown>[] : [];
+    for (const part of content) contentPartTypes.push(String(part?.type ?? "unknown"));
+  }
+  return {
+    httpStatus: status,
+    topLevelKeys: Object.keys(body).sort().slice(0, 64),
+    completionStatus: typeof body.status === "string" ? body.status.slice(0, 80) : null,
+    outputItemTypes,
+    contentPartTypes: contentPartTypes.slice(0, 64),
+    usagePresent: Boolean(body.usage),
+  };
+}
+
+async function zenResponsesTransportReceiptKey(spendLedgerKey: string, correlationId: string): Promise<string> {
+  const scopeFingerprint = (await sha256HexUtf8(spendLedgerKey)).slice(0, 32);
+  return `visual-compiler/provider-transport/opencode-zen-responses/${ZEN_RESPONSES_MODEL}/${scopeFingerprint}/${correlationId}.json`;
+}
+
+async function persistZenResponsesTransportReceipt(
+  env: Pick<Env, "ARTIFACTS">,
+  key: string,
+  receipt: ZenResponsesTransportReceipt,
+): Promise<void> {
+  await putArtifact(env as Env, key, JSON.stringify(receipt, null, 2), "application/json; charset=utf-8", {
+    provider: receipt.provider,
+    model: receipt.model,
+    stage: receipt.stage,
+    status: receipt.localErrorCode ?? receipt.parserResult,
+  });
+}
+
+function receiptPersistError(receipt: ZenResponsesTransportReceipt): ZenResponsesTransportError {
+  const failed = {
+    ...receipt,
+    localErrorCode: "zen_responses_receipt_persist_failed",
+    localErrorClass: "receipt_persistence",
+  };
+  return new ZenResponsesTransportError(
+    "zen_responses_receipt_persist_failed",
+    "The sanitized Zen Responses transport receipt could not be persisted.",
+    failed,
+  );
+}
+
+async function persistZenResponsesTransportReceiptOrThrow(
+  env: Pick<Env, "ARTIFACTS">,
+  key: string,
+  receipt: ZenResponsesTransportReceipt,
+): Promise<void> {
+  try {
+    await persistZenResponsesTransportReceipt(env, key, receipt);
+  } catch {
+    throw receiptPersistError(receipt);
+  }
+}
+
+async function failZenResponsesTransport(
+  env: Pick<Env, "ARTIFACTS">,
+  key: string,
+  receipt: ZenResponsesTransportReceipt,
+  code: string,
+  message: string,
+  localErrorClass: string,
+  options: { retryable?: boolean; status?: number } = {},
+): Promise<never> {
+  const failed = { ...receipt, localErrorCode: code, localErrorClass };
+  try {
+    await persistZenResponsesTransportReceipt(env, key, failed);
+  } catch {
+    throw receiptPersistError(failed);
+  }
+  throw new ZenResponsesTransportError(code, message, failed, options);
+}
+
+async function readBoundedZenResponsesBody(response: Response): Promise<Uint8Array> {
+  const declared = declaredContentLength(response.headers);
+  if (declared !== null && declared > MAX_RESPONSE_BYTES) {
+    await response.body?.cancel();
+    throw new ConnectorError("zen_responses_body_too_large", "The Zen Responses body exceeded the bounded response ceiling.");
+  }
+  if (!response.body) {
+    let buffer: ArrayBuffer;
+    try { buffer = await response.arrayBuffer(); }
+    catch { throw new ConnectorError("zen_responses_body_read_failed", "The Zen Responses body could not be read.", { retryable: true }); }
+    if (buffer.byteLength > MAX_RESPONSE_BYTES) throw new ConnectorError("zen_responses_body_too_large", "The Zen Responses body exceeded the bounded response ceiling.");
+    return new Uint8Array(buffer);
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      let next: ReadableStreamReadResult<Uint8Array>;
+      try { next = await reader.read(); }
+      catch { throw new ConnectorError("zen_responses_body_read_failed", "The Zen Responses body could not be read.", { retryable: true }); }
+      if (next.done) break;
+      if (!next.value) continue;
+      total += next.value.byteLength;
+      if (total > MAX_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw new ConnectorError("zen_responses_body_too_large", "The Zen Responses body exceeded the bounded response ceiling.");
+      }
+      chunks.push(next.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { output.set(chunk, offset); offset += chunk.byteLength; }
+  return output;
+}
+
 export async function requestZenResponses(input: {
   env: Pick<Env, "OPENCODE_ZEN_API_KEY" | "ARTIFACTS">;
   spendLedgerKey: string;
   body: Record<string, unknown>;
   context: string;
   requestIdentity?: string | null;
+  provider?: unknown;
+  mode?: unknown;
+  timeoutMilliseconds?: number;
   fetchImpl?: typeof fetch;
-}): Promise<{ body: Record<string, unknown>; text: string; usage: ZenResponsesUsage; accounting: ZenResponsesSpendLedger; structuralReceipt: ZenResponsesStructuralReceipt; status: number; latencyMilliseconds: number }> {
-  if (String(input.body.model ?? "") !== ZEN_RESPONSES_MODEL) throw new ConnectorError("provider_model_not_allowed", "Zen Responses requests require exact model gpt-5.6-luna.");
-  if (input.body.store !== false) throw new ConnectorError("provider_request_contract_invalid", "Zen Responses requests must set store=false.");
+}): Promise<{ body: Record<string, unknown>; text: string; usage: ZenResponsesUsage; accounting: ZenResponsesSpendLedger; structuralReceipt: ZenResponsesStructuralReceipt; transportReceipt: ZenResponsesTransportReceipt; status: number; latencyMilliseconds: number }> {
+  const correlationId = crypto.randomUUID();
+  const timeoutMilliseconds = Math.max(1, Math.min(ZEN_RESPONSES_TIMEOUT_MS, Math.round(Number(input.timeoutMilliseconds ?? ZEN_RESPONSES_TIMEOUT_MS)) || ZEN_RESPONSES_TIMEOUT_MS));
+  const receiptKey = await zenResponsesTransportReceiptKey(input.spendLedgerKey, correlationId);
+  let receipt: ZenResponsesTransportReceipt = {
+    version: 1,
+    provider: ZEN_RESPONSES_PROVIDER,
+    mode: ZEN_RESPONSES_MODE,
+    model: ZEN_RESPONSES_MODEL,
+    endpointClass: "responses_post",
+    stage: sanitizedStage(input.context),
+    requestByteCount: null,
+    requestShapeFingerprint: null,
+    timeoutMilliseconds,
+    fetchBegan: false,
+    credentialBindingExists: false,
+    correlationId,
+    httpStatus: null,
+    responseContentType: null,
+    declaredContentLength: null,
+    providerRequestId: null,
+    edgeRequestId: null,
+    responseByteCount: null,
+    responseShapeFingerprint: null,
+    parserResult: "not_started",
+    schemaResult: "not_run",
+    usagePresent: null,
+    localErrorCode: null,
+    localErrorClass: null,
+  };
+
+  const provider = String(input.provider ?? ZEN_RESPONSES_PROVIDER);
+  const mode = String(input.mode ?? ZEN_RESPONSES_MODE);
+  if (provider !== ZEN_RESPONSES_PROVIDER || mode !== ZEN_RESPONSES_MODE || String(input.body.model ?? "") !== ZEN_RESPONSES_MODEL) {
+    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_fetch_not_started", "Zen Responses transport requires the exact provider, mode, and model identity.", "dispatch_validation");
+  }
+  if (input.body.store !== false) {
+    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_fetch_not_started", "Zen Responses transport requires the existing store=false request contract.", "request_validation");
+  }
+  const credential = typeof input.env.OPENCODE_ZEN_API_KEY === "string" ? input.env.OPENCODE_ZEN_API_KEY.trim() : "";
+  receipt = { ...receipt, credentialBindingExists: credential.length > 0 };
+  if (!credential) {
+    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_fetch_not_started", "The OPENCODE_ZEN_API_KEY binding is not configured.", "credential_validation");
+  }
+  if (typeof (input.fetchImpl ?? fetch) !== "function") {
+    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_fetch_not_started", "The Zen Responses fetch implementation was not invokable.", "fetch_invocation");
+  }
+
+  let serializedBody: string;
+  try {
+    serializedBody = JSON.stringify(input.body);
+  } catch {
+    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_fetch_not_started", "The existing Zen Responses request payload could not be serialized.", "body_serialization");
+  }
+  const requestBytes = new TextEncoder().encode(serializedBody);
+  const requestShapeFingerprint = await sha256HexUtf8(JSON.stringify(requestShape(input.body)));
   await assertZenResponsesBudgetAvailable(input.env as Env, input.spendLedgerKey);
+
+  receipt = {
+    ...receipt,
+    requestByteCount: requestBytes.byteLength,
+    requestShapeFingerprint,
+    fetchBegan: true,
+    parserResult: "prefetch_receipt_persisted",
+  };
+  await persistZenResponsesTransportReceiptOrThrow(input.env, receiptKey, receipt);
+
   const fetchImpl = input.fetchImpl ?? fetch;
+  const controller = new AbortController();
+  let timeoutFired = false;
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    timeoutHandle = setTimeout(() => {
+      timeoutFired = true;
+      controller.abort("zen_responses_timeout");
+      reject(new Error("zen_responses_timeout"));
+    }, timeoutMilliseconds);
+  });
   const started = Date.now();
-  const requestFingerprint = await sha256HexUtf8(JSON.stringify({ ...input.body, input: "redacted" }));
   let response: Response;
   try {
-    response = await fetchImpl(ZEN_RESPONSES_ENDPOINT, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${zenResponsesCredential(input.env)}`, "Content-Type": "application/json" },
-      body: JSON.stringify(input.body), redirect: "error",
-    });
-  } catch {
-    throw new ConnectorError("provider_network_error", "OpenCode Zen Responses could not be reached.", { retryable: true });
+    response = await Promise.race([
+      Promise.resolve().then(() => fetchImpl(ZEN_RESPONSES_ENDPOINT, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${credential}`, "Content-Type": "application/json" },
+        body: serializedBody,
+        redirect: "error",
+        signal: controller.signal,
+      })),
+      timeoutPromise,
+    ]);
+  } catch (error) {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    if (timeoutFired || controller.signal.aborted) {
+      return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_timeout", "The Zen Responses request exceeded the bounded transport timeout.", error instanceof Error ? error.name : typeof error, { retryable: true });
+    }
+    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_network_error", "The Zen Responses request failed before an HTTP response was received.", error instanceof Error ? error.name : typeof error, { retryable: true });
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
   }
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength > MAX_RESPONSE_BYTES) throw new ConnectorError("provider_response_too_large", "The Zen Responses payload exceeded the bounded response ceiling.");
-  let body: Record<string, unknown> = {};
-  try { body = JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>; }
-  catch { body = {}; }
+
+  receipt = {
+    ...receipt,
+    httpStatus: response.status,
+    responseContentType: response.headers.get("content-type")?.slice(0, 160) ?? null,
+    declaredContentLength: declaredContentLength(response.headers),
+    providerRequestId: boundedHeader(response.headers, ["x-request-id", "request-id", "openai-request-id"]),
+    edgeRequestId: boundedHeader(response.headers, ["cf-ray", "x-vercel-id", "x-envoy-upstream-service-time"]),
+    parserResult: "headers_received",
+  };
+  await persistZenResponsesTransportReceiptOrThrow(input.env, receiptKey, receipt);
+
+  let bytes: Uint8Array;
+  try {
+    bytes = await readBoundedZenResponsesBody(response);
+  } catch (error) {
+    const code = error instanceof ConnectorError && ["zen_responses_body_too_large", "zen_responses_body_read_failed"].includes(error.code)
+      ? error.code
+      : "zen_responses_body_read_failed";
+    return failZenResponsesTransport(input.env, receiptKey, receipt, code, code === "zen_responses_body_too_large" ? "The Zen Responses body exceeded the bounded response ceiling." : "The Zen Responses body could not be read.", error instanceof Error ? error.name : typeof error, { retryable: code === "zen_responses_body_read_failed", status: response.status });
+  }
+  receipt = { ...receipt, responseByteCount: bytes.byteLength, parserResult: "body_read" };
+  await persistZenResponsesTransportReceiptOrThrow(input.env, receiptKey, receipt);
+
+  let body: Record<string, unknown>;
+  try {
+    const decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const parsed = JSON.parse(decoded) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("root_not_object");
+    body = parsed as Record<string, unknown>;
+  } catch (error) {
+    const usage = parseZenResponsesUsage({});
+    await recordZenResponsesAccounting({ env: input.env as Env, key: input.spendLedgerKey, context: input.context, httpStatus: response.status, usage, requestIdentity: input.requestIdentity });
+    receipt = {
+      ...receipt,
+      responseShapeFingerprint: await sha256HexUtf8(JSON.stringify({ httpStatus: response.status, responseByteCount: bytes.byteLength, jsonObject: false })),
+      parserResult: "json_parse_failed",
+      schemaResult: "not_run",
+      usagePresent: false,
+    };
+    if (!response.ok) {
+      return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_http_error", "The Zen Responses endpoint returned a non-success HTTP status.", "http_status", { retryable: response.status === 429 || response.status >= 500, status: response.status });
+    }
+    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_response_malformed", "The Zen Responses body was not a valid JSON object.", error instanceof Error ? error.name : typeof error, { status: response.status });
+  }
+
   const usage = parseZenResponsesUsage(body);
   const accounting = await recordZenResponsesAccounting({ env: input.env as Env, key: input.spendLedgerKey, context: input.context, httpStatus: response.status, usage, requestIdentity: input.requestIdentity });
-  if (response.status === 401 || response.status === 403) throw new ConnectorError("provider_authentication_failed", "OpenCode Zen authentication was rejected.", { status: response.status });
-  if (response.status === 404) throw new ConnectorError("opencode_zen_gpt_5_6_luna_unavailable", "The exact gpt-5.6-luna model is unavailable.", { status: response.status });
-  if (!response.ok) throw new ConnectorError("provider_request_rejected", "OpenCode Zen Responses rejected the request.", { status: response.status, retryable: response.status === 429 || response.status >= 500 });
-  const parsed = parseZenResponsesOutput(body, response.status, requestFingerprint);
-  return { body, text: parsed.text, usage, accounting, structuralReceipt: parsed.receipt, status: response.status, latencyMilliseconds: Date.now() - started };
+  receipt = {
+    ...receipt,
+    responseShapeFingerprint: await sha256HexUtf8(JSON.stringify(responseShape(body, response.status))),
+    parserResult: "json_object_parsed",
+    usagePresent: Boolean(body.usage),
+  };
+  await persistZenResponsesTransportReceiptOrThrow(input.env, receiptKey, receipt);
+
+  if (!response.ok) {
+    return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_http_error", "The Zen Responses endpoint returned a non-success HTTP status.", "http_status", { retryable: response.status === 429 || response.status >= 500, status: response.status });
+  }
+
+  let parsedOutput: { text: string; receipt: ZenResponsesStructuralReceipt };
+  try {
+    parsedOutput = parseZenResponsesOutput(body, response.status, requestShapeFingerprint);
+  } catch (error) {
+    const originalCode = error instanceof ConnectorError ? error.code : "zen_responses_response_malformed";
+    const mappedCode = ["classifier_output_missing", "provider_reasoning_only"].includes(originalCode)
+      ? "zen_responses_output_missing"
+      : originalCode;
+    const structuralReceipt = error instanceof ConnectorError && error.details?.structuralReceipt && typeof error.details.structuralReceipt === "object"
+      ? error.details.structuralReceipt as ZenResponsesStructuralReceipt
+      : null;
+    receipt = {
+      ...receipt,
+      parserResult: structuralReceipt?.responseClass ?? "output_parse_failed",
+      schemaResult: "not_run",
+    };
+    return failZenResponsesTransport(input.env, receiptKey, receipt, mappedCode, mappedCode === "zen_responses_output_missing" ? "The Zen Responses body contained no completed assistant output_text." : "The Zen Responses output failed structural validation.", error instanceof Error ? error.name : typeof error, { status: response.status });
+  }
+
+  const schemaRequested = Boolean(input.body.text && typeof input.body.text === "object");
+  let schemaResult = "not_requested";
+  if (schemaRequested) {
+    try {
+      const parsed = JSON.parse(parsedOutput.text) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("schema_root_not_object");
+      schemaResult = "json_object_parsed";
+    } catch (error) {
+      receipt = { ...receipt, parserResult: "output_text_parsed", schemaResult: "invalid" };
+      return failZenResponsesTransport(input.env, receiptKey, receipt, "zen_responses_schema_invalid", "The structured Zen Responses output was not a JSON object.", error instanceof Error ? error.name : typeof error, { status: response.status });
+    }
+  }
+
+  receipt = {
+    ...receipt,
+    parserResult: "output_text_parsed",
+    schemaResult,
+    usagePresent: Boolean(body.usage),
+  };
+  await persistZenResponsesTransportReceiptOrThrow(input.env, receiptKey, receipt);
+  return {
+    body,
+    text: parsedOutput.text,
+    usage,
+    accounting,
+    structuralReceipt: parsedOutput.receipt,
+    transportReceipt: receipt,
+    status: response.status,
+    latencyMilliseconds: Date.now() - started,
+  };
 }
 
 export async function responseFingerprint(receipt: ZenResponsesStructuralReceipt): Promise<string> {

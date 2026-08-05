@@ -18,6 +18,7 @@ import {
   readZenResponsesCapabilityCache,
   readZenResponsesSpendLedger,
   requestZenResponses,
+  isZenResponsesTransportError,
   updateZenResponsesPricing,
   validateZenResponsesBudgets,
   writeZenResponsesCapabilityCache,
@@ -26,6 +27,7 @@ import {
   type ZenResponsesModelMetadata,
   type ZenResponsesSpendLedger,
   type ZenResponsesStructuralReceipt,
+  type ZenResponsesTransportReceipt,
   type ZenResponsesUsage,
 } from "./visual-catalogue-zen-responses";
 import {
@@ -57,6 +59,7 @@ export type ZenResponsesCapabilityAttempt = {
   parserResult: string;
   schemaValidationResult: string;
   structuralReceipt: ZenResponsesStructuralReceipt | null;
+  transportReceipt: ZenResponsesTransportReceipt | null;
   discoveryReceipt: ZenModelsDiscoveryReceipt | null;
   usage: ZenResponsesUsage | null;
   accounting: ZenResponsesSpendLedger;
@@ -181,6 +184,7 @@ async function runStage(env: Env, manifest: Manifest, stage: CapabilityStage): P
   let parserResult = "not_run";
   let schemaValidationResult = "not_run";
   let structuralReceipt: ZenResponsesStructuralReceipt | null = null;
+  let transportReceipt: ZenResponsesTransportReceipt | null = null;
   let discoveryReceipt: ZenModelsDiscoveryReceipt | null = null;
   let usage: ZenResponsesUsage | null = null;
   let accounting = await readZenResponsesSpendLedger(env, manifest.spendLedgerKey);
@@ -212,6 +216,7 @@ async function runStage(env: Env, manifest: Manifest, stage: CapabilityStage): P
       const result = await requestZenResponses({ env, spendLedgerKey: manifest.spendLedgerKey, body: request, context: `capability:${stage}`, requestIdentity: `${manifest.jobId}:${stage}` });
       httpStatus = result.status;
       structuralReceipt = result.structuralReceipt;
+      transportReceipt = result.transportReceipt;
       usage = result.usage;
       accounting = result.accounting;
       parserResult = "output_text_parsed";
@@ -237,6 +242,11 @@ async function runStage(env: Env, manifest: Manifest, stage: CapabilityStage): P
       httpStatus = error.receipt.httpStatus;
       parserResult = error.receipt.parserResult;
       schemaValidationResult = error.code === "zen_model_exact_id_absent" ? "exact_model_absent" : "failed";
+    } else if (isZenResponsesTransportError(error)) {
+      transportReceipt = error.receipt;
+      httpStatus = error.receipt.httpStatus;
+      parserResult = error.receipt.parserResult;
+      schemaValidationResult = error.receipt.schemaResult;
     } else {
       parserResult = parserResult === "not_run" ? "stage_failed" : parserResult;
       schemaValidationResult = schemaValidationResult === "not_run" ? "failed" : schemaValidationResult;
@@ -246,7 +256,7 @@ async function runStage(env: Env, manifest: Manifest, stage: CapabilityStage): P
     version: 1, jobId: manifest.jobId, attemptNumber, stage, provider: ZEN_RESPONSES_PROVIDER, mode: ZEN_RESPONSES_MODE,
     exactModel: ZEN_RESPONSES_MODEL, endpointFamily: ZEN_RESPONSES_ENDPOINT_FAMILY, probeVersion: ZEN_RESPONSES_PROBE_VERSION,
     credentialBindingName: ZEN_RESPONSES_CREDENTIAL_BINDING, startedAt, completedAt: nowIso(), latencyMilliseconds: Date.now() - started,
-    httpStatus, status, parserResult, schemaValidationResult, structuralReceipt, discoveryReceipt, usage, accounting, errorCode: failure,
+    httpStatus, status, parserResult, schemaValidationResult, structuralReceipt, transportReceipt, discoveryReceipt, usage, accounting, errorCode: failure,
     requestImageSha256: imageSha256, requestImageByteSize: imageByteSize, requestImageMimeType: imageByteSize === null ? null : "image/jpeg",
     oneDriveAccessed: false, oneDriveMutationPerformed: false,
   };
@@ -357,7 +367,7 @@ export async function getZenResponsesCapabilityJob(context: HotfixContext, jobId
   const manifest = await readJson<Manifest>(context.env, manifestKey(jobId));
   if (!manifest) return null;
   const accounting = await readZenResponsesSpendLedger(context.env, manifest.spendLedgerKey);
-  return textResult({ jobId, workflowId: manifest.workflowId, status: manifest.status, currentStage: manifest.currentStage, provider: ZEN_RESPONSES_PROVIDER, mode: ZEN_RESPONSES_MODE, model: ZEN_RESPONSES_MODEL, endpointFamily: ZEN_RESPONSES_ENDPOINT_FAMILY, probeVersion: ZEN_RESPONSES_PROBE_VERSION, credentialBindingName: ZEN_RESPONSES_CREDENTIAL_BINDING, stageResults: manifest.stageResults, attemptHistorySummary: manifest.attempts.map((attempt) => ({ attemptNumber: attempt.attemptNumber, stage: attempt.stage, status: attempt.status, httpStatus: attempt.httpStatus, latencyMilliseconds: attempt.latencyMilliseconds, parserResult: attempt.parserResult, schemaValidationResult: attempt.schemaValidationResult, structuralReceipt: attempt.structuralReceipt, discoveryReceipt: attempt.discoveryReceipt ?? null, errorCode: attempt.errorCode })), accounting, terminalReceipt: manifest.terminalReceipt, privateUrlsReturned: false, secretValuesReturned: false, generatedContentReturned: false, oneDriveMutationPerformed: false });
+  return textResult({ jobId, workflowId: manifest.workflowId, status: manifest.status, currentStage: manifest.currentStage, provider: ZEN_RESPONSES_PROVIDER, mode: ZEN_RESPONSES_MODE, model: ZEN_RESPONSES_MODEL, endpointFamily: ZEN_RESPONSES_ENDPOINT_FAMILY, probeVersion: ZEN_RESPONSES_PROBE_VERSION, credentialBindingName: ZEN_RESPONSES_CREDENTIAL_BINDING, stageResults: manifest.stageResults, attemptHistorySummary: manifest.attempts.map((attempt) => ({ attemptNumber: attempt.attemptNumber, stage: attempt.stage, status: attempt.status, httpStatus: attempt.httpStatus, latencyMilliseconds: attempt.latencyMilliseconds, parserResult: attempt.parserResult, schemaValidationResult: attempt.schemaValidationResult, structuralReceipt: attempt.structuralReceipt, transportReceipt: attempt.transportReceipt ?? null, discoveryReceipt: attempt.discoveryReceipt ?? null, errorCode: attempt.errorCode })), accounting, terminalReceipt: manifest.terminalReceipt, privateUrlsReturned: false, secretValuesReturned: false, generatedContentReturned: false, oneDriveMutationPerformed: false });
 }
 
 export async function readSuccessfulZenResponsesCapabilityReceipt(env: Env, expected: { maxBillableRequests?: number; maxEstimatedSpendUsd?: number }): Promise<ZenResponsesCapabilityReceipt | null> {

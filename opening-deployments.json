@@ -1,0 +1,169 @@
+{
+  "result": {
+    "deployments": [
+      {
+        "id": "ba7df97f-6717-4008-89d3-2a31a5c2e1e9",
+        "source": "wrangler",
+        "strategy": "percentage",
+        "annotations": {
+          "workers/message": "Deploy ODL-REQ-026 exact main 366ae62c2104e5fb6cfe1f74fca8a73fc0bc57ec",
+          "workers/triggered_by": "deployment"
+        },
+        "versions": [
+          {
+            "version_id": "a20c1194-3a7f-43c9-896f-d8cd5d473f2f",
+            "percentage": 100
+          }
+        ],
+        "created_on": "2026-08-05T04:19:41.382126Z"
+      },
+      {
+        "id": "615bf889-065b-46a9-9bf4-1a1d6cb1a83d",
+        "source": "wrangler",
+        "strategy": "percentage",
+        "annotations": {
+          "workers/message": "Deploy ODL-REQ-025 exact main 627e8eb6a795bc6658483afe4b16706dee523c1c",
+          "workers/triggered_by": "deployment"
+        },
+        "versions": [
+          {
+            "version_id": "29c75db8-be1e-4855-9287-065d9fdac510",
+            "percentage": 100
+          }
+        ],
+        "created_on": "2026-08-04T12:15:53.995969Z"
+      },
+      {
+        "id": "995fdd5c-6342-490d-9df2-b19483457a2a",
+        "source": "wrangler",
+        "strategy": "percentage",
+        "annotations": {
+          "workers/message": "Deploy ODL-REQ-024 exact main 6b02965b0a29d2ab11c98ea1550321384fb1ccf9",
+          "workers/triggered_by": "deployment"
+        },
+        "versions": [
+          {
+            "version_id": "edc3677f-15c3-40df-aea2-f7fbe8a26459",
+            "percentage": 100
+          }
+        ],
+        "created_on": "2026-08-03T12:28:52.433052Z"
+      },
+      {
+        "id": "5ae11025-b08e-4528-95d4-6acb9617a0ec",
+        "source": "wrangler",
+        "strategy": "percentage",
+        "annotations": {
+          "workers/message": "Deploy ODL-REQ-024 exact main ffc9368ac37be606b4d5897ed2865ee73830c62e",
+          "workers/triggered_by": "deployment"
+        },
+        "versions": [
+          {
+            "version_id": "e55f3e0d-b406-49c0-ab32-ce59e06cc041",
+            "percentage": 100
+          }
+        ],
+        "created_on": "2026-08-03T12:06:28.698813Z"
+      },
+      {
+        "id": "c2ce8604-3751-4c24-bfb8-76b80c0f81f6",
+        "source": "wrangler",
+        "strategy": "percentage",
+        "annotations": {
+          "workers/message": "Deploy ODL-REQ-024 exact main 5475a3519f4466a5d75efc4fbe7a4147b2ae3186",
+          "workers/triggered_by": "deployment"
+        },
+        "versions": [
+          {
+            "version_id": "da5558f0-fe88-455c-a4e1-803e2dd279d3",
+            "percentage": 100
+          }
+        ],
+        "created_on": "2026-08-03T11:44:52.164325Z"
+      },
+      {
+        "id": "987e6b2d-1ad0-453f-a0de-6f17513e2223",
+        "source": "wrangler",
+        "strategy": "percentage",
+        "annotations": {
+          "workers/message": "Deploy ODL-REQ-024 exact main 1d03e9700eba1a6acb28484bad49ff1295a70dae",
+          "workers/triggered_by": "deployment"
+        },
+        "versions": [
+          {
+            "version_id": "e06f333e-3343-433f-b876-4968e32d2f18",
+            "percentage": 100
+          }
+        ],
+        "created_on": "2026-08-03T11:24:06.830699Z"
+      },
+      {
+        "id": "d287a789-722c-4e03-b47d-85653b805b44",
+        "source": "wrangler",
+        "strategy": "percentage",
+        "annotations": {
+          "workers/message": "Deploy ODL-REQ-023 exact main a29da127431896d79bb7d3315e69f0656cdaf16d",
+          "workers/triggered_by": "deployment"
+        },
+        "versions": [
+          {
+            "version_id": "02c982a0-a751-4caf-8130-7e35b44f76c9",
+            "percentage": 100
+          }
+        ],
+        "created_on": "2026-08-03T10:35:17.817814Z"
+      },
+      {
+        "id": "0ba7d0c4-e694-4681-8e5a-f90917e0a43b",
+        "source": "wrangler",
+        "strategy": "percentage",
+        "annotations": {
+          "workers/message": "Deploy ODL-REQ-022 exact main ce887598daeae99a28a3912e17b54eee93d033da",
+          "workers/triggered_by": "deployment"
+        },
+        "versions": [
+          {
+            "version_id": "8b57490f-6720-4323-8542-5ba7716dafe0",
+            "percentage": 100
+          }
+        ],
+        "created_on": "2026-08-03T08:27:03.596795Z"
+      },
+      {
+        "id": "e1b1d26f-adf4-43e6-9089-feb150b0f215",
+        "source": "wrangler",
+        "strategy": "percentage",
+        "annotations": {
+          "workers/message": "Deploy ODL-REQ-021 status bridge exact main 7a9d75585f0996ba6fe54c0c92c65185707185c7",
+          "workers/triggered_by": "deployment"
+        },
+        "versions": [
+          {
+            "version_id": "8efbe44b-0655-46c4-9b61-ac74f27923be",
+            "percentage": 100
+          }
+        ],
+        "created_on": "2026-08-03T06:39:04.082731Z"
+      },
+      {
+        "id": "55838d18-f127-41dc-8ba9-d881d0c34b56",
+        "source": "wrangler",
+        "strategy": "percentage",
+        "annotations": {
+          "workers/message": "Deploy ODL-REQ-021 bridge exact main e91b9b3a37e6051bc1171bbdf366eb66466d933e",
+          "workers/triggered_by": "deployment"
+        },
+        "versions": [
+          {
+            "version_id": "a4d5f79d-bfb0-4abe-aa4d-e8773525668e",
+            "percentage": 100
+          }
+        ],
+        "created_on": "2026-08-03T06:32:23.248999Z"
+      }
+    ]
+  },
+  "success": true,
+  "errors": [],
+  "messages": []
+}
