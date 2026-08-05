@@ -1,16 +1,20 @@
 name: ODL-REQ-027 correction
 
 on:
-  pull_request:
+  push:
     branches:
-      - main
+      - feature/odl-req-027-regional-attachments-zen-post
 
 permissions:
   contents: write
 
+concurrency:
+  group: odl-req-027-correction
+  cancel-in-progress: false
+
 jobs:
   correct:
-    if: github.head_ref == 'feature/odl-req-027-regional-attachments-zen-post'
+    if: github.ref == 'refs/heads/feature/odl-req-027-regional-attachments-zen-post'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -18,7 +22,7 @@ jobs:
         with:
           ref: feature/odl-req-027-regional-attachments-zen-post
           fetch-depth: 0
-      - name: Apply exact PR-local corrections
+      - name: Apply exact PR-local corrections and restore branch hygiene
         shell: bash
         run: |
           set -euo pipefail
@@ -75,7 +79,9 @@ test("regional host acceptance never substitutes''',
           )
           test_path.write_text(tests, encoding='utf-8')
           PY
-          rm -f .github/workflows/odl-req-027-fix.yml
+          git fetch origin main
+          git checkout origin/main -- .github/workflows/ci.yml
+          rm -f .github/workflows/odl-req-027-fix.yml .odl-req-027-correction-trigger
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add -A
