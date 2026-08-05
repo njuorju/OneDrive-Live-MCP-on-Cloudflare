@@ -54,6 +54,7 @@ test("ODL-REQ-028 deployment is exact-main, post-CI, leased, and does not run pr
   assert.match(workflow, /deploy-production:/);
   assert.match(workflow, /if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/);
   assert.match(workflow, /needs: validate/);
+  assert.match(workflow, /fetch-depth: 2/);
   assert.match(workflow, /test "\$\(git rev-parse HEAD\)" = "\$GITHUB_SHA"/);
   assert.match(workflow, /OPENING_VERSION_ID: 50e0887d-5868-4a48-bfb4-76081f0148a2/);
   assert.match(workflow, /OPENING_DEPLOYMENT_ID: c65a0e7f-d855-4acf-a94e-c279646da11d/);
