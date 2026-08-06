@@ -102,7 +102,11 @@ test("feature validator fails closed on missing, wrong, generic, refusal, unsupp
     ["wrong_visual_facts", `${COMPLETE_POSITIONAL_ANSWER}. Actually, the blue object is a triangle and the circle is green.`],
   ];
   for (const [expected, output] of cases) {
-    assert.equal(classifyZenVisionProviderText(output), expected, output);
+    assert.equal(classifyZenVisionProviderText(output),
+      expected === "explicit_multimodal_unsupported" ? "explicit_multimodal_unsupported"
+        : expected === "image_ignored_or_stripped" ? "image_ignored_or_stripped"
+          : "fixture_recognition_failed",
+      output);
     assert.throws(
       () => assertZenVisionFixtureRecognition(output),
       (error: unknown) => {

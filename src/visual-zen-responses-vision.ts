@@ -7,6 +7,12 @@ const MAX_CAPABILITY_JPEG_BYTES = 64 * 1024;
 
 export type ZenVisionProviderOutputClass =
   | "fixture_recognized"
+  | "image_ignored_or_stripped"
+  | "explicit_multimodal_unsupported"
+  | "fixture_recognition_failed";
+
+export type ZenVisionSemanticClass =
+  | "fixture_recognized"
   | "fixture_partly_recognized"
   | "wrong_visual_facts"
   | "generic_visual_prose"
@@ -38,7 +44,7 @@ export type ZenVisionSemanticReceipt = {
   requestedOutputCeiling: number | null;
   reportedOutputTokens: number | null;
   outputTokensReachedRequestedCeiling: boolean | null;
-  semanticClass: ZenVisionProviderOutputClass;
+  semanticClass: ZenVisionSemanticClass;
   fixtureRecognitionStatus: ZenVisionFixtureRecognitionStatus;
   mandatoryFeatureMatchBitmap: string;
   mandatoryFeatureMatchCount: number;
@@ -315,8 +321,10 @@ function analyzeZenVisionProviderText(text: string) {
       { category: "left" as const, terms: LEFT_TERMS },
       { category: "right" as const, terms: RIGHT_TERMS },
     ]);
-    const blueSquare = entityColorMatched(squarePositions, colors, "blue");
-    const redCircle = entityColorMatched(circlePositions, colors, "red");
+    const blueSquare = squarePositions.some((index) => index > 0 && BLUE_TERMS.has(clause[index - 1]))
+      || entityColorMatched(squarePositions, colors, "blue");
+    const redCircle = circlePositions.some((index) => index > 0 && RED_TERMS.has(clause[index - 1]))
+      || entityColorMatched(circlePositions, colors, "red");
     const blueWrongShape = tokenPositions(clause, BLUE_TERMS).some((index) => {
       const nearest = nearestCategories(index, shapes);
       return nearest.size > 0 && !nearest.has("square");
@@ -361,7 +369,7 @@ function analyzeZenVisionProviderText(text: string) {
   const refusalIndicator = /\b(?:i refuse|i decline|cannot comply|can t comply|unable to comply|will not comply|won t comply)\b|\bsorry\b.{0,40}\b(?:cannot|can t|unable|decline|refuse)\b/i.test(normalized);
   const genericIndicator = /\b(?:image|picture|graphic|photo)\b.{0,80}\b(?:shape|shapes|color|colors|text|label)\b|\b(?:colored|colourful|colorful) shapes\b/i.test(normalized);
 
-  let semanticClass: ZenVisionProviderOutputClass;
+  let semanticClass: ZenVisionSemanticClass;
   if (unsupportedIndicator) semanticClass = "explicit_multimodal_unsupported";
   else if (imageIgnoredIndicator) semanticClass = "image_ignored_or_stripped";
   else if (refusalIndicator) semanticClass = "refusal";
@@ -393,7 +401,11 @@ function analyzeZenVisionProviderText(text: string) {
 }
 
 export function classifyZenVisionProviderText(text: string): ZenVisionProviderOutputClass {
-  return analyzeZenVisionProviderText(text).semanticClass;
+  const semanticClass = analyzeZenVisionProviderText(text).semanticClass;
+  if (semanticClass === "fixture_recognized") return "fixture_recognized";
+  if (semanticClass === "image_ignored_or_stripped") return "image_ignored_or_stripped";
+  if (semanticClass === "explicit_multimodal_unsupported") return "explicit_multimodal_unsupported";
+  return "fixture_recognition_failed";
 }
 
 export async function inspectZenVisionProviderText(
@@ -425,17 +437,17 @@ export async function inspectZenVisionProviderText(
 export function assertZenVisionFixtureRecognition(
   textOrReceipt: string | ZenVisionSemanticReceipt,
 ): ZenVisionProviderOutputClass {
-  const outputClass = typeof textOrReceipt === "string"
-    ? classifyZenVisionProviderText(textOrReceipt)
+  const semanticClass = typeof textOrReceipt === "string"
+    ? analyzeZenVisionProviderText(textOrReceipt).semanticClass
     : textOrReceipt.semanticClass;
-  if (outputClass === "fixture_recognized") return outputClass;
-  if (outputClass === "explicit_multimodal_unsupported") {
+  if (semanticClass === "fixture_recognized") return "fixture_recognized";
+  if (semanticClass === "explicit_multimodal_unsupported") {
     throw new ConnectorError("provider_multimodal_unsupported", "The provider explicitly reported that multimodal image input is unsupported.");
   }
-  if (outputClass === "image_ignored_or_stripped") {
+  if (semanticClass === "image_ignored_or_stripped") {
     throw new ConnectorError("provider_image_input_ignored", "The completed provider output indicated that the image input was absent, stripped, or inaccessible.");
   }
-  if (outputClass === "refusal") {
+  if (semanticClass === "refusal") {
     throw new ConnectorError("provider_visual_fixture_refused", "The completed provider output refused the bounded visual fixture request.");
   }
   throw new ConnectorError("provider_visual_fixture_mismatch", "The completed provider output did not recognize the deterministic vision fixture.");
