@@ -9,6 +9,7 @@ import { syntheticVisionProbeJpegBytes } from "./visual-catalogue-probe-fixture"
 import {
   assertZenVisionFixtureRecognition,
   buildBoundedZenVisionDataUrl,
+  classifyZenVisionProviderText,
   inspectZenVisionProviderText,
   inspectZenVisionRequest,
   type ZenVisionProviderOutputClass,
@@ -249,7 +250,7 @@ async function runStage(env: Env, manifest: Manifest, stage: CapabilityStage): P
           outputTokensReachedRequestedCeiling: transportReceipt.outputTokensReachedRequestedCeiling ?? null,
           partialOutputPresent: transportReceipt.partialOutputTextPresent ?? false,
         });
-        providerOutputClass = visionSemanticReceipt.semanticClass;
+        providerOutputClass = classifyZenVisionProviderText(result.text);
         fixtureRecognitionBoolean = visionSemanticReceipt.fixtureRecognitionStatus === "recognized";
         assertZenVisionFixtureRecognition(visionSemanticReceipt);
         schemaValidationResult = "visual_fixture_matched";
@@ -263,7 +264,7 @@ async function runStage(env: Env, manifest: Manifest, stage: CapabilityStage): P
           outputTokensReachedRequestedCeiling: transportReceipt.outputTokensReachedRequestedCeiling ?? null,
           partialOutputPresent: transportReceipt.partialOutputTextPresent ?? false,
         });
-        providerOutputClass = visionSemanticReceipt.semanticClass;
+        providerOutputClass = classifyZenVisionProviderText(rendered);
         fixtureRecognitionBoolean = visionSemanticReceipt.fixtureRecognitionStatus === "recognized";
         assertZenVisionFixtureRecognition(visionSemanticReceipt);
         if (parsed.capability_ready !== true) throw new ConnectorError("provider_structured_output_contract_failed", "The structured vision output did not set capability_ready=true.");
