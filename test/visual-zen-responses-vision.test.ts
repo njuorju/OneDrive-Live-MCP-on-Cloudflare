@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { ConnectorError } from "../src/errors";
 import { base64ToBytes, sha256Bytes } from "../src/integrated-core";
 import { syntheticVisionProbeJpegBytes, OPENCODE_VISION_PROBE_JPEG_BYTE_LENGTH, OPENCODE_VISION_PROBE_JPEG_SHA256 } from "../src/visual-catalogue-probe-fixture";
-import { buildZenResponsesRequest, parseZenResponsesOutput } from "../src/visual-catalogue-zen-responses-base";
-import { createBoundedZenResponsesRedirectFetch } from "../src/visual-catalogue-zen-responses";
+import { buildZenResponsesRequest, createBoundedZenResponsesRedirectFetch } from "../src/visual-catalogue-zen-responses";
+import { parseZenResponsesOutput } from "../src/visual-catalogue-zen-responses-base";
 import {
   assertZenVisionFixtureRecognition,
   buildBoundedZenVisionDataUrl,
