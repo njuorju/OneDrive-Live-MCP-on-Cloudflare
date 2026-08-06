@@ -1,10 +1,18 @@
 import type { WorkflowStep } from "cloudflare:workers";
 import { ConnectorError } from "./errors";
-import { bytesToBase64 } from "./integrated-core";
+import { sha256Bytes } from "./integrated-core";
 import { coordinatorRequest, errorResult, nowIso, putArtifact, requestHash, sha256HexUtf8, textResult, type PaidJobRecord } from "./paid-core";
 import type { HotfixContext } from "./version20-hotfix";
 import type { CapabilityStage } from "./visual-classifier-capability-common";
 import { syntheticVisionProbeJpegBytes } from "./visual-catalogue-probe-fixture";
+import {
+  assertZenVisionFixtureRecognition,
+  buildBoundedZenVisionDataUrl,
+  classifyZenVisionProviderText,
+  inspectZenVisionRequest,
+  type ZenVisionProviderOutputClass,
+  type ZenVisionRequestReceipt,
+} from "./visual-zen-responses-vision";
 import {
   ZEN_RESPONSES_CREDENTIAL_BINDING,
   ZEN_RESPONSES_ENDPOINT,
@@ -67,6 +75,9 @@ export type ZenResponsesCapabilityAttempt = {
   requestImageSha256: string | null;
   requestImageByteSize: number | null;
   requestImageMimeType: "image/jpeg" | null;
+  visionRequestReceipt: ZenVisionRequestReceipt | null;
+  providerOutputClass: ZenVisionProviderOutputClass | null;
+  fixtureRecognitionBoolean: boolean | null;
   oneDriveAccessed: false;
   oneDriveMutationPerformed: false;
 };
@@ -171,11 +182,6 @@ function textSchema(): Record<string, unknown> {
   return { type: "object", additionalProperties: false, properties: { ok: { type: "boolean" }, probe: { type: "string" } }, required: ["ok", "probe"] };
 }
 
-function fixtureMatched(text: string): boolean {
-  const lower = text.toLocaleLowerCase("en");
-  return text.includes("UCA VISION PROBE 2047") && lower.includes("blue") && lower.includes("square") && lower.includes("red") && lower.includes("circle");
-}
-
 async function runStage(env: Env, manifest: Manifest, stage: CapabilityStage): Promise<ZenResponsesCapabilityAttempt> {
   const startedAt = nowIso();
   const started = Date.now();
@@ -192,6 +198,9 @@ async function runStage(env: Env, manifest: Manifest, stage: CapabilityStage): P
   let failure: string | null = null;
   let imageSha256: string | null = null;
   let imageByteSize: number | null = null;
+  let visionRequestReceipt: ZenVisionRequestReceipt | null = null;
+  let providerOutputClass: ZenVisionProviderOutputClass | null = null;
+  let fixtureRecognitionBoolean: boolean | null = null;
   try {
     if (stage === "model_discovery") {
       const discovery = await discoverZenResponsesModelWithReceipt(env, { provider: ZEN_RESPONSES_PROVIDER, mode: ZEN_RESPONSES_MODE, model: ZEN_RESPONSES_MODEL });
@@ -206,13 +215,15 @@ async function runStage(env: Env, manifest: Manifest, stage: CapabilityStage): P
       const fixture = stage.startsWith("vision_") ? syntheticVisionProbeJpegBytes() : null;
       if (fixture) {
         imageByteSize = fixture.byteLength;
-        imageSha256 = await sha256HexUtf8(bytesToBase64(fixture));
+        imageSha256 = await sha256Bytes(fixture);
       }
+      const imageDataUrl = fixture ? buildBoundedZenVisionDataUrl(fixture) : undefined;
       const request = stage === "text_structured_output"
         ? buildZenResponsesRequest({ text: "Return JSON with ok=true and probe=odl-req-025.", maxOutputTokens: 128, schema: { name: "text_probe", schema: textSchema() } })
         : stage === "vision_unstructured"
-          ? buildZenResponsesRequest({ text: "Identify the blue square, red circle, and exact visible text.", imageDataUrl: `data:image/jpeg;base64,${bytesToBase64(fixture as Uint8Array)}`, maxOutputTokens: 256 })
-          : buildZenResponsesRequest({ text: "Return the visible blue shape, red shape, exact visible text, and capability_ready=true.", imageDataUrl: `data:image/jpeg;base64,${bytesToBase64(fixture as Uint8Array)}`, maxOutputTokens: 320, schema: { name: "vision_probe", schema: structuredSchema() } });
+          ? buildZenResponsesRequest({ text: "Identify the blue square, red circle, and exact visible text.", imageDataUrl, maxOutputTokens: 256 })
+          : buildZenResponsesRequest({ text: "Return the visible blue shape, red shape, exact visible text, and capability_ready=true.", imageDataUrl, maxOutputTokens: 320, schema: { name: "vision_probe", schema: structuredSchema() } });
+      if (fixture) visionRequestReceipt = await inspectZenVisionRequest(request, fixture);
       const result = await requestZenResponses({ env, spendLedgerKey: manifest.spendLedgerKey, body: request, context: `capability:${stage}`, requestIdentity: `${manifest.jobId}:${stage}` });
       httpStatus = result.status;
       structuralReceipt = result.structuralReceipt;
@@ -225,12 +236,17 @@ async function runStage(env: Env, manifest: Manifest, stage: CapabilityStage): P
         if (parsed.ok !== true || parsed.probe !== "odl-req-025") throw new ConnectorError("provider_structured_output_unsupported", "The text structured-output stage did not satisfy the exact schema contract.");
         schemaValidationResult = "valid";
       } else if (stage === "vision_unstructured") {
-        if (!fixtureMatched(result.text)) throw new ConnectorError("provider_multimodal_unsupported", "The vision stage did not identify the deterministic fixture.");
+        providerOutputClass = classifyZenVisionProviderText(result.text);
+        fixtureRecognitionBoolean = providerOutputClass === "fixture_recognized";
+        assertZenVisionFixtureRecognition(result.text);
         schemaValidationResult = "visual_fixture_matched";
       } else {
         const parsed = JSON.parse(result.text) as Record<string, unknown>;
         const rendered = `${parsed.blue_shape ?? ""} ${parsed.red_shape ?? ""} ${parsed.visible_text ?? ""}`;
-        if (!fixtureMatched(rendered) || parsed.capability_ready !== true) throw new ConnectorError("provider_structured_output_unsupported", "The structured vision stage did not satisfy the deterministic fixture contract.");
+        providerOutputClass = classifyZenVisionProviderText(rendered);
+        fixtureRecognitionBoolean = providerOutputClass === "fixture_recognized";
+        assertZenVisionFixtureRecognition(rendered);
+        if (parsed.capability_ready !== true) throw new ConnectorError("provider_structured_output_contract_failed", "The structured vision output did not set capability_ready=true.");
         schemaValidationResult = "valid";
       }
       status = "passed";
@@ -258,6 +274,7 @@ async function runStage(env: Env, manifest: Manifest, stage: CapabilityStage): P
     credentialBindingName: ZEN_RESPONSES_CREDENTIAL_BINDING, startedAt, completedAt: nowIso(), latencyMilliseconds: Date.now() - started,
     httpStatus, status, parserResult, schemaValidationResult, structuralReceipt, transportReceipt, discoveryReceipt, usage, accounting, errorCode: failure,
     requestImageSha256: imageSha256, requestImageByteSize: imageByteSize, requestImageMimeType: imageByteSize === null ? null : "image/jpeg",
+    visionRequestReceipt, providerOutputClass, fixtureRecognitionBoolean,
     oneDriveAccessed: false, oneDriveMutationPerformed: false,
   };
 }
