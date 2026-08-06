@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import { readFile } from "node:fs/promises";
 import {
   ZEN_RESPONSES_MAX_BILLABLE_REQUESTS,
@@ -13,6 +14,7 @@ import {
   requestZenResponses,
   type ZenResponsesTransportReceipt,
 } from "../src/visual-catalogue-zen-responses";
+import { syntheticVisionProbeJpegBytes } from "../src/visual-catalogue-probe-fixture";
 
 class MemoryR2 {
   values = new Map<string, { body: Uint8Array; customMetadata?: Record<string, string> }>();
@@ -119,6 +121,7 @@ test("incomplete partial text fails closed while sanitized receipt and accountin
   const env = { ARTIFACTS: r2, OPENCODE_ZEN_API_KEY: "mock-secret" } as any;
   const ledger = await initializeZenResponsesSpendLedger(env, "odl-req-033", 75, 1);
   const partial = "DO_NOT_PERSIST_THIS_PARTIAL_TEXT";
+  const imageDataUrl = `data:image/jpeg;base64,${Buffer.from(syntheticVisionProbeJpegBytes()).toString("base64")}`;
   const mockFetch: typeof fetch = (async () => new Response(
     JSON.stringify(incompleteEnvelope("max_output_tokens", 256, partial)),
     { status: 200, headers: { "content-type": "application/json" } },
@@ -129,7 +132,7 @@ test("incomplete partial text fails closed while sanitized receipt and accountin
     await requestZenResponses({
       env,
       spendLedgerKey: ledger.key,
-      body: buildZenResponsesRequest({ text: "bounded test", maxOutputTokens: 256 }),
+      body: buildZenResponsesRequest({ text: "bounded test", maxOutputTokens: 256, imageDataUrl }),
       context: "capability:vision_unstructured",
       requestIdentity: "odl-req-033:vision_unstructured",
       fetchImpl: mockFetch,
