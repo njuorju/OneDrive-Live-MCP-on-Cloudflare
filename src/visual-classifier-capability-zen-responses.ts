@@ -4,6 +4,7 @@ import { sha256Bytes } from "./integrated-core";
 import { coordinatorRequest, errorResult, nowIso, putArtifact, requestHash, sha256HexUtf8, textResult, type PaidJobRecord } from "./paid-core";
 import type { HotfixContext } from "./version20-hotfix";
 import type { CapabilityStage } from "./visual-classifier-capability-common";
+import { zenResponsesCapabilityOutputCeiling } from "./visual-classifier-capability-output-ceilings";
 import { syntheticVisionProbeJpegBytes } from "./visual-catalogue-probe-fixture";
 import {
   assertZenVisionFixtureRecognition,
@@ -218,11 +219,12 @@ async function runStage(env: Env, manifest: Manifest, stage: CapabilityStage): P
         imageSha256 = await sha256Bytes(fixture);
       }
       const imageDataUrl = fixture ? buildBoundedZenVisionDataUrl(fixture) : undefined;
+      const maxOutputTokens = zenResponsesCapabilityOutputCeiling(stage);
       const request = stage === "text_structured_output"
-        ? buildZenResponsesRequest({ text: "Return JSON with ok=true and probe=odl-req-025.", maxOutputTokens: 128, schema: { name: "text_probe", schema: textSchema() } })
+        ? buildZenResponsesRequest({ text: "Return JSON with ok=true and probe=odl-req-025.", maxOutputTokens, schema: { name: "text_probe", schema: textSchema() } })
         : stage === "vision_unstructured"
-          ? buildZenResponsesRequest({ text: "Identify the blue square, red circle, and exact visible text.", imageDataUrl, maxOutputTokens: 256 })
-          : buildZenResponsesRequest({ text: "Return the visible blue shape, red shape, exact visible text, and capability_ready=true.", imageDataUrl, maxOutputTokens: 320, schema: { name: "vision_probe", schema: structuredSchema() } });
+          ? buildZenResponsesRequest({ text: "Identify the blue square, red circle, and exact visible text.", imageDataUrl, maxOutputTokens })
+          : buildZenResponsesRequest({ text: "Return the visible blue shape, red shape, exact visible text, and capability_ready=true.", imageDataUrl, maxOutputTokens, schema: { name: "vision_probe", schema: structuredSchema() } });
       if (fixture) visionRequestReceipt = await inspectZenVisionRequest(request, fixture);
       const result = await requestZenResponses({ env, spendLedgerKey: manifest.spendLedgerKey, body: request, context: `capability:${stage}`, requestIdentity: `${manifest.jobId}:${stage}` });
       httpStatus = result.status;

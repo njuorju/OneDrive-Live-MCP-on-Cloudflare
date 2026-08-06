@@ -194,9 +194,13 @@ test("explicit invalid mock transport remains fail closed before dispatch", asyn
   assert.equal(accounting.billableRequestCount, 0);
 });
 
-test("stage ceilings and global safety ceilings remain unchanged", async () => {
+test("global safety ceilings remain unchanged while stage policy stays explicit", async () => {
   const capabilitySource = await readFile(
     new URL("../src/visual-classifier-capability-zen-responses.ts", import.meta.url),
+    "utf8",
+  );
+  const policySource = await readFile(
+    new URL("../src/visual-classifier-capability-output-ceilings.ts", import.meta.url),
     "utf8",
   );
   const baseSource = await readFile(
@@ -208,9 +212,11 @@ test("stage ceilings and global safety ceilings remain unchanged", async () => {
     "utf8",
   );
 
-  assert.match(capabilitySource, /maxOutputTokens:\s*128/);
-  assert.match(capabilitySource, /maxOutputTokens:\s*256/);
-  assert.match(capabilitySource, /maxOutputTokens:\s*320/);
+  assert.match(policySource, /text_structured_output:\s*128/);
+  assert.match(policySource, /vision_unstructured:\s*1024/);
+  assert.match(policySource, /vision_structured_output:\s*1024/);
+  assert.match(capabilitySource, /zenResponsesCapabilityOutputCeiling\(stage\)/);
+  assert.doesNotMatch(capabilitySource, /maxOutputTokens:\s*(?:128|256|320|1024)/);
   assert.equal(ZEN_RESPONSES_MAX_BILLABLE_REQUESTS, 75);
   assert.equal(ZEN_RESPONSES_MAX_ESTIMATED_SPEND_USD, 1);
   assert.match(baseSource, /const MAX_RESPONSE_BYTES = 64 \* 1024;/);
