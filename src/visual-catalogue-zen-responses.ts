@@ -74,6 +74,81 @@ export type ZenResponsesRedirectReceipt = {
   finalEndpointClass: "documented_canonical" | "documented_slash_variant" | "not_reached";
 };
 
+export type ZenResponsesIncompleteReasonClass =
+  | "max_output_tokens"
+  | "content_filter"
+  | "tool_failure"
+  | "other"
+  | null;
+
+export type ZenResponsesCompletionEvidence = {
+  requestedMaxOutputTokens: number | null;
+  completionStatus: string | null;
+  incompleteReason: string | null;
+  incompleteReasonClass: ZenResponsesIncompleteReasonClass;
+  reportedOutputTokens: number | null;
+  outputTokensReachedRequestedCeiling: boolean | null;
+  partialOutputTextPresent: boolean | null;
+};
+
+function sanitizedInteger(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 && parsed <= 1_000_000 ? parsed : null;
+}
+
+function sanitizedProviderEnum(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLocaleLowerCase("en").replace(/[^a-z0-9_.:-]+/g, "_").slice(0, 120);
+  return normalized || null;
+}
+
+export function classifyZenResponsesIncompleteReason(reason: unknown): ZenResponsesIncompleteReasonClass {
+  const normalized = sanitizedProviderEnum(reason);
+  if (normalized === null) return null;
+  if (normalized === "max_output_tokens" || normalized === "max_tokens" || normalized === "length") return "max_output_tokens";
+  if (normalized === "content_filter" || normalized.includes("content_filter")) return "content_filter";
+  if (normalized === "tool_failure" || normalized === "tool_error" || normalized.includes("tool_failure")) return "tool_failure";
+  return "other";
+}
+
+export function inspectZenResponsesCompletionEnvelope(
+  body: Record<string, unknown>,
+  requestedMaxOutputTokens: unknown,
+): ZenResponsesCompletionEvidence {
+  const requested = sanitizedInteger(requestedMaxOutputTokens);
+  const completionStatus = sanitizedProviderEnum(body.status);
+  const incompleteDetails = body.incomplete_details && typeof body.incomplete_details === "object" && !Array.isArray(body.incomplete_details)
+    ? body.incomplete_details as Record<string, unknown>
+    : null;
+  const incompleteReason = sanitizedProviderEnum(incompleteDetails?.reason);
+  const usage = body.usage && typeof body.usage === "object" && !Array.isArray(body.usage)
+    ? body.usage as Record<string, unknown>
+    : null;
+  const reportedOutputTokens = sanitizedInteger(usage?.output_tokens ?? usage?.completion_tokens);
+  const incomplete = completionStatus === "incomplete" || incompleteReason !== null;
+  let outputTextPresent = false;
+  const output = Array.isArray(body.output) ? body.output as Record<string, unknown>[] : [];
+  for (const item of output) {
+    if (item.type !== "message" || item.role !== "assistant") continue;
+    const content = Array.isArray(item.content) ? item.content as Record<string, unknown>[] : [];
+    if (content.some((part) => part.type === "output_text" && typeof part.text === "string" && part.text.trim().length > 0)) {
+      outputTextPresent = true;
+      break;
+    }
+  }
+  return {
+    requestedMaxOutputTokens: requested,
+    completionStatus,
+    incompleteReason,
+    incompleteReasonClass: classifyZenResponsesIncompleteReason(incompleteReason),
+    reportedOutputTokens,
+    outputTokensReachedRequestedCeiling: incomplete && requested !== null && reportedOutputTokens !== null
+      ? reportedOutputTokens === requested
+      : null,
+    partialOutputTextPresent: incomplete ? outputTextPresent : null,
+  };
+}
+
 export type ZenResponsesTransportReceipt = Omit<BaseZenResponsesTransportReceipt, "redirectMode"> & {
   redirectMode: "error" | "manual";
   redirectDisposition?: ZenResponsesRedirectDisposition;
@@ -88,10 +163,17 @@ export type ZenResponsesTransportReceipt = Omit<BaseZenResponsesTransportReceipt
   visionRequestReceipt?: ZenVisionRequestReceipt | null;
   providerOutputClass?: ZenVisionProviderOutputClass | null;
   fixtureRecognitionBoolean?: boolean | null;
+  requestedMaxOutputTokens?: number | null;
+  completionStatus?: string | null;
+  incompleteReason?: string | null;
+  incompleteReasonClass?: ZenResponsesIncompleteReasonClass;
+  reportedOutputTokens?: number | null;
+  outputTokensReachedRequestedCeiling?: boolean | null;
+  partialOutputTextPresent?: boolean | null;
 };
 
 type RequestInput = Parameters<typeof requestZenResponsesBase>[0];
-type RedirectedTransportReceipt = Omit<BaseZenResponsesTransportReceipt, "redirectMode"> & ZenResponsesRedirectReceipt & {
+type RedirectedTransportReceipt = Omit<BaseZenResponsesTransportReceipt, "redirectMode"> & ZenResponsesRedirectReceipt & ZenResponsesCompletionEvidence & {
   visionRequestReceipt?: ZenVisionRequestReceipt | null;
   providerOutputClass?: ZenVisionProviderOutputClass | null;
   fixtureRecognitionBoolean?: boolean | null;
@@ -126,9 +208,10 @@ type RedirectTrace = {
   finalEndpointClass: ZenResponsesRedirectReceipt["finalEndpointClass"];
   failure: RedirectFailure | null;
   providerErrorClass: "invalid_image_payload" | "explicit_multimodal_unsupported" | null;
+  completionEvidence: ZenResponsesCompletionEvidence;
 };
 
-function initialTrace(): RedirectTrace {
+function initialTrace(requestedMaxOutputTokens: unknown = null): RedirectTrace {
   return {
     disposition: "direct_canonical",
     status: null,
@@ -141,6 +224,7 @@ function initialTrace(): RedirectTrace {
     finalEndpointClass: "documented_canonical",
     failure: null,
     providerErrorClass: null,
+    completionEvidence: inspectZenResponsesCompletionEnvelope({}, requestedMaxOutputTokens),
   };
 }
 
@@ -394,7 +478,7 @@ function createBoundedZenResponsesRedirectFetchInternal(
         trace.hopCount = hop;
         trace.finalEndpointClass = endpointClass(current.pathname);
         if (hop > 0) trace.disposition = "accepted_bounded_redirect";
-        if (!response.ok && /application\/json/i.test(response.headers.get("content-type") ?? "")) {
+        if (/application\/json/i.test(response.headers.get("content-type") ?? "")) {
           const declared = Number(response.headers.get("content-length"));
           if (!Number.isFinite(declared) || declared <= ZEN_RESPONSES_PROVIDER_ERROR_INSPECTION_MAX_BYTES) {
             try {
@@ -402,7 +486,12 @@ function createBoundedZenResponsesRedirectFetchInternal(
               if (bytes.byteLength <= ZEN_RESPONSES_PROVIDER_ERROR_INSPECTION_MAX_BYTES) {
                 const parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
                 if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-                  trace.providerErrorClass = classifyZenVisionProviderError(parsed as Record<string, unknown>);
+                  const record = parsed as Record<string, unknown>;
+                  trace.completionEvidence = inspectZenResponsesCompletionEnvelope(
+                    record,
+                    trace.completionEvidence.requestedMaxOutputTokens,
+                  );
+                  if (!response.ok) trace.providerErrorClass = classifyZenVisionProviderError(record);
                 }
               }
             } catch {
@@ -470,6 +559,7 @@ async function redirectReceipt(
     redirectHostFingerprint: trace.host ? (await sha256HexUtf8(trace.host.toLowerCase())).slice(0, 24) : null,
     redirectPathFingerprint: trace.path ? (await sha256HexUtf8(trace.path)).slice(0, 24) : null,
     finalEndpointClass: trace.finalEndpointClass,
+    ...trace.completionEvidence,
   } as RedirectedTransportReceipt;
 }
 
@@ -513,7 +603,7 @@ export async function requestZenResponses(input: RequestInput): Promise<RequestR
   const underlyingFetch = selectUnderlyingFetch(input);
   if (!underlyingFetch) return requestZenResponsesBase(input);
 
-  const trace = initialTrace();
+  const trace = initialTrace(input.body.max_output_tokens);
   const boundedFetch = createBoundedZenResponsesRedirectFetchInternal(underlyingFetch, trace);
 
   try {
