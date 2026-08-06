@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - fix/odl-req-035-luna-visual-fixture-recognition
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
