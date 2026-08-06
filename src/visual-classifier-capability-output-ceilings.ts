@@ -3,6 +3,7 @@ import type { CapabilityStage } from "./visual-classifier-capability-common";
 
 export type ZenResponsesOutputCapabilityStage = Exclude<CapabilityStage, "model_discovery">;
 
+// ODL-REQ-034 keeps every billable capability stage explicit, bounded, and fail-closed.
 export const ZEN_RESPONSES_CAPABILITY_OUTPUT_CEILINGS: Readonly<Record<ZenResponsesOutputCapabilityStage, number>> = Object.freeze({
   text_structured_output: 128,
   vision_unstructured: 1024,
