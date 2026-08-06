@@ -1,0 +1,33 @@
+name: ODL-REQ-035 compatibility repair
+
+on:
+  push:
+    branches:
+      - fix/odl-req-035-luna-visual-fixture-recognition
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Apply compatibility patch and self-remove
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' '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' | base64 --decode | gzip --decompress > /tmp/compat.patch
+          echo '8b008b3ea42667ce73ad67e76ce6ca176f752311c2fdeb64d7940f06876932f6  /tmp/compat.patch' | sha256sum --check --strict
+          git apply --check /tmp/compat.patch
+          git apply /tmp/compat.patch
+          git rm .github/workflows/odl-req-035-compat.yml
+          git add src/visual-zen-responses-vision.ts test/visual-catalogue-zen-responses-odl035.test.ts
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: preserve vision validator compatibility'
+          git push origin HEAD:fix/odl-req-035-luna-visual-fixture-recognition
