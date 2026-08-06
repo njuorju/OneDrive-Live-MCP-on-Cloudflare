@@ -1,0 +1,243 @@
+name: ODL-REQ-032 exact production deploy
+
+on:
+  push:
+    branches:
+      - fix/odl-req-032-luna-vision-input
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: onedrive-live-production-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy-exact-artifact:
+    if: github.ref == 'refs/heads/fix/odl-req-032-luna-vision-input'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: 3f67b673280f2119de4eedd09745e20f
+      WORKER_NAME: nikolay-onedrive-mcp
+      SOURCE_SHA: 18e884b7e8875eb68fb8f6d5b7ce6ca4393a3697
+      OPENING_VERSION_ID: f1798629-eb11-4927-833d-6895314ce2d0
+      OPENING_DEPLOYMENT_ID: b3b737a0-9088-43f4-be49-edfbe877aaa4
+      ARTIFACT_ID: '8955454941'
+      ARTIFACT_ZIP_SHA256: 585020173be77a2853d257598e7f907f2911f219e457588c279875f67cdc3bee
+      MODULE_SHA256: 2fca8c4184d11d4ecb9eb27793a711bc8f048ea645fa70cda7999127cb34f147
+      MODULE_BYTES: '4978185'
+      MAP_SHA256: c8d87f22ccd4c71e09de061bd896b75d8270848faf155f2122b95837890f8781
+      MAP_BYTES: '7770432'
+    steps:
+      - name: Check out exact merged main
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 1
+
+      - name: Verify exact source and trigger lease
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/fix/odl-req-032-luna-vision-input"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -n "$CLOUDFLARE_API_TOKEN"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.18.0'
+          cache: npm
+
+      - name: Install pinned Wrangler dependency
+        run: npm ci --ignore-scripts --no-audit --no-fund
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+
+      - name: Download and verify exact green CI artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" \
+            -o worker-bundle.zip
+          echo "$ARTIFACT_ZIP_SHA256  worker-bundle.zip" | sha256sum -c -
+          mkdir exact-bundle
+          unzip -q worker-bundle.zip -d exact-bundle
+          test "$(stat -c %s exact-bundle/index-closeout.js)" = "$MODULE_BYTES"
+          test "$(stat -c %s exact-bundle/index-closeout.js.map)" = "$MAP_BYTES"
+          echo "$MODULE_SHA256  exact-bundle/index-closeout.js" | sha256sum -c -
+          echo "$MAP_SHA256  exact-bundle/index-closeout.js.map" | sha256sum -c -
+
+      - name: Generate exact production configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          cfg = json.loads(Path('wrangler.jsonc').read_text())
+          sha = os.environ['SOURCE_SHA']
+          cfg['name'] = os.environ['WORKER_NAME']
+          cfg['main'] = 'exact-bundle/index-closeout.js'
+          cfg['keep_vars'] = True
+          cfg['kv_namespaces'] = [
+              {'binding': 'OAUTH_KV', 'id': 'a3ead543dad24b8596ab9193b10f1b9f'}
+          ]
+          cfg['vars'].update({
+              'CONNECTOR_NAME': 'OneDrive Live MCP',
+              'ONEDRIVE_ROOT': 'Работа',
+              'MAX_FILE_MB': '20',
+              'MAX_ORIGINAL_FILE_MB': '25',
+              'MAX_TEXT_WRITE_KB': '4096',
+              'MAX_READ_CHARS': '50000',
+              'CACHE_TTL_SECONDS': '604800',
+              'MAX_IMAGE_INPUT_MB': '15',
+              'MAX_IMAGE_PIXELS': '40000000',
+              'MAX_IMAGE_DIMENSION': '8192',
+              'MAX_IMAGE_PAGES': '8',
+              'IMAGE_PROCESSING_TIMEOUT_MS': '15000',
+              'INTEGRITY_LEASE_SECONDS': '600',
+              'PAID_MAX_SOURCE_MB': '500',
+              'PAID_VISUAL_PARSE_MB': '40',
+              'PAID_RENDER_ORIGIN': 'https://nikolay-onedrive-mcp.fdas201290.workers.dev',
+              'VISUAL_CLASSIFIER_PROVIDER': 'openai',
+              'VISUAL_CLASSIFIER_MODEL': 'gpt-5.2-2025-12-11',
+              'OPENCODE_ZEN_MODEL': 'mimo-v2.5-free',
+              'OPENCODE_ZEN_DISCOVERY_TTL_SECONDS': '3600',
+              'VISUAL_CLASSIFIER_CONCURRENCY': '2',
+              'VISUAL_CLASSIFIER_MAX_DIMENSION': '1280',
+              'VISUAL_CLASSIFIER_JPEG_QUALITY': '82',
+              'VISUAL_RUBRIC_VERSION': 'uca-visual-rubric-2026-08-02',
+              'VISUAL_PROMPT_VERSION': 'visual-source-classifier-opencode-mimo-2026-08-02',
+              'VISUAL_RENDERER_VERSION': 'pdfjs-cache-v1',
+              'WORKER_DEPLOYMENT_ID': f'repo-{sha}',
+          })
+          Path('wrangler.production.json').write_text(
+              json.dumps(cfg, ensure_ascii=False, indent=2) + '\n'
+          )
+          PY
+
+      - name: Verify opening lease and binding surfaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
+          auth=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H 'Content-Type: application/json')
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/deployments" > pre-deployments.json
+          jq -e --arg d "$OPENING_DEPLOYMENT_ID" --arg v "$OPENING_VERSION_ID" \
+            '.success == true and .result.deployments[0].id == $d and .result.deployments[0].versions == [{version_id:$v,percentage:100}]' \
+            pre-deployments.json >/dev/null
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/versions?deployable=true" > pre-versions.json
+          jq -e --arg v "$OPENING_VERSION_ID" '.success == true and .result.items[0].id == $v and .result.items[0].number == 103' pre-versions.json >/dev/null
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/settings" > pre-settings.json
+          jq -S '[.result.bindings[] | {name,type}] | sort_by(.name)' pre-settings.json > pre-bindings.json
+          test "$(jq length pre-bindings.json)" = '44'
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/secrets" > pre-secrets.json
+          jq -S '[.result[] | {name,type}] | sort_by(.name)' pre-secrets.json > pre-secret-bindings.json
+          test "$(jq length pre-secret-bindings.json)" = '4'
+
+      - name: Upload exact green module without deploying
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx wrangler versions upload exact-bundle/index-closeout.js \
+            --no-bundle \
+            --config wrangler.production.json \
+            --name "$WORKER_NAME" \
+            --message "Upload ODL-REQ-032 exact main $SOURCE_SHA" \
+            --tag "odl-req-032-${SOURCE_SHA:0:12}" \
+            --strict \
+            2>&1 | tee version-upload.log
+
+      - name: Resolve and verify the one new version
+        shell: bash
+        run: |
+          set -euo pipefail
+          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
+          auth=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H 'Content-Type: application/json')
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/versions?deployable=true" > uploaded-versions.json
+          new_version_id="$(jq -r --arg old "$OPENING_VERSION_ID" '.result.items | map(select(.id != $old)) | sort_by(.number) | last | .id' uploaded-versions.json)"
+          new_version_number="$(jq -r --arg id "$new_version_id" '.result.items[] | select(.id == $id) | .number' uploaded-versions.json)"
+          test -n "$new_version_id"
+          test "$new_version_id" != 'null'
+          test "$new_version_number" = '104'
+          printf 'NEW_VERSION_ID=%s\nNEW_VERSION_NUMBER=%s\n' "$new_version_id" "$new_version_number" >> "$GITHUB_ENV"
+
+      - name: Create exactly one 100 percent production deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
+          jq -n \
+            --arg version "$NEW_VERSION_ID" \
+            --arg message "Deploy ODL-REQ-032 exact main $SOURCE_SHA" \
+            '{strategy:"percentage",versions:[{version_id:$version,percentage:100}],annotations:{"workers/message":$message}}' \
+            > deployment-request.json
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data-binary @deployment-request.json \
+            "$api/workers/scripts/$WORKER_NAME/deployments" > deployment-response.json
+          jq -e '.success == true' deployment-response.json >/dev/null
+
+      - name: Verify exact production deployment and health
+        shell: bash
+        run: |
+          set -euo pipefail
+          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
+          auth=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H 'Content-Type: application/json')
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/deployments" > post-deployments.json
+          jq -e --arg old "$OPENING_DEPLOYMENT_ID" --arg v "$NEW_VERSION_ID" \
+            '.success == true and .result.deployments[0].id != $old and .result.deployments[0].versions == [{version_id:$v,percentage:100}]' \
+            post-deployments.json >/dev/null
+          deployment_id="$(jq -r '.result.deployments[0].id' post-deployments.json)"
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/settings" > post-settings.json
+          jq -e --arg source "repo-$SOURCE_SHA" \
+            'any(.result.bindings[]; .name == "WORKER_DEPLOYMENT_ID" and .type == "plain_text" and .text == $source)' \
+            post-settings.json >/dev/null
+          jq -S '[.result.bindings[] | {name,type}] | sort_by(.name)' post-settings.json > post-bindings.json
+          test "$(jq length post-bindings.json)" = '44'
+          cmp pre-bindings.json post-bindings.json
+          curl -fsS "${auth[@]}" "$api/workers/scripts/$WORKER_NAME/secrets" > post-secrets.json
+          jq -S '[.result[] | {name,type}] | sort_by(.name)' post-secrets.json > post-secret-bindings.json
+          test "$(jq length post-secret-bindings.json)" = '4'
+          cmp pre-secret-bindings.json post-secret-bindings.json
+          health_status="$(curl -sS -o health.json -w '%{http_code}' --retry 8 --retry-all-errors --retry-delay 2 'https://nikolay-onedrive-mcp.fdas201290.workers.dev/health')"
+          test "$health_status" = '200'
+          jq -e '.ok == true' health.json >/dev/null
+          jq -n \
+            --arg requestId 'ODL-REQ-032' \
+            --arg sourceCommit "$SOURCE_SHA" \
+            --arg deploymentId "$deployment_id" \
+            --arg versionId "$NEW_VERSION_ID" \
+            --argjson versionNumber "$NEW_VERSION_NUMBER" \
+            --arg artifactZipSha256 "$ARTIFACT_ZIP_SHA256" \
+            --arg moduleSha256 "$MODULE_SHA256" \
+            --argjson moduleBytes "$MODULE_BYTES" \
+            '{requestId:$requestId,sourceCommit:$sourceCommit,deploymentId:$deploymentId,versionId:$versionId,versionNumber:$versionNumber,trafficPercent:100,deploymentCount:1,artifactZipSha256:$artifactZipSha256,moduleSha256:$moduleSha256,moduleBytes:$moduleBytes,bindingsUnchanged:true,secretBindingsUnchanged:true,healthHttp200:true}' \
+            > deployment-evidence.json
+          cat deployment-evidence.json
+
+      - name: Upload sanitized deployment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: odl-req-032-production-deployment-evidence-${{ github.run_id }}
+          path: |
+            version-upload.log
+            deployment-evidence.json
+            deployment-response.json
+            pre-bindings.json
+            post-bindings.json
+            pre-secret-bindings.json
+            post-secret-bindings.json
+          if-no-files-found: warn
+          retention-days: 7
