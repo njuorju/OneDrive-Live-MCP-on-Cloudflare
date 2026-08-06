@@ -3,21 +3,46 @@ export * from "./visual-catalogue-zen-responses-base";
 import {
   ZEN_RESPONSES_ENDPOINT,
   ZEN_RESPONSES_MODEL,
+  buildZenResponsesRequest as buildZenResponsesRequestBase,
   ZenResponsesTransportError,
   isZenResponsesTransportError,
   requestZenResponses as requestZenResponsesBase,
   type ZenResponsesTransportReceipt as BaseZenResponsesTransportReceipt,
 } from "./visual-catalogue-zen-responses-base";
 import { sha256HexUtf8 } from "./paid-core";
+import { syntheticVisionProbeJpegBytes } from "./visual-catalogue-probe-fixture";
+import {
+  assertZenVisionFixtureRecognition,
+  classifyZenVisionProviderError,
+  classifyZenVisionProviderText,
+  inspectZenVisionRequest,
+  type ZenVisionProviderOutputClass,
+  type ZenVisionRequestReceipt,
+} from "./visual-zen-responses-vision";
 
 // Compatibility-visible base invariants remain MAX_RESPONSE_BYTES = 64 * 1024
 // and ZEN_RESPONSES_TIMEOUT_MS = 60_000 in visual-catalogue-zen-responses-base.ts.
 const ZEN_RESPONSES_REDIRECT_MAX_HOPS = 1;
+const ZEN_RESPONSES_PROVIDER_ERROR_INSPECTION_MAX_BYTES = 64 * 1024;
 const ZEN_RESPONSES_ALLOWED_HOST = "opencode.ai";
 const ZEN_RESPONSES_ALLOWED_PATHS = new Set([
   "/zen/v1/responses",
   "/zen/v1/responses/",
 ]);
+
+type ZenResponsesRequestBuildInput = Parameters<typeof buildZenResponsesRequestBase>[0];
+
+export function buildZenResponsesRequest(input: ZenResponsesRequestBuildInput): Record<string, unknown> {
+  const request = buildZenResponsesRequestBase(input);
+  if (!input.imageDataUrl) return request;
+  const messages = Array.isArray(request.input) ? request.input as Record<string, unknown>[] : [];
+  const content = messages.length === 1 && Array.isArray(messages[0].content)
+    ? messages[0].content as Record<string, unknown>[]
+    : [];
+  const image = content.find((part) => part.type === "input_image");
+  if (image) image.detail = "auto";
+  return request;
+}
 
 export type ZenResponsesRedirectDisposition =
   | "direct_canonical"
@@ -60,10 +85,17 @@ export type ZenResponsesTransportReceipt = Omit<BaseZenResponsesTransportReceipt
   redirectHostFingerprint?: string | null;
   redirectPathFingerprint?: string | null;
   finalEndpointClass?: ZenResponsesRedirectReceipt["finalEndpointClass"];
+  visionRequestReceipt?: ZenVisionRequestReceipt | null;
+  providerOutputClass?: ZenVisionProviderOutputClass | null;
+  fixtureRecognitionBoolean?: boolean | null;
 };
 
 type RequestInput = Parameters<typeof requestZenResponsesBase>[0];
-type RedirectedTransportReceipt = Omit<BaseZenResponsesTransportReceipt, "redirectMode"> & ZenResponsesRedirectReceipt;
+type RedirectedTransportReceipt = Omit<BaseZenResponsesTransportReceipt, "redirectMode"> & ZenResponsesRedirectReceipt & {
+  visionRequestReceipt?: ZenVisionRequestReceipt | null;
+  providerOutputClass?: ZenVisionProviderOutputClass | null;
+  fixtureRecognitionBoolean?: boolean | null;
+};
 type RequestResult = Omit<Awaited<ReturnType<typeof requestZenResponsesBase>>, "transportReceipt"> & {
   transportReceipt: ZenResponsesTransportReceipt;
 };
@@ -93,6 +125,7 @@ type RedirectTrace = {
   path: string | null;
   finalEndpointClass: ZenResponsesRedirectReceipt["finalEndpointClass"];
   failure: RedirectFailure | null;
+  providerErrorClass: "invalid_image_payload" | "explicit_multimodal_unsupported" | null;
 };
 
 function initialTrace(): RedirectTrace {
@@ -107,6 +140,7 @@ function initialTrace(): RedirectTrace {
     path: "/zen/v1/responses",
     finalEndpointClass: "documented_canonical",
     failure: null,
+    providerErrorClass: null,
   };
 }
 
@@ -360,6 +394,22 @@ function createBoundedZenResponsesRedirectFetchInternal(
         trace.hopCount = hop;
         trace.finalEndpointClass = endpointClass(current.pathname);
         if (hop > 0) trace.disposition = "accepted_bounded_redirect";
+        if (!response.ok && /application\/json/i.test(response.headers.get("content-type") ?? "")) {
+          const declared = Number(response.headers.get("content-length"));
+          if (!Number.isFinite(declared) || declared <= ZEN_RESPONSES_PROVIDER_ERROR_INSPECTION_MAX_BYTES) {
+            try {
+              const bytes = new Uint8Array(await response.clone().arrayBuffer());
+              if (bytes.byteLength <= ZEN_RESPONSES_PROVIDER_ERROR_INSPECTION_MAX_BYTES) {
+                const parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
+                if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                  trace.providerErrorClass = classifyZenVisionProviderError(parsed as Record<string, unknown>);
+                }
+              }
+            } catch {
+              trace.providerErrorClass = null;
+            }
+          }
+        }
         return response;
       }
 
@@ -456,6 +506,10 @@ function selectUnderlyingFetch(input: RequestInput): FetchFunction | null {
 }
 
 export async function requestZenResponses(input: RequestInput): Promise<RequestResult> {
+  const stage = input.context.split(":").pop() ?? "";
+  const visionRequestReceipt = stage.startsWith("vision_")
+    ? await inspectZenVisionRequest(input.body, syntheticVisionProbeJpegBytes())
+    : null;
   const underlyingFetch = selectUnderlyingFetch(input);
   if (!underlyingFetch) return requestZenResponsesBase(input);
 
@@ -464,12 +518,24 @@ export async function requestZenResponses(input: RequestInput): Promise<RequestR
 
   try {
     const result = await requestZenResponsesBase({ ...input, fetchImpl: boundedFetch });
-    const patched = await redirectReceipt(result.transportReceipt, trace);
+    const providerOutputClass = visionRequestReceipt ? classifyZenVisionProviderText(result.text) : null;
+    const patched = {
+      ...await redirectReceipt(result.transportReceipt, trace),
+      visionRequestReceipt,
+      providerOutputClass,
+      fixtureRecognitionBoolean: providerOutputClass === null ? null : providerOutputClass === "fixture_recognized",
+    } satisfies RedirectedTransportReceipt;
     await persistRedirectReceipt(input, patched);
+    if (visionRequestReceipt) assertZenVisionFixtureRecognition(result.text);
     return { ...result, transportReceipt: patched };
   } catch (error) {
     if (!isZenResponsesTransportError(error)) throw error;
-    const patched = await redirectReceipt(error.receipt, trace);
+    const patched = {
+      ...await redirectReceipt(error.receipt, trace),
+      visionRequestReceipt,
+      providerOutputClass: null,
+      fixtureRecognitionBoolean: null,
+    } satisfies RedirectedTransportReceipt;
 
     if (trace.failure) {
       const failed = {
@@ -487,6 +553,18 @@ export async function requestZenResponses(input: RequestInput): Promise<RequestR
         failed as unknown as BaseZenResponsesTransportReceipt,
         { retryable: false },
       );
+    }
+
+    if (error.code === "zen_responses_http_error" && trace.providerErrorClass) {
+      const code = trace.providerErrorClass === "invalid_image_payload"
+        ? "provider_invalid_image_payload"
+        : "provider_multimodal_unsupported";
+      const message = trace.providerErrorClass === "invalid_image_payload"
+        ? "The provider rejected the image payload as invalid."
+        : "The provider explicitly rejected multimodal image input as unsupported.";
+      const remapped = { ...patched, localErrorCode: code, localErrorClass: code } satisfies RedirectedTransportReceipt;
+      await persistRedirectReceiptBestEffort(input, remapped);
+      throw new ZenResponsesTransportError(code, message, remapped as unknown as BaseZenResponsesTransportReceipt, { retryable: false, status: error.status });
     }
 
     Object.assign(error.receipt as object, patched);
