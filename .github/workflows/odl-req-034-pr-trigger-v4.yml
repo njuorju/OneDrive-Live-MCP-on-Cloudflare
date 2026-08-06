@@ -1,0 +1,68 @@
+name: ODL-REQ-034 repair trigger v4
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  apply-repair:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+      - name: Extract and apply bounded patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python <<'PY'
+          from pathlib import Path
+          lines = Path('.github/workflows/odl-req-034-bootstrap.yml').read_text(encoding='utf-8').splitlines()
+          start = lines.index("          python <<'PY'") + 1
+          end = lines.index('          PY', start)
+          patch_lines = []
+          for line in lines[start:end]:
+              if line and not line.startswith('          '):
+                  raise SystemExit('unexpected bootstrap indentation')
+              patch_lines.append(line[10:] if line else '')
+          patch = '\n'.join(patch_lines) + '\n'
+          old = """if source.count(request_anchor) != 1:
+              raise SystemExit('capability request anchor mismatch')
+          source = source.replace(request_anchor, request_replacement, 1)
+          """.replace('          ', '')
+          new = """image_anchor = '      const imageDataUrl = fixture ? buildBoundedZenVisionDataUrl(fixture) : undefined;\\n'
+          if source.count(image_anchor) != 1:
+              raise SystemExit('capability image anchor mismatch')
+          source = source.replace(image_anchor, image_anchor + '      const maxOutputTokens = zenResponsesCapabilityOutputCeiling(stage);\\n', 1)
+          for literal in ('maxOutputTokens: 128', 'maxOutputTokens: 256', 'maxOutputTokens: 320'):
+              if source.count(literal) != 1:
+                  raise SystemExit(f'capability token literal mismatch: {literal}')
+              source = source.replace(literal, 'maxOutputTokens', 1)
+          """.replace('          ', '')
+          if patch.count(old) != 1:
+              raise SystemExit('bootstrap request replacement block mismatch')
+          Path('/tmp/odl_req_034_patch.py').write_text(patch.replace(old, new, 1), encoding='utf-8')
+          PY
+          python /tmp/odl_req_034_patch.py
+          rm .github/workflows/odl-req-034-bootstrap.yml
+          rm .github/workflows/odl-req-034-pr-trigger.yml
+          rm .github/workflows/odl-req-034-pr-trigger-v2.yml
+          rm .github/workflows/odl-req-034-pr-trigger-v3.yml
+          rm .github/workflows/odl-req-034-pr-trigger-v4.yml
+          git diff --check
+          git add -A
+          test "$(git diff --cached origin/main --name-only | sort | tr '\n' ' ')" = "src/visual-classifier-capability-output-ceilings.ts src/visual-classifier-capability-zen-responses.ts test/visual-catalogue-zen-responses-odl033.test.ts test/visual-catalogue-zen-responses-odl034.test.ts "
+      - name: Commit bounded repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix: raise bounded Luna vision output ceilings"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
