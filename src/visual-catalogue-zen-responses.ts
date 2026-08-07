@@ -1,5 +1,6 @@
 export * from "./visual-catalogue-zen-responses-base";
 
+import { ConnectorError } from "./errors";
 import {
   ZEN_RESPONSES_ENDPOINT,
   ZEN_RESPONSES_MODEL,
@@ -15,9 +16,11 @@ import {
   assertZenVisionFixtureRecognition,
   classifyZenVisionProviderError,
   classifyZenVisionProviderText,
+  inspectZenVisionProviderText,
   inspectZenVisionRequest,
   type ZenVisionProviderOutputClass,
   type ZenVisionRequestReceipt,
+  type ZenVisionSemanticReceipt,
 } from "./visual-zen-responses-vision";
 
 // Compatibility-visible base invariants remain MAX_RESPONSE_BYTES = 64 * 1024
@@ -180,6 +183,7 @@ type RedirectedTransportReceipt = Omit<BaseZenResponsesTransportReceipt, "redire
 };
 type RequestResult = Omit<Awaited<ReturnType<typeof requestZenResponsesBase>>, "transportReceipt"> & {
   transportReceipt: ZenResponsesTransportReceipt;
+  visionSemanticReceipt?: ZenVisionSemanticReceipt | null;
 };
 type FetchFunction = typeof fetch;
 
@@ -608,6 +612,15 @@ export async function requestZenResponses(input: RequestInput): Promise<RequestR
 
   try {
     const result = await requestZenResponsesBase({ ...input, fetchImpl: boundedFetch });
+    const visionSemanticReceipt = visionRequestReceipt
+      ? await inspectZenVisionProviderText(result.text, {
+        completionStatus: trace.completionEvidence.completionStatus,
+        requestedOutputCeiling: trace.completionEvidence.requestedMaxOutputTokens,
+        reportedOutputTokens: trace.completionEvidence.reportedOutputTokens,
+        outputTokensReachedRequestedCeiling: trace.completionEvidence.outputTokensReachedRequestedCeiling,
+        partialOutputPresent: trace.completionEvidence.partialOutputTextPresent,
+      })
+      : null;
     const providerOutputClass = visionRequestReceipt ? classifyZenVisionProviderText(result.text) : null;
     const patched = {
       ...await redirectReceipt(result.transportReceipt, trace),
@@ -616,8 +629,27 @@ export async function requestZenResponses(input: RequestInput): Promise<RequestR
       fixtureRecognitionBoolean: providerOutputClass === null ? null : providerOutputClass === "fixture_recognized",
     } satisfies RedirectedTransportReceipt;
     await persistRedirectReceipt(input, patched);
-    if (visionRequestReceipt) assertZenVisionFixtureRecognition(result.text);
-    return { ...result, transportReceipt: patched };
+    if (visionSemanticReceipt) {
+      try {
+        assertZenVisionFixtureRecognition(visionSemanticReceipt);
+      } catch (error) {
+        if (!(error instanceof ConnectorError)) throw error;
+        throw new ConnectorError(error.code, error.message, {
+          retryable: error.retryable,
+          status: result.status,
+          correlationId: patched.correlationId,
+          details: {
+            transportReceipt: patched,
+            visionSemanticReceipt,
+            structuralReceipt: result.structuralReceipt,
+            usage: result.usage,
+            accounting: result.accounting,
+            httpStatus: result.status,
+          },
+        });
+      }
+    }
+    return { ...result, transportReceipt: patched, visionSemanticReceipt };
   } catch (error) {
     if (!isZenResponsesTransportError(error)) throw error;
     const patched = {
