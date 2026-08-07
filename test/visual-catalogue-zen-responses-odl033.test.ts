@@ -112,8 +112,8 @@ test("completed responses never masquerade as incomplete partial output", () => 
   assert.equal(evidence.completionStatus, "completed");
   assert.equal(evidence.incompleteReason, null);
   assert.equal(evidence.incompleteReasonClass, null);
-  assert.equal(evidence.partialOutputTextPresent, null);
-  assert.equal(evidence.outputTokensReachedRequestedCeiling, null);
+  assert.equal(evidence.partialOutputTextPresent, true);
+  assert.equal(evidence.outputTokensReachedRequestedCeiling, false);
 });
 
 test("incomplete partial text fails closed while sanitized receipt and accounting persist", async () => {

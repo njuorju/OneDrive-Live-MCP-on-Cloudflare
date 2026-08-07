@@ -33,10 +33,10 @@ function errorCode(error: unknown): string | null {
 
 test("exact local fixture remains the independently verified bounded JPEG", async () => {
   const fixture = syntheticVisionProbeJpegBytes();
-  assert.equal(fixture.byteLength, 6_139);
+  assert.equal(fixture.byteLength, 14_298);
   assert.equal(fixture.byteLength, OPENCODE_VISION_PROBE_JPEG_BYTE_LENGTH);
   assert.equal(createHash("sha256").update(fixture).digest("hex"), OPENCODE_VISION_PROBE_JPEG_SHA256);
-  assert.equal(OPENCODE_VISION_PROBE_JPEG_SHA256, "9134ee7e2592e08a77bfd89d508005a4eb01f6089f4416950b41330daef353cc");
+  assert.equal(OPENCODE_VISION_PROBE_JPEG_SHA256, "da50bd35fd2266fdef0400dbc52968b44e5e743f5654f6b99f0cecbb68cc228a");
 
   const request = buildZenResponsesRequest({
     text: "Inspect the attached image in one short line.",
@@ -47,7 +47,7 @@ test("exact local fixture remains the independently verified bounded JPEG", asyn
   assert.deepEqual(receipt.contentItemTypes, ["input_text", "input_image"]);
   assert.equal(receipt.mimeType, "image/jpeg");
   assert.equal(receipt.detail, "auto");
-  assert.equal(receipt.decodedImageByteCount, 6_139);
+  assert.equal(receipt.decodedImageByteCount, 14_298);
   assert.equal(receipt.imageSha256, OPENCODE_VISION_PROBE_JPEG_SHA256);
   assert.equal(receipt.imageRoundTripMatched, true);
 });

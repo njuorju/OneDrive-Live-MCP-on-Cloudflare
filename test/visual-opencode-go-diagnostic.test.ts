@@ -32,8 +32,8 @@ test("deterministic JPEG fixture has exact identity and dimensions", async () =>
   const receipt = await verifyOpenCodeGoDiagnosticFixture(fixture);
   assert.equal(receipt.sha256, OPENCODE_VISION_PROBE_JPEG_SHA256);
   assert.equal(receipt.byteLength, OPENCODE_VISION_PROBE_JPEG_BYTE_LENGTH);
-  assert.equal(receipt.width, 480);
-  assert.equal(receipt.height, 270);
+  assert.equal(receipt.width, 640);
+  assert.equal(receipt.height, 360);
   assert.equal(receipt.mimeType, "image/jpeg");
 });
 

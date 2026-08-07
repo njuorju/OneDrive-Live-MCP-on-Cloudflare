@@ -413,12 +413,19 @@ export async function inspectZenVisionProviderText(
   evidence: ZenVisionCompletionEvidence = {},
 ): Promise<ZenVisionSemanticReceipt> {
   const analysis = analyzeZenVisionProviderText(text);
+  const requestedOutputCeiling = Number.isFinite(evidence.requestedOutputCeiling) ? Number(evidence.requestedOutputCeiling) : null;
+  const reportedOutputTokens = Number.isFinite(evidence.reportedOutputTokens) ? Number(evidence.reportedOutputTokens) : null;
+  const outputTokensReachedRequestedCeiling = typeof evidence.outputTokensReachedRequestedCeiling === "boolean"
+    ? evidence.outputTokensReachedRequestedCeiling
+    : requestedOutputCeiling !== null && reportedOutputTokens !== null
+      ? reportedOutputTokens >= requestedOutputCeiling
+      : null;
   return {
     version: 1,
     completionStatus: typeof evidence.completionStatus === "string" ? evidence.completionStatus : null,
-    requestedOutputCeiling: Number.isFinite(evidence.requestedOutputCeiling) ? Number(evidence.requestedOutputCeiling) : null,
-    reportedOutputTokens: Number.isFinite(evidence.reportedOutputTokens) ? Number(evidence.reportedOutputTokens) : null,
-    outputTokensReachedRequestedCeiling: typeof evidence.outputTokensReachedRequestedCeiling === "boolean" ? evidence.outputTokensReachedRequestedCeiling : null,
+    requestedOutputCeiling,
+    reportedOutputTokens,
+    outputTokensReachedRequestedCeiling,
     semanticClass: analysis.semanticClass,
     fixtureRecognitionStatus: analysis.fixtureRecognitionStatus,
     mandatoryFeatureMatchBitmap: analysis.mandatoryFeatureMatchBitmap,
