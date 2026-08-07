@@ -41,6 +41,33 @@ jobs:
           Path('/tmp/odl037_patch.py').write_text(textwrap.dedent(script))
           PY
           python /tmp/odl037_patch.py
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_exact(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one compatibility replacement, found {count}")
+              target.write_text(text.replace(old, new))
+
+          replace_exact(
+              'test/visual-catalogue-zen-responses-odl033.test.ts',
+              '  assert.equal(evidence.partialOutputTextPresent, null);\n  assert.equal(evidence.outputTokensReachedRequestedCeiling, null);',
+              '  assert.equal(evidence.partialOutputTextPresent, true);\n  assert.equal(evidence.outputTokensReachedRequestedCeiling, false);',
+          )
+          replace_exact(
+              'src/visual-classifier-capability-go-diagnostic.ts',
+              'const EXPECTED_FIXTURE_WIDTH = 480;\nconst EXPECTED_FIXTURE_HEIGHT = 270;',
+              'const EXPECTED_FIXTURE_WIDTH = 640;\nconst EXPECTED_FIXTURE_HEIGHT = 360;',
+          )
+          replace_exact(
+              'test/visual-opencode-go-diagnostic.test.ts',
+              '  assert.equal(receipt.width, 480);\n  assert.equal(receipt.height, 270);',
+              '  assert.equal(receipt.width, 640);\n  assert.equal(receipt.height, 360);',
+          )
+          PY
           git diff --check
       - name: Install pinned dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
