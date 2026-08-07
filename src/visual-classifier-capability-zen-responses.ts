@@ -136,6 +136,14 @@ type Manifest = {
 
 type Locator = { version: 1; jobId: string; maxBillableRequests: number; maxEstimatedSpendUsd: number };
 type Payload = { jobId: string; workflowId: string; userId: string; input: Record<string, unknown> };
+type CompletedVisionFailureDetails = {
+  transportReceipt: ZenResponsesTransportReceipt;
+  visionSemanticReceipt: ZenVisionSemanticReceipt;
+  structuralReceipt: ZenResponsesStructuralReceipt;
+  usage: ZenResponsesUsage;
+  accounting: ZenResponsesSpendLedger;
+  httpStatus: number;
+};
 
 function manifestKey(jobId: string): string { return `${PREFIX}/jobs/${jobId}/manifest.json`; }
 function locatorKey(jobId: string): string { return `${PREFIX}/locators/${jobId}.json`; }
@@ -172,6 +180,58 @@ function errorCode(error: unknown): string {
   if (error instanceof ConnectorError) return error.code;
   if (error && typeof error === "object" && typeof (error as Record<string, unknown>).code === "string") return String((error as Record<string, unknown>).code);
   return "provider_capability_failed";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function isBoundedVisionSemanticReceipt(value: unknown): value is ZenVisionSemanticReceipt {
+  if (!isRecord(value) || value.version !== 1) return false;
+  const mandatoryBitmap = value.mandatoryFeatureMatchBitmap;
+  const contradictionBitmap = value.contradictoryFeatureMatchBitmap;
+  if (typeof mandatoryBitmap !== "string" || !/^[01]{3}$/.test(mandatoryBitmap)) return false;
+  if (typeof contradictionBitmap !== "string" || !/^[01]{6}$/.test(contradictionBitmap)) return false;
+  if (!Number.isInteger(value.mandatoryFeatureMatchCount) || value.mandatoryFeatureMatchCount !== [...mandatoryBitmap].filter((bit) => bit === "1").length) return false;
+  if (!Number.isInteger(value.contradictoryFeatureMatchCount) || value.contradictoryFeatureMatchCount !== [...contradictionBitmap].filter((bit) => bit === "1").length) return false;
+  if (!/^[a-f0-9]{64}$/.test(String(value.normalizedOutputSha256 ?? ""))) return false;
+  if (!["recognized", "partly_recognized", "not_recognized"].includes(String(value.fixtureRecognitionStatus ?? ""))) return false;
+  return [
+    value.refusalIndicator,
+    value.genericIndicator,
+    value.imageIgnoredIndicator,
+    value.unsupportedIndicator,
+    value.partialOutputPresent,
+  ].every((entry) => typeof entry === "boolean");
+}
+
+function completedVisionFailureDetails(error: unknown): CompletedVisionFailureDetails | null {
+  if (!(error instanceof ConnectorError) || !isRecord(error.details)) return null;
+  const transportReceipt = error.details.transportReceipt;
+  const visionSemanticReceipt = error.details.visionSemanticReceipt;
+  const structuralReceipt = error.details.structuralReceipt;
+  const usage = error.details.usage;
+  const accounting = error.details.accounting;
+  const httpStatus = error.details.httpStatus;
+  if (!isRecord(transportReceipt)
+    || transportReceipt.endpointClass !== "responses_post"
+    || transportReceipt.fetchBegan !== true
+    || typeof transportReceipt.correlationId !== "string"
+    || !Number.isInteger(transportReceipt.httpStatus)
+    || !Number.isInteger(transportReceipt.responseByteCount)
+    || typeof transportReceipt.redirectDisposition !== "string"
+    || !Number.isInteger(transportReceipt.redirectHopCount)
+    || typeof transportReceipt.finalEndpointClass !== "string") return null;
+  if (!isBoundedVisionSemanticReceipt(visionSemanticReceipt)) return null;
+  if (!isRecord(structuralReceipt) || !isRecord(usage) || !isRecord(accounting) || !Number.isInteger(httpStatus)) return null;
+  return {
+    transportReceipt: transportReceipt as ZenResponsesTransportReceipt,
+    visionSemanticReceipt,
+    structuralReceipt: structuralReceipt as ZenResponsesStructuralReceipt,
+    usage: usage as ZenResponsesUsage,
+    accounting: accounting as ZenResponsesSpendLedger,
+    httpStatus: Number(httpStatus),
+  };
 }
 
 function structuredSchema(): Record<string, unknown> {
@@ -243,7 +303,7 @@ async function runStage(env: Env, manifest: Manifest, stage: CapabilityStage): P
         if (parsed.ok !== true || parsed.probe !== "odl-req-025") throw new ConnectorError("provider_structured_output_unsupported", "The text structured-output stage did not satisfy the exact schema contract.");
         schemaValidationResult = "valid";
       } else if (stage === "vision_unstructured") {
-        visionSemanticReceipt = await inspectZenVisionProviderText(result.text, {
+        visionSemanticReceipt = result.visionSemanticReceipt ?? await inspectZenVisionProviderText(result.text, {
           completionStatus: transportReceipt.completionStatus ?? null,
           requestedOutputCeiling: transportReceipt.requestedMaxOutputTokens ?? null,
           reportedOutputTokens: transportReceipt.reportedOutputTokens ?? null,
@@ -274,6 +334,7 @@ async function runStage(env: Env, manifest: Manifest, stage: CapabilityStage): P
     }
   } catch (error) {
     failure = errorCode(error);
+    const completedVisionFailure = completedVisionFailureDetails(error);
     if (isZenModelsDiscoveryError(error)) {
       discoveryReceipt = error.receipt;
       httpStatus = error.receipt.httpStatus;
@@ -284,6 +345,18 @@ async function runStage(env: Env, manifest: Manifest, stage: CapabilityStage): P
       httpStatus = error.receipt.httpStatus;
       parserResult = error.receipt.parserResult;
       schemaValidationResult = error.receipt.schemaResult;
+    } else if (completedVisionFailure) {
+      transportReceipt = completedVisionFailure.transportReceipt;
+      visionSemanticReceipt = completedVisionFailure.visionSemanticReceipt;
+      structuralReceipt = completedVisionFailure.structuralReceipt;
+      usage = completedVisionFailure.usage;
+      accounting = completedVisionFailure.accounting;
+      httpStatus = completedVisionFailure.httpStatus;
+      parserResult = completedVisionFailure.transportReceipt.parserResult;
+      schemaValidationResult = failure === "provider_visual_fixture_mismatch" ? "visual_fixture_mismatch" : "failed";
+      visionRequestReceipt = completedVisionFailure.transportReceipt.visionRequestReceipt ?? visionRequestReceipt;
+      providerOutputClass = completedVisionFailure.transportReceipt.providerOutputClass ?? providerOutputClass;
+      fixtureRecognitionBoolean = completedVisionFailure.transportReceipt.fixtureRecognitionBoolean ?? fixtureRecognitionBoolean;
     } else {
       parserResult = parserResult === "not_run" ? "stage_failed" : parserResult;
       schemaValidationResult = schemaValidationResult === "not_run" ? "failed" : schemaValidationResult;
@@ -304,6 +377,30 @@ function blocker(manifest: Manifest): string | null {
   const failed = manifest.attempts.find((attempt) => attempt.status === "failed");
   if (!failed) return null;
   return failed.errorCode === "zen_model_exact_id_absent" ? "opencode_zen_gpt_5_6_luna_unavailable" : failed.errorCode ?? "opencode_zen_responses_capability_failed";
+}
+
+export function projectZenResponsesCapabilityAttempt(attempt: ZenResponsesCapabilityAttempt) {
+  return {
+    attemptNumber: attempt.attemptNumber,
+    stage: attempt.stage,
+    status: attempt.status,
+    httpStatus: attempt.httpStatus,
+    latencyMilliseconds: attempt.latencyMilliseconds,
+    parserResult: attempt.parserResult,
+    schemaValidationResult: attempt.schemaValidationResult,
+    structuralReceipt: attempt.structuralReceipt,
+    transportReceipt: attempt.transportReceipt ?? null,
+    discoveryReceipt: attempt.discoveryReceipt ?? null,
+    usage: attempt.usage ?? null,
+    errorCode: attempt.errorCode,
+    requestImageSha256: attempt.requestImageSha256,
+    requestImageByteSize: attempt.requestImageByteSize,
+    requestImageMimeType: attempt.requestImageMimeType,
+    visionRequestReceipt: attempt.visionRequestReceipt,
+    providerOutputClass: attempt.providerOutputClass,
+    fixtureRecognitionBoolean: attempt.fixtureRecognitionBoolean,
+    visionSemanticReceipt: attempt.visionSemanticReceipt,
+  };
 }
 
 export function isZenResponsesCapabilityWorkflowPayload(payload: { input?: Record<string, unknown> } | undefined): boolean {
@@ -405,7 +502,7 @@ export async function getZenResponsesCapabilityJob(context: HotfixContext, jobId
   const manifest = await readJson<Manifest>(context.env, manifestKey(jobId));
   if (!manifest) return null;
   const accounting = await readZenResponsesSpendLedger(context.env, manifest.spendLedgerKey);
-  return textResult({ jobId, workflowId: manifest.workflowId, status: manifest.status, currentStage: manifest.currentStage, provider: ZEN_RESPONSES_PROVIDER, mode: ZEN_RESPONSES_MODE, model: ZEN_RESPONSES_MODEL, endpointFamily: ZEN_RESPONSES_ENDPOINT_FAMILY, probeVersion: ZEN_RESPONSES_PROBE_VERSION, credentialBindingName: ZEN_RESPONSES_CREDENTIAL_BINDING, stageResults: manifest.stageResults, attemptHistorySummary: manifest.attempts.map((attempt) => ({ attemptNumber: attempt.attemptNumber, stage: attempt.stage, status: attempt.status, httpStatus: attempt.httpStatus, latencyMilliseconds: attempt.latencyMilliseconds, parserResult: attempt.parserResult, schemaValidationResult: attempt.schemaValidationResult, structuralReceipt: attempt.structuralReceipt, transportReceipt: attempt.transportReceipt ?? null, discoveryReceipt: attempt.discoveryReceipt ?? null, errorCode: attempt.errorCode })), accounting, terminalReceipt: manifest.terminalReceipt, privateUrlsReturned: false, secretValuesReturned: false, generatedContentReturned: false, oneDriveMutationPerformed: false });
+  return textResult({ jobId, workflowId: manifest.workflowId, status: manifest.status, currentStage: manifest.currentStage, provider: ZEN_RESPONSES_PROVIDER, mode: ZEN_RESPONSES_MODE, model: ZEN_RESPONSES_MODEL, endpointFamily: ZEN_RESPONSES_ENDPOINT_FAMILY, probeVersion: ZEN_RESPONSES_PROBE_VERSION, credentialBindingName: ZEN_RESPONSES_CREDENTIAL_BINDING, stageResults: manifest.stageResults, attemptHistorySummary: manifest.attempts.map(projectZenResponsesCapabilityAttempt), accounting, terminalReceipt: manifest.terminalReceipt, privateUrlsReturned: false, secretValuesReturned: false, generatedContentReturned: false, oneDriveMutationPerformed: false });
 }
 
 export async function readSuccessfulZenResponsesCapabilityReceipt(env: Env, expected: { maxBillableRequests?: number; maxEstimatedSpendUsd?: number }): Promise<ZenResponsesCapabilityReceipt | null> {
