@@ -1,0 +1,131 @@
+name: ODL-REQ-037 branch repair
+
+on:
+  push:
+    branches:
+      - fix/odl-req-037-visual-fixture-receipt-nulls
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
+          cache: npm
+      - name: Generate deterministic clean JPEG fixture
+        shell: bash
+        run: |
+          if command -v magick >/dev/null 2>&1; then
+            IM=magick
+          elif command -v convert >/dev/null 2>&1; then
+            IM=convert
+          else
+            echo "ImageMagick is unavailable" >&2
+            exit 1
+          fi
+          "$IM" -size 640x360 xc:white \
+            -fill '#075FE4' -draw 'rectangle 70,55 210,195' \
+            -fill '#E71925' -draw 'circle 500,125 570,125' \
+            -font DejaVu-Sans-Bold -pointsize 44 -fill '#050505' \
+            -gravity South -annotate +0+50 'UCA VISION PROBE 2047' \
+            -strip -sampling-factor 4:4:4 -quality 90 \
+            /tmp/odl037-fixture.jpg
+          identify /tmp/odl037-fixture.jpg
+      - name: Apply bounded ODL-REQ-037 repair
+        shell: bash
+        run: |
+          cat > /tmp/odl037_patch.py <<'PY'
+          from pathlib import Path
+          import base64, hashlib
+          
+          def replace_exact(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one replacement, found {count}")
+              target.write_text(text.replace(old, new))
+          
+          fixture_bytes = Path("/tmp/odl037-fixture.jpg").read_bytes()
+          fixture_sha = hashlib.sha256(fixture_bytes).hexdigest()
+          fixture_length = len(fixture_bytes)
+          fixture_base64 = base64.b64encode(fixture_bytes).decode()
+          fixture_source = f"""export const OPENCODE_VISION_PROBE_JPEG_SHA256 = "{fixture_sha}";
+          export const OPENCODE_VISION_PROBE_JPEG_BYTE_LENGTH = {fixture_length};
+          export const OPENCODE_VISION_PROBE_JPEG_WIDTH = 640;
+          export const OPENCODE_VISION_PROBE_JPEG_HEIGHT = 360;
+          const OPENCODE_VISION_PROBE_JPEG_BASE64 = "{fixture_base64}";
+          
+          export function syntheticVisionProbeJpegBytes(): Uint8Array {{
+            const binary = atob(OPENCODE_VISION_PROBE_JPEG_BASE64);
+            const bytes = new Uint8Array(binary.length);
+            for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+            return bytes;
+          }}
+          """
+          Path("src/visual-catalogue-probe-fixture.ts").write_text(fixture_source)
+          
+          replace_exact('src/visual-catalogue-zen-responses.ts', '  const incomplete = completionStatus === "incomplete" || incompleteReason !== null;', '  const completionKnown = completionStatus !== null;')
+          replace_exact('src/visual-catalogue-zen-responses.ts', '    outputTokensReachedRequestedCeiling: incomplete && requested !== null && reportedOutputTokens !== null\n      ? reportedOutputTokens === requested\n      : null,\n    partialOutputTextPresent: incomplete ? outputTextPresent : null,', '    outputTokensReachedRequestedCeiling: requested !== null && reportedOutputTokens !== null\n      ? reportedOutputTokens >= requested\n      : null,\n    partialOutputTextPresent: completionKnown ? outputTextPresent : null,')
+          replace_exact('src/visual-catalogue-zen-responses-base.ts', '  const cachedWriteTokens = boundedInteger(usage.cached_write_tokens ?? inputDetails.cached_write_tokens);\n  const explicitTotalTokens = boundedInteger(usage.total_tokens);\n  const totalTokens = explicitTotalTokens ?? (inputTokens !== null || outputTokens !== null ? (inputTokens ?? 0) + (outputTokens ?? 0) : null);', '  const cachedWriteTokensReported = boundedInteger(usage.cached_write_tokens ?? inputDetails.cached_write_tokens);\n  const explicitTotalTokens = boundedInteger(usage.total_tokens);\n  const usageKnown = inputTokens !== null || outputTokens !== null || cachedReadTokens !== null || explicitTotalTokens !== null;\n  const cachedWriteTokens = cachedWriteTokensReported ?? (usageKnown ? 0 : null);\n  const totalTokens = explicitTotalTokens ?? (inputTokens !== null || outputTokens !== null ? (inputTokens ?? 0) + (outputTokens ?? 0) : null);')
+          replace_exact('src/visual-zen-responses-vision.ts', '  const analysis = analyzeZenVisionProviderText(text);\n  return {\n    version: 1,\n    completionStatus: typeof evidence.completionStatus === "string" ? evidence.completionStatus : null,\n    requestedOutputCeiling: Number.isFinite(evidence.requestedOutputCeiling) ? Number(evidence.requestedOutputCeiling) : null,\n    reportedOutputTokens: Number.isFinite(evidence.reportedOutputTokens) ? Number(evidence.reportedOutputTokens) : null,\n    outputTokensReachedRequestedCeiling: typeof evidence.outputTokensReachedRequestedCeiling === "boolean" ? evidence.outputTokensReachedRequestedCeiling : null,', '  const analysis = analyzeZenVisionProviderText(text);\n  const requestedOutputCeiling = Number.isFinite(evidence.requestedOutputCeiling) ? Number(evidence.requestedOutputCeiling) : null;\n  const reportedOutputTokens = Number.isFinite(evidence.reportedOutputTokens) ? Number(evidence.reportedOutputTokens) : null;\n  const outputTokensReachedRequestedCeiling = typeof evidence.outputTokensReachedRequestedCeiling === "boolean"\n    ? evidence.outputTokensReachedRequestedCeiling\n    : requestedOutputCeiling !== null && reportedOutputTokens !== null\n      ? reportedOutputTokens >= requestedOutputCeiling\n      : null;\n  return {\n    version: 1,\n    completionStatus: typeof evidence.completionStatus === "string" ? evidence.completionStatus : null,\n    requestedOutputCeiling,\n    reportedOutputTokens,\n    outputTokensReachedRequestedCeiling,')
+          replace_exact('test/visual-catalogue-zen-responses-odl036.test.ts', '  assert.equal(result.transportReceipt.reportedOutputTokens, 48);\n  assert.equal(result.visionSemanticReceipt?.fixtureRecognitionStatus, "recognized");', '  assert.equal(result.transportReceipt.reportedOutputTokens, 48);\n  assert.equal(result.transportReceipt.outputTokensReachedRequestedCeiling, false);\n  assert.equal(result.transportReceipt.partialOutputTextPresent, true);\n  assert.equal(result.usage.cachedWriteTokens, 0);\n  assert.equal(result.visionSemanticReceipt?.fixtureRecognitionStatus, "recognized");')
+          replace_exact('test/visual-catalogue-zen-responses-odl036.test.ts', '  assert.equal(transport.reportedOutputTokens, 419);\n  assert.equal(transport.providerOutputClass, "fixture_recognition_failed");', '  assert.equal(transport.reportedOutputTokens, 419);\n  assert.equal(transport.outputTokensReachedRequestedCeiling, false);\n  assert.equal(transport.partialOutputTextPresent, true);\n  assert.equal(details.usage.cachedWriteTokens, 0);\n  assert.equal(transport.providerOutputClass, "fixture_recognition_failed");')
+          
+          for path in [
+              Path("test/visual-catalogue-zen-responses-odl035.test.ts"),
+              Path("test/visual-catalogue-zen-responses-odl036.test.ts"),
+          ]:
+              text = path.read_text()
+              text = text.replace("9134ee7e2592e08a77bfd89d508005a4eb01f6089f4416950b41330daef353cc", fixture_sha)
+              text = text.replace("6_139", f"{fixture_length:_}")
+              path.write_text(text)
+          
+          test_source = 'import test from "node:test";\nimport assert from "node:assert/strict";\nimport { createHash } from "node:crypto";\nimport { readFile } from "node:fs/promises";\nimport {\n  ZEN_VISION_MANDATORY_FEATURE_ORDER,\n  assertZenVisionFixtureRecognition,\n  inspectZenVisionProviderText,\n} from "../src/visual-zen-responses-vision";\nimport {\n  OPENCODE_VISION_PROBE_JPEG_BYTE_LENGTH,\n  OPENCODE_VISION_PROBE_JPEG_HEIGHT,\n  OPENCODE_VISION_PROBE_JPEG_SHA256,\n  OPENCODE_VISION_PROBE_JPEG_WIDTH,\n  syntheticVisionProbeJpegBytes,\n} from "../src/visual-catalogue-probe-fixture";\nimport {\n  inspectZenResponsesCompletionEnvelope,\n} from "../src/visual-catalogue-zen-responses";\nimport {\n  parseZenResponsesUsage,\n} from "../src/visual-catalogue-zen-responses-base";\n\nfunction jpegMetadata(bytes: Uint8Array): {\n  width: number;\n  height: number;\n  comments: number;\n  exifSegments: number;\n} {\n  assert.equal(bytes[0], 0xff);\n  assert.equal(bytes[1], 0xd8);\n  let offset = 2;\n  let width = 0;\n  let height = 0;\n  let comments = 0;\n  let exifSegments = 0;\n  while (offset + 3 < bytes.length) {\n    if (bytes[offset] !== 0xff) {\n      offset += 1;\n      continue;\n    }\n    while (offset < bytes.length && bytes[offset] === 0xff) offset += 1;\n    const marker = bytes[offset];\n    offset += 1;\n    if (marker === 0xd9 || marker === 0xda) break;\n    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;\n    const length = (bytes[offset] << 8) | bytes[offset + 1];\n    assert.ok(length >= 2);\n    if (marker === 0xfe) comments += 1;\n    if (marker === 0xe1) exifSegments += 1;\n    if ([0xc0, 0xc1, 0xc2].includes(marker)) {\n      height = (bytes[offset + 3] << 8) | bytes[offset + 4];\n      width = (bytes[offset + 5] << 8) | bytes[offset + 6];\n    }\n    offset += length;\n  }\n  return { width, height, comments, exifSegments };\n}\n\ntest("mandatory feature order maps fresh bitmap 110 to the exact missing label", async () => {\n  assert.deepEqual([...ZEN_VISION_MANDATORY_FEATURE_ORDER], [\n    "blue_square",\n    "red_circle",\n    "visible_label",\n  ]);\n  const bitmap = "110";\n  const missing = [...bitmap]\n    .map((bit, index) => bit === "0" ? ZEN_VISION_MANDATORY_FEATURE_ORDER[index] : null)\n    .filter((value): value is (typeof ZEN_VISION_MANDATORY_FEATURE_ORDER)[number] => value !== null);\n  assert.deepEqual(missing, ["visible_label"]);\n\n  const receipt = await inspectZenVisionProviderText(\n    "Blue square on the left; red circle on the right.",\n    {\n      completionStatus: "completed",\n      requestedOutputCeiling: 1024,\n      reportedOutputTokens: 544,\n    },\n  );\n  assert.equal(receipt.mandatoryFeatureMatchBitmap, "110");\n  assert.equal(receipt.mandatoryFeatureMatchCount, 2);\n  assert.equal(receipt.fixtureRecognitionStatus, "partly_recognized");\n  assert.equal(receipt.outputTokensReachedRequestedCeiling, false);\n  assert.throws(\n    () => assertZenVisionFixtureRecognition(receipt),\n    (error: unknown) => Boolean(\n      error\n      && typeof error === "object"\n      && (error as Record<string, unknown>).code === "provider_visual_fixture_mismatch"\n    ),\n  );\n});\n\ntest("replacement JPEG is the exact reviewed single-label landscape fixture without metadata leakage", () => {\n  const fixture = syntheticVisionProbeJpegBytes();\n  assert.equal(fixture.byteLength, __FIXTURE_LENGTH_UNDERSCORE__);\n  assert.equal(fixture.byteLength, OPENCODE_VISION_PROBE_JPEG_BYTE_LENGTH);\n  assert.equal(createHash("sha256").update(fixture).digest("hex"), OPENCODE_VISION_PROBE_JPEG_SHA256);\n  assert.equal(OPENCODE_VISION_PROBE_JPEG_SHA256, "__FIXTURE_SHA256__");\n\n  const metadata = jpegMetadata(fixture);\n  assert.deepEqual(metadata, {\n    width: 640,\n    height: 360,\n    comments: 0,\n    exifSegments: 0,\n  });\n  assert.equal(metadata.width, OPENCODE_VISION_PROBE_JPEG_WIDTH);\n  assert.equal(metadata.height, OPENCODE_VISION_PROBE_JPEG_HEIGHT);\n  assert.equal(fixture[fixture.length - 2], 0xff);\n  assert.equal(fixture[fixture.length - 1], 0xd9);\n\n  const binaryText = Buffer.from(fixture).toString("latin1");\n  assert.doesNotMatch(binaryText, /UCA VISION PROBE 2047|blue square|red circle/i);\n});\n\ntest("probe prompt remains answer-blind while explicitly requesting every mandatory category", async () => {\n  const source = await readFile(new URL("../src/visual-classifier-capability-zen-responses.ts", import.meta.url), "utf8");\n  const match = source.match(/export const ZEN_VISION_UNSTRUCTURED_PROBE_PROMPT = "([^"]+)";/);\n  assert.ok(match);\n  const prompt = match[1];\n  assert.match(prompt, /colored geometric shape/i);\n  assert.match(prompt, /left\\/right position/i);\n  assert.match(prompt, /uppercase label/i);\n  assert.doesNotMatch(prompt, /\\b(?:blue|red|square|circle|2047)\\b|uca vision probe/i);\n});\n\ntest("completed output deterministically normalizes ceiling and partial-text booleans", () => {\n  const completed = inspectZenResponsesCompletionEnvelope({\n    status: "completed",\n    output: [{\n      type: "message",\n      role: "assistant",\n      content: [{ type: "output_text", text: "bounded parsed output" }],\n    }],\n    usage: { output_tokens: 544 },\n  }, 1024);\n  assert.equal(completed.outputTokensReachedRequestedCeiling, false);\n  assert.equal(completed.partialOutputTextPresent, true);\n\n  const completedEmpty = inspectZenResponsesCompletionEnvelope({\n    status: "completed",\n    output: [],\n    usage: { output_tokens: 0 },\n  }, 1024);\n  assert.equal(completedEmpty.outputTokensReachedRequestedCeiling, false);\n  assert.equal(completedEmpty.partialOutputTextPresent, false);\n\n  const unknown = inspectZenResponsesCompletionEnvelope({}, 1024);\n  assert.equal(unknown.outputTokensReachedRequestedCeiling, null);\n  assert.equal(unknown.partialOutputTextPresent, null);\n});\n\ntest("cached-write normalization preserves absent usage versus known zero usage", () => {\n  const known = parseZenResponsesUsage({\n    usage: {\n      input_tokens: 182,\n      output_tokens: 544,\n      total_tokens: 726,\n      input_tokens_details: { cached_tokens: 0 },\n    },\n  });\n  assert.equal(known.cachedWriteTokens, 0);\n  assert.equal(known.reported, true);\n\n  const explicit = parseZenResponsesUsage({\n    usage: {\n      input_tokens: 182,\n      output_tokens: 544,\n      cached_write_tokens: 7,\n    },\n  });\n  assert.equal(explicit.cachedWriteTokens, 7);\n\n  const emptyUsage = parseZenResponsesUsage({ usage: {} });\n  assert.equal(emptyUsage.cachedWriteTokens, null);\n  assert.equal(emptyUsage.reported, false);\n\n  const absentUsage = parseZenResponsesUsage({});\n  assert.equal(absentUsage.cachedWriteTokens, null);\n  assert.equal(absentUsage.reported, false);\n});\n\ntest("ODL-REQ-037 leaves capability output ceilings and fail-closed policy untouched", async () => {\n  const ceilingSource = await readFile(new URL("../src/visual-classifier-capability-output-ceilings.ts", import.meta.url), "utf8");\n  assert.match(ceilingSource, /text_structured_output:\\s*128/);\n  assert.match(ceilingSource, /vision_unstructured:\\s*1024/);\n  assert.match(ceilingSource, /vision_structured_output:\\s*1024/);\n\n  const capabilitySource = await readFile(new URL("../src/visual-classifier-capability-zen-responses.ts", import.meta.url), "utf8");\n  assert.match(capabilitySource, /retries:\\s*\\{\\s*limit:\\s*0/);\n  assert.doesNotMatch(capabilitySource, /2\\s*(?:of|\\/)\\s*3|mandatoryFeatureMatchCount\\s*>=\\s*2/i);\n});\n'
+          test_source = test_source.replace("__FIXTURE_SHA256__", fixture_sha)
+          test_source = test_source.replace("__FIXTURE_LENGTH_UNDERSCORE__", f"{fixture_length:_}")
+          Path("test/visual-catalogue-zen-responses-odl037.test.ts").write_text(test_source)
+          
+          for path in Path(".").rglob("*.ts"):
+              text = path.read_text()
+              if "9134ee7e2592e08a77bfd89d508005a4eb01f6089f4416950b41330daef353cc" in text:
+                  raise SystemExit(f"stale fixture hash remains in {path}")
+          PY
+          python /tmp/odl037_patch.py
+          git diff --check
+      - name: Install pinned dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+      - name: Type check
+        run: npm run type-check
+      - name: Complete test suite
+        run: npm test
+      - name: Production dependency audit
+        run: npm audit --audit-level=high --omit=dev
+      - name: Exact Worker dry-run bundle
+        shell: bash
+        run: |
+          cp wrangler.jsonc wrangler.ci.jsonc
+          sed -i 's/REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER/CI_TEST_ROOT/g' wrangler.ci.jsonc
+          sed -i 's/REPLACE_WITH_KV_NAMESPACE_ID/00000000000000000000000000000000/g' wrangler.ci.jsonc
+          npx wrangler deploy --dry-run --config wrangler.ci.jsonc --outdir dist-bootstrap
+      - name: Commit bounded repair and remove bootstrap
+        shell: bash
+        run: |
+          rm .github/workflows/odl-req-037-bootstrap.yml
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src test .github/workflows/odl-req-037-bootstrap.yml
+          git commit -m "fix: replace ambiguous vision probe and normalize receipts"
+          git push origin HEAD:${{ github.ref_name }}
