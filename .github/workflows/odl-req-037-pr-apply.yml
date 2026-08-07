@@ -1,0 +1,85 @@
+name: ODL-REQ-037 PR apply
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
+          cache: npm
+      - name: Generate deterministic clean JPEG fixture
+        shell: bash
+        run: |
+          if command -v magick >/dev/null 2>&1; then
+            IM=magick
+          elif command -v convert >/dev/null 2>&1; then
+            IM=convert
+          else
+            echo "ImageMagick is unavailable" >&2
+            exit 1
+          fi
+          "$IM" -size 640x360 xc:white \
+            -fill '#075FE4' -draw 'rectangle 70,55 210,195' \
+            -fill '#E71925' -draw 'circle 500,125 570,125' \
+            -font DejaVu-Sans-Bold -pointsize 44 -fill '#050505' \
+            -gravity South -annotate +0+50 'UCA VISION PROBE 2047' \
+            -strip -sampling-factor 4:4:4 -quality 90 \
+            /tmp/odl037-fixture.jpg
+          identify /tmp/odl037-fixture.jpg
+      - name: Extract and apply bounded repair script
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import textwrap
+          source = Path('.github/workflows/odl-req-037-bootstrap.yml').read_text()
+          marker = "cat > /tmp/odl037_patch.py <<'PY'\n"
+          script = source.split(marker, 1)[1].split("\n          PY\n", 1)[0]
+          Path('/tmp/odl037_patch.py').write_text(textwrap.dedent(script))
+          PY
+          python /tmp/odl037_patch.py
+          git diff --check
+      - name: Install pinned dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+      - name: Type check
+        run: npm run type-check
+      - name: Complete test suite
+        run: npm test
+      - name: Production dependency audit
+        run: npm audit --audit-level=high --omit=dev
+      - name: Exact Worker dry-run bundle
+        shell: bash
+        run: |
+          cp wrangler.jsonc wrangler.ci.jsonc
+          sed -i 's/REPLACE_WITH_ALLOWED_ONEDRIVE_FOLDER/CI_TEST_ROOT/g' wrangler.ci.jsonc
+          sed -i 's/REPLACE_WITH_KV_NAMESPACE_ID/00000000000000000000000000000000/g' wrangler.ci.jsonc
+          npx wrangler deploy --dry-run --config wrangler.ci.jsonc --outdir dist-bootstrap
+      - name: Commit bounded repair and remove bootstrap residue
+        shell: bash
+        run: |
+          rm .github/workflows/odl-req-037-bootstrap.yml
+          rm .github/workflows/odl-req-037-pr-apply.yml
+          rm .github/odl-req-037-trigger
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src test .github
+          git commit -m "fix: replace ambiguous vision probe and normalize receipts"
+          git push origin HEAD:${{ github.head_ref }}
