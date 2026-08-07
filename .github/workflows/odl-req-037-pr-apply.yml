@@ -22,25 +22,20 @@ jobs:
         with:
           node-version: "22.18.0"
           cache: npm
-      - name: Generate deterministic clean JPEG fixture
+      - name: Restore the exact reviewed JPEG fixture bytes
         shell: bash
         run: |
-          if command -v magick >/dev/null 2>&1; then
-            IM=magick
-          elif command -v convert >/dev/null 2>&1; then
-            IM=convert
-          else
-            echo "ImageMagick is unavailable" >&2
-            exit 1
-          fi
-          "$IM" -size 640x360 xc:white \
-            -fill '#075FE4' -draw 'rectangle 70,55 210,195' \
-            -fill '#E71925' -draw 'circle 500,125 570,125' \
-            -font DejaVu-Sans-Bold -pointsize 44 -fill '#050505' \
-            -gravity South -annotate +0+50 'UCA VISION PROBE 2047' \
-            -strip -sampling-factor 4:4:4 -quality 90 \
-            /tmp/odl037-fixture.jpg
-          identify /tmp/odl037-fixture.jpg
+          python - <<'PY'
+          from pathlib import Path
+          import base64, re
+          source = Path('src/visual-catalogue-probe-fixture.ts').read_text()
+          match = re.search(r'OPENCODE_VISION_PROBE_JPEG_BASE64 = "([^"]+)";', source)
+          if not match:
+              raise SystemExit('fixture base64 constant was not found')
+          Path('/tmp/odl037-fixture.jpg').write_bytes(base64.b64decode(match.group(1), validate=True))
+          PY
+          file /tmp/odl037-fixture.jpg
+          sha256sum /tmp/odl037-fixture.jpg
       - name: Extract and apply bounded repair script
         shell: bash
         run: |
