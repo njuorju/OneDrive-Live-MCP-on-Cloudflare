@@ -121,6 +121,9 @@ test("completed recognized vision response remains a pass", async () => {
   assert.equal(result.transportReceipt.completionStatus, "completed");
   assert.equal(result.transportReceipt.requestedMaxOutputTokens, 1024);
   assert.equal(result.transportReceipt.reportedOutputTokens, 48);
+  assert.equal(result.transportReceipt.outputTokensReachedRequestedCeiling, false);
+  assert.equal(result.transportReceipt.partialOutputTextPresent, true);
+  assert.equal(result.usage.cachedWriteTokens, 0);
   assert.equal(result.visionSemanticReceipt?.fixtureRecognitionStatus, "recognized");
   assert.equal(result.visionSemanticReceipt?.mandatoryFeatureMatchBitmap, "111");
   assert.equal(result.visionSemanticReceipt?.contradictoryFeatureMatchBitmap, "000000");
@@ -147,6 +150,9 @@ test("completed mismatch attaches exact bounded transport, semantic, and image r
   assert.equal(transport.completionStatus, "completed");
   assert.equal(transport.requestedMaxOutputTokens, 1024);
   assert.equal(transport.reportedOutputTokens, 419);
+  assert.equal(transport.outputTokensReachedRequestedCeiling, false);
+  assert.equal(transport.partialOutputTextPresent, true);
+  assert.equal(details.usage.cachedWriteTokens, 0);
   assert.equal(transport.providerOutputClass, "fixture_recognition_failed");
   assert.equal(transport.fixtureRecognitionBoolean, false);
 
@@ -164,7 +170,7 @@ test("completed mismatch attaches exact bounded transport, semantic, and image r
 
   assert.deepEqual(image.contentItemTypes, ["input_text", "input_image"]);
   assert.equal(image.mimeType, "image/jpeg");
-  assert.equal(image.decodedImageByteCount, 6_139);
+  assert.equal(image.decodedImageByteCount, 14_298);
   assert.equal(image.imageSha256, OPENCODE_VISION_PROBE_JPEG_SHA256);
   assert.equal(image.detail, "auto");
   assert.equal(image.imageRoundTripMatched, true);
@@ -224,7 +230,7 @@ test("failed attempt, terminal JSON, R2 JSON, and public projection preserve rec
   assert.deepEqual(projected.visionRequestReceipt, image);
   assert.equal(projected.errorCode, "provider_visual_fixture_mismatch");
   assert.equal(projected.requestImageSha256, OPENCODE_VISION_PROBE_JPEG_SHA256);
-  assert.equal(projected.requestImageByteSize, 6_139);
+  assert.equal(projected.requestImageByteSize, 14_298);
   assert.equal(projected.requestImageMimeType, "image/jpeg");
 
   const structures = { errorDetails: (caught as ConnectorError).details, attempt, terminal, durable, projected };
@@ -238,8 +244,8 @@ test("failed attempt, terminal JSON, R2 JSON, and public projection preserve rec
 });
 
 test("fixture, output ceilings, retry policy, and accounting limits remain unchanged", async () => {
-  assert.equal(OPENCODE_VISION_PROBE_JPEG_BYTE_LENGTH, 6_139);
-  assert.equal(OPENCODE_VISION_PROBE_JPEG_SHA256, "9134ee7e2592e08a77bfd89d508005a4eb01f6089f4416950b41330daef353cc");
+  assert.equal(OPENCODE_VISION_PROBE_JPEG_BYTE_LENGTH, 14_298);
+  assert.equal(OPENCODE_VISION_PROBE_JPEG_SHA256, "da50bd35fd2266fdef0400dbc52968b44e5e743f5654f6b99f0cecbb68cc228a");
   assert.equal(zenResponsesCapabilityOutputCeiling("text_structured_output"), 128);
   assert.equal(zenResponsesCapabilityOutputCeiling("vision_unstructured"), 1024);
   assert.equal(zenResponsesCapabilityOutputCeiling("vision_structured_output"), 1024);

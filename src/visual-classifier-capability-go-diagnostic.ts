@@ -33,8 +33,8 @@ export const ODL_REQ_024_DIAGNOSTIC_MAX_SPEND_USD = 0.05;
 export const ODL_REQ_024_CAPABILITY_MAX_REQUESTS = 75;
 export const ODL_REQ_024_CAPABILITY_MAX_SPEND_USD = 1;
 const MAX_RESPONSE_BYTES = 64 * 1024;
-const EXPECTED_FIXTURE_WIDTH = 480;
-const EXPECTED_FIXTURE_HEIGHT = 270;
+const EXPECTED_FIXTURE_WIDTH = 640;
+const EXPECTED_FIXTURE_HEIGHT = 360;
 
 export type GoSuccessEnvelopeClass =
   | "openai_message_content_string"

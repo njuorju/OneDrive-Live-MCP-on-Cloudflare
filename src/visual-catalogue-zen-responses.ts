@@ -128,7 +128,7 @@ export function inspectZenResponsesCompletionEnvelope(
     ? body.usage as Record<string, unknown>
     : null;
   const reportedOutputTokens = sanitizedInteger(usage?.output_tokens ?? usage?.completion_tokens);
-  const incomplete = completionStatus === "incomplete" || incompleteReason !== null;
+  const completionKnown = completionStatus !== null;
   let outputTextPresent = false;
   const output = Array.isArray(body.output) ? body.output as Record<string, unknown>[] : [];
   for (const item of output) {
@@ -145,10 +145,10 @@ export function inspectZenResponsesCompletionEnvelope(
     incompleteReason,
     incompleteReasonClass: classifyZenResponsesIncompleteReason(incompleteReason),
     reportedOutputTokens,
-    outputTokensReachedRequestedCeiling: incomplete && requested !== null && reportedOutputTokens !== null
-      ? reportedOutputTokens === requested
+    outputTokensReachedRequestedCeiling: requested !== null && reportedOutputTokens !== null
+      ? reportedOutputTokens >= requested
       : null,
-    partialOutputTextPresent: incomplete ? outputTextPresent : null,
+    partialOutputTextPresent: completionKnown ? outputTextPresent : null,
   };
 }
 
