@@ -22,20 +22,13 @@ jobs:
         with:
           node-version: "22.18.0"
           cache: npm
-      - name: Restore the exact reviewed JPEG fixture bytes
+      - name: Restore exact reviewed JPEG fixture bytes
         shell: bash
         run: |
-          python - <<'PY'
-          from pathlib import Path
-          import base64, re
-          source = Path('src/visual-catalogue-probe-fixture.ts').read_text()
-          match = re.search(r'OPENCODE_VISION_PROBE_JPEG_BASE64 = "([^"]+)";', source)
-          if not match:
-              raise SystemExit('fixture base64 constant was not found')
-          Path('/tmp/odl037-fixture.jpg').write_bytes(base64.b64decode(match.group(1), validate=True))
-          PY
+          cat .github/odl037-fixture/part* | base64 --decode > /tmp/odl037-fixture.jpg
+          test "$(wc -c < /tmp/odl037-fixture.jpg)" = "14298"
+          test "$(sha256sum /tmp/odl037-fixture.jpg | cut -d' ' -f1)" = "da50bd35fd2266fdef0400dbc52968b44e5e743f5654f6b99f0cecbb68cc228a"
           file /tmp/odl037-fixture.jpg
-          sha256sum /tmp/odl037-fixture.jpg
       - name: Extract and apply bounded repair script
         shell: bash
         run: |
@@ -72,6 +65,7 @@ jobs:
           rm .github/workflows/odl-req-037-bootstrap.yml
           rm .github/workflows/odl-req-037-pr-apply.yml
           rm .github/odl-req-037-trigger
+          rm -rf .github/odl037-fixture
           git diff --check
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
